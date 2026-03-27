@@ -1,0 +1,31 @@
+version: '3.9'
+
+services:
+  db:
+    image: postgres:15
+    environment:
+      POSTGRES_DB: workload_db
+      POSTGRES_USER: admin
+      POSTGRES_PASSWORD: password
+    ports:
+      - "5433:5432"
+
+  backend:
+    image: python:3.11
+    working_dir: /app
+    volumes:
+      - ./backend:/app
+    command: bash -c "pip install django djangorestframework psycopg2-binary django-cors-headers && python manage.py runserver 0.0.0.0:8000"
+    ports:
+      - "8000:8000"
+    depends_on:
+      - db
+
+  frontend:
+    image: node:18
+    working_dir: /app
+    volumes:
+      - ./frontend:/app
+    command: npm start
+    ports:
+      - "3000:3000"
