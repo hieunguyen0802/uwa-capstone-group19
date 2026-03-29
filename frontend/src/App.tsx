@@ -1,30 +1,19 @@
-import { useEffect, useState } from "react";
-
-type Staff = {
-  id: number;
-  name: string;
-  role: string;
-  workload: number;
-};
+import { BrowserRouter, Routes, Route } from "react-router-dom";
+import Login from "./pages/Login";
+import Role from "./pages/Role";
+import Academic from "./pages/Academic";
+import Supervisor from "./pages/Supervisor";
 
 function App() {
-  const [staff, setStaff] = useState<Staff[]>([]);
-
-  useEffect(() => {
-    fetch("http://127.0.0.1:8000/api/staff/")
-      .then((res) => res.json())
-      .then((data) => setStaff(data));
-  }, []);
-
   return (
-    <div>
-      <h1>Staff List</h1>
-      {staff.map((s) => (
-        <div key={s.id}>
-          {s.name} - {s.role} - {s.workload}
-        </div>
-      ))}
-    </div>
+    <BrowserRouter>
+      <Routes>
+        <Route path="/" element={<Login />} />
+        <Route path="/role" element={<Role />} />
+        <Route path="/academic" element={<Academic />} />
+        <Route path="/supervisor" element={<Supervisor />} />
+      </Routes>
+    </BrowserRouter>
   );
 }
 

@@ -2,13 +2,21 @@
 venv/
 __pycache__/
 *.pyc
+*.pyo
+*.pyd
+
+# Django
 db.sqlite3
+*.sqlite3
+staticfiles/
+media/
 
 # Node
 node_modules/
 
 # Env
 .env
+.env.*
 
 # macOS
 .DS_Store
@@ -16,13 +24,9 @@ node_modules/
 # Logs
 *.log
 
-# Django
-*.sqlite3
-staticfiles/
-media/
-
 # VSCode
 .vscode/
 
-# Python env
-.env.*
+# Postman
+.postman/
+postman/
