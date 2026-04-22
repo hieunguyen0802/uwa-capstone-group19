@@ -3,12 +3,14 @@ from rest_framework.permissions import IsAuthenticated
 from rest_framework.response import Response
 from django.shortcuts import get_object_or_404
 from django.db import transaction
-from ..models import Workload, Request, Staff
+from ..models import Staff, WorkloadReport, AuditLog
+
+MANAGER_ROLES = {'HOD', 'SCHOOL_OPS', 'HOS'}
 
 
-def _require_supervisor(request):
+def _require_manager(request):
     staff = get_object_or_404(Staff, user=request.user)
-    if staff.role != 'supervisor':
+    if staff.role not in MANAGER_ROLES:
         return Response({"error": "Forbidden"}, status=403)
     return None
 
@@ -16,112 +18,92 @@ def _require_supervisor(request):
 @api_view(['GET'])
 @permission_classes([IsAuthenticated])
 def supervisor_requests(request):
-    """Return all workloads grouped by status: pending, rejected, and history."""
-    forbidden = _require_supervisor(request)
+    """Return all workload reports grouped by status."""
+    forbidden = _require_manager(request)
     if forbidden:
         return forbidden
-    queryset = Workload.objects.select_related('user').order_by('-created_at')
 
-    pending = queryset.filter(status='pending')
-    rejected = queryset.filter(status='rejected')
-    history = queryset.exclude(status='pending')
+    qs = WorkloadReport.objects.filter(is_current=True).select_related('staff__user').order_by('-created_at')
 
-    def serialize(qs):
+    def serialize(reports):
         return [
             {
-                "id": w.id,
-                "username": w.user.username,
-                "unit": w.unit,
-                "hours": w.hours,
-                "is_sent": w.is_sent,
-                "status": w.status,
-                "created_at": w.created_at.strftime("%Y-%m-%d %H:%M") if w.created_at else None
+                "report_id": str(r.report_id),
+                "staff_number": r.staff.staff_number,
+                "academic_year": r.academic_year,
+                "semester": r.semester,
+                "status": r.status,
+                "is_anomaly": r.is_anomaly,
+                "created_at": r.created_at.strftime("%Y-%m-%d %H:%M") if r.created_at else None,
             }
-            for w in qs
+            for r in reports
         ]
 
     return Response({
-        "pending": serialize(pending),
-        "rejected": serialize(rejected),
-        "history": serialize(history),
+        "pending": serialize(qs.filter(status='PENDING')),
+        "approved": serialize(qs.filter(status='APPROVED')),
+        "history": serialize(qs.exclude(status='PENDING')),
     })
 
 
 @api_view(['POST'])
 @permission_classes([IsAuthenticated])
-def create_workload(request):
-    """Create a new workload assignment for an academic staff member."""
-    forbidden = _require_supervisor(request)
-    if forbidden:
-        return forbidden
-    data = request.data
-
-    if not data.get('user_id'):
-        return Response({"message": "user_id required"}, status=400)
-
-    try:
-        workload = Workload.objects.create(
-            user_id=data.get('user_id'),
-            supervisor_id=data.get('supervisor_id'),
-            full_name=data.get('full_name'),
-            unit=data.get('unit'),
-            title=data.get('title'),
-            teaching_ratio=data.get('teaching_ratio'),
-            research_ratio=data.get('research_ratio'),
-            hours=data.get('hours'),
-            semester=data.get('semester'),
-            is_sent=True,
-        )
-        return Response({"message": "Created", "id": workload.id, "is_sent": True})
-    except Exception as e:
-        return Response({"message": "Failed", "error": str(e), "is_sent": False}, status=500)
-
-
-@api_view(['POST'])
-@permission_classes([IsAuthenticated])
+@transaction.atomic
 def approve_request(request, id):
-    """Directly approve a workload by its ID."""
-    forbidden = _require_supervisor(request)
+    """Approve a workload report by its UUID."""
+    forbidden = _require_manager(request)
     if forbidden:
         return forbidden
-    workload = get_object_or_404(Workload, id=id)
-    workload.status = 'approved'
-    workload.save()
+
+    staff = get_object_or_404(Staff, user=request.user)
+    report = get_object_or_404(WorkloadReport, report_id=id, is_current=True)
+
+    report.status = 'APPROVED'
+    report.save()
+
+    AuditLog.objects.create(report=report, action_by=staff, action_type='APPROVE')
     return Response({"message": "Approved"})
 
 
 @api_view(['POST'])
 @permission_classes([IsAuthenticated])
+@transaction.atomic
 def reject_request(request, id):
-    """Directly reject a workload by its ID."""
-    forbidden = _require_supervisor(request)
+    """Reject a workload report by its UUID."""
+    forbidden = _require_manager(request)
     if forbidden:
         return forbidden
-    workload = get_object_or_404(Workload, id=id)
-    workload.status = 'rejected'
-    workload.save()
+
+    staff = get_object_or_404(Staff, user=request.user)
+    report = get_object_or_404(WorkloadReport, report_id=id, is_current=True)
+    comment = request.data.get('comment', '')
+
+    report.status = 'REJECTED'
+    report.save()
+
+    AuditLog.objects.create(report=report, action_by=staff, action_type='REJECT', comment=comment or None)
     return Response({"message": "Rejected"})
 
 
 @api_view(['GET'])
 @permission_classes([IsAuthenticated])
 def get_my_workloads(request):
-    """Return the 10 most recently created workload records (supervisor list view)."""
-    forbidden = _require_supervisor(request)
+    """Return the 20 most recent workload reports."""
+    forbidden = _require_manager(request)
     if forbidden:
         return forbidden
-    workloads = Workload.objects.all().order_by('-id')[:10]
+
+    reports = WorkloadReport.objects.filter(is_current=True).select_related('staff').order_by('-created_at')[:20]
     data = [
         {
-            "id": w.id,
-            "user_id": w.user_id,
-            "full_name": w.full_name,
-            "unit": w.unit,
-            "hours": w.hours,
-            "is_sent": w.is_sent,
-            "created_at": w.created_at.strftime("%Y-%m-%d %H:%M")
+            "report_id": str(r.report_id),
+            "staff_number": r.staff.staff_number,
+            "academic_year": r.academic_year,
+            "semester": r.semester,
+            "status": r.status,
+            "is_anomaly": r.is_anomaly,
         }
-        for w in workloads
+        for r in reports
     ]
     return Response(data)
 
@@ -129,61 +111,24 @@ def get_my_workloads(request):
 @api_view(['GET'])
 @permission_classes([IsAuthenticated])
 def get_pending_requests(request):
-    """Return all Request records that are pending supervisor review."""
-    forbidden = _require_supervisor(request)
+    """Return all PENDING workload reports."""
+    forbidden = _require_manager(request)
     if forbidden:
         return forbidden
-    pending_requests = Request.objects.filter(
-        status='pending'
-    ).select_related('workload', 'workload__user').order_by('-created_at')
+
+    reports = WorkloadReport.objects.filter(
+        status='PENDING', is_current=True
+    ).select_related('staff__user').order_by('-created_at')
 
     data = [
         {
-            "request_id": r.id,
-            "academic_username": r.workload.user.username,
-            "workload_id": r.workload.id,
-            "unit": r.workload.unit,
-            "hours": r.workload.hours,
-            "semester": r.workload.semester,
-            "action": r.action,
-            "comment": r.comment,
-            "created_at": r.created_at.strftime("%Y-%m-%d %H:%M")
+            "report_id": str(r.report_id),
+            "staff_number": r.staff.staff_number,
+            "academic_year": r.academic_year,
+            "semester": r.semester,
+            "is_anomaly": r.is_anomaly,
+            "created_at": r.created_at.strftime("%Y-%m-%d %H:%M"),
         }
-        for r in pending_requests
+        for r in reports
     ]
     return Response(data)
-
-
-@api_view(['POST'])
-@permission_classes([IsAuthenticated])
-@transaction.atomic  # Update both Request and Workload status atomically.
-def action_request(request, request_id):
-    """
-    Supervisor closes a case by approving or rejecting the academic's request.
-
-    Required body fields:
-      - action (str): 'approved' | 'rejected'
-    """
-    forbidden = _require_supervisor(request)
-    if forbidden:
-        return forbidden
-    req = get_object_or_404(Request, id=request_id)
-    action = request.data.get('action')
-
-    if action not in ['approved', 'rejected']:
-        return Response(
-            {"error": "action must be 'approved' or 'rejected'"},
-            status=400
-        )
-
-    # Sync both the Request record and its parent Workload to the same status.
-    req.status = action
-    req.save()
-
-    req.workload.status = action
-    req.workload.save()
-
-    return Response({
-        "message": f"Request {action} by supervisor",
-        "request_id": req.id
-    })

@@ -4,39 +4,41 @@ from rest_framework.response import Response
 from rest_framework import status
 from django.shortcuts import get_object_or_404
 from django.db import transaction
-from api.models import Workload, Request
+from api.models import Staff, WorkloadReport, AuditLog
 
 
 @api_view(['GET'])
 @permission_classes([IsAuthenticated])
 def get_my_workloads(request):
-    """Return the workload list for the currently authenticated academic."""
-    user = request.user
-    workloads = Workload.objects.filter(user=user).values(
-        'id', 'unit', 'title', 'hours', 'semester', 'status', 'created_at'
+    """Return workload reports for the currently authenticated academic."""
+    staff = get_object_or_404(Staff, user=request.user)
+    reports = WorkloadReport.objects.filter(
+        staff=staff, is_current=True
+    ).order_by('-created_at').values(
+        'report_id', 'academic_year', 'semester', 'status', 'is_anomaly', 'created_at'
     )
-    return Response(list(workloads))
+    return Response(list(reports))
 
 
 @api_view(['POST'])
 @permission_classes([IsAuthenticated])
-@transaction.atomic  # Both DB writes succeed or both roll back together.
+@transaction.atomic
 def submit_request(request):
     """
-    Academic submits an approve or reject decision on a workload record.
+    Academic submits an approve or reject decision on a workload report.
 
     Required body fields:
-      - workload_id (int)
-      - action      (str): 'approve' | 'reject'
-      - comment     (str): mandatory when action == 'reject'
+      - report_id (str): UUID of the WorkloadReport
+      - action    (str): 'approve' | 'reject'
+      - comment   (str): mandatory when action == 'reject'
     """
-    workload_id = request.data.get('workload_id')
+    report_id = request.data.get('report_id')
     action = request.data.get('action')
     comment = request.data.get('comment', '')
 
-    if not workload_id or not action:
+    if not report_id or not action:
         return Response(
-            {"error": "workload_id and action are required"},
+            {"error": "report_id and action are required"},
             status=status.HTTP_400_BAD_REQUEST
         )
 
@@ -52,28 +54,27 @@ def submit_request(request):
             status=status.HTTP_400_BAD_REQUEST
         )
 
-    # Filter by user at ORM level to prevent unauthorised access to other users' workloads.
-    workload = get_object_or_404(Workload, id=workload_id, user=request.user)
+    staff = get_object_or_404(Staff, user=request.user)
+    report = get_object_or_404(WorkloadReport, report_id=report_id, staff=staff, is_current=True)
 
-    # Guard against duplicate submissions — only 'pending' workloads can be acted on.
-    if workload.status != 'pending':
+    if report.status != 'PENDING':
         return Response(
-            {"error": f"This workload is already '{workload.status}', cannot submit again"},
+            {"error": f"This report is already '{report.status}', cannot submit again"},
             status=status.HTTP_400_BAD_REQUEST
         )
 
-    # Create the request record and update workload status atomically.
-    req = Request.objects.create(
-        workload=workload,
-        action=action,
-        comment=comment,
-        status='pending'
+    action_type = 'APPROVE' if action == 'approve' else 'REJECT'
+    report.status = 'APPROVED' if action == 'approve' else 'REJECTED'
+    report.save()
+
+    AuditLog.objects.create(
+        report=report,
+        action_by=staff,
+        action_type=action_type,
+        comment=comment or None,
     )
 
-    workload.status = 'approved' if action == 'approve' else 'rejected'
-    workload.save()
-
     return Response({
-        "message": f"Request {action}d successfully",
-        "request_id": req.id
-    }, status=status.HTTP_201_CREATED)
+        "message": f"Report {action}d successfully",
+        "report_id": str(report.report_id)
+    }, status=status.HTTP_200_OK)
