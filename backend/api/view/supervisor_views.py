@@ -3,13 +3,23 @@ from rest_framework.permissions import IsAuthenticated
 from rest_framework.response import Response
 from django.shortcuts import get_object_or_404
 from django.db import transaction
-from ..models import Workload, Request
+from ..models import Workload, Request, Staff
+
+
+def _require_supervisor(request):
+    staff = get_object_or_404(Staff, user=request.user)
+    if staff.role != 'supervisor':
+        return Response({"error": "Forbidden"}, status=403)
+    return None
 
 
 @api_view(['GET'])
 @permission_classes([IsAuthenticated])
 def supervisor_requests(request):
     """Return all workloads grouped by status: pending, rejected, and history."""
+    forbidden = _require_supervisor(request)
+    if forbidden:
+        return forbidden
     queryset = Workload.objects.select_related('user').order_by('-created_at')
 
     pending = queryset.filter(status='pending')
@@ -41,6 +51,9 @@ def supervisor_requests(request):
 @permission_classes([IsAuthenticated])
 def create_workload(request):
     """Create a new workload assignment for an academic staff member."""
+    forbidden = _require_supervisor(request)
+    if forbidden:
+        return forbidden
     data = request.data
 
     if not data.get('user_id'):
@@ -68,6 +81,9 @@ def create_workload(request):
 @permission_classes([IsAuthenticated])
 def approve_request(request, id):
     """Directly approve a workload by its ID."""
+    forbidden = _require_supervisor(request)
+    if forbidden:
+        return forbidden
     workload = get_object_or_404(Workload, id=id)
     workload.status = 'approved'
     workload.save()
@@ -78,6 +94,9 @@ def approve_request(request, id):
 @permission_classes([IsAuthenticated])
 def reject_request(request, id):
     """Directly reject a workload by its ID."""
+    forbidden = _require_supervisor(request)
+    if forbidden:
+        return forbidden
     workload = get_object_or_404(Workload, id=id)
     workload.status = 'rejected'
     workload.save()
@@ -88,6 +107,9 @@ def reject_request(request, id):
 @permission_classes([IsAuthenticated])
 def get_my_workloads(request):
     """Return the 10 most recently created workload records (supervisor list view)."""
+    forbidden = _require_supervisor(request)
+    if forbidden:
+        return forbidden
     workloads = Workload.objects.all().order_by('-id')[:10]
     data = [
         {
@@ -108,6 +130,9 @@ def get_my_workloads(request):
 @permission_classes([IsAuthenticated])
 def get_pending_requests(request):
     """Return all Request records that are pending supervisor review."""
+    forbidden = _require_supervisor(request)
+    if forbidden:
+        return forbidden
     pending_requests = Request.objects.filter(
         status='pending'
     ).select_related('workload', 'workload__user').order_by('-created_at')
@@ -139,6 +164,9 @@ def action_request(request, request_id):
     Required body fields:
       - action (str): 'approved' | 'rejected'
     """
+    forbidden = _require_supervisor(request)
+    if forbidden:
+        return forbidden
     req = get_object_or_404(Request, id=request_id)
     action = request.data.get('action')
 
