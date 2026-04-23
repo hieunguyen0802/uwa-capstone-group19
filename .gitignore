@@ -38,3 +38,8 @@ postman/
 *.xlsm
 *.docx
 image/
+
+# Claude Code skills (local tooling, not business code)
+.agents/
+.claude/skills/
+skills-lock.json
