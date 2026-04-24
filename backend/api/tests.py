@@ -265,3 +265,156 @@ class TestAcademicWorkloadAndQuery(BaseTestCase):
             format='json'
         )
         self.assertEqual(res.status_code, 404)
+
+
+# ─── Test: HOD query approval (#4) ───────────────────────────────────────────
+
+class TestHODQueryApproval(BaseTestCase):
+    """
+    Verifies GET /api/queries/pending/ and POST /api/queries/<id>/approve|reject/.
+
+    setUp creates a COMMENT log on self.report so it appears in the pending list.
+    Tests cover: data isolation, state machine, validation, role boundaries.
+    """
+
+    def setUp(self):
+        super().setUp()
+        # Simulate Academic submitting a query so the report appears in HOD's pending list
+        from api.models import AuditLog
+        AuditLog.objects.create(
+            report=self.report,
+            action_by=self.academic,
+            action_type='COMMENT',
+            comment='I disagree with the teaching hours.',
+        )
+
+    # ── GET /api/queries/pending/ ─────────────────────────────────────────────
+
+    def test_hod_sees_queried_report_in_pending_list(self):
+        # Report has a COMMENT log → must appear in HOD's pending list
+        client = self._auth_client(self.hod_csse)
+        res = client.get('/api/queries/pending/')
+        self.assertEqual(res.status_code, 200)
+        ids = [r['report_id'] for r in res.data]
+        self.assertIn(str(self.report.report_id), ids)
+
+    def test_hod_does_not_see_report_without_query(self):
+        # Create a second report with no COMMENT log — should not appear
+        other_report = WorkloadReport.objects.create(
+            staff=self.academic,
+            academic_year=2025,
+            semester='S2',
+            snapshot_fte=self.academic.fte,
+            snapshot_department=self.dept_csse,
+            status='PENDING',
+        )
+        client = self._auth_client(self.hod_csse)
+        res = client.get('/api/queries/pending/')
+        self.assertEqual(res.status_code, 200)
+        ids = [r['report_id'] for r in res.data]
+        self.assertNotIn(str(other_report.report_id), ids)
+
+    def test_hod_physics_cannot_see_csse_query(self):
+        # Physics HOD's queryset is scoped to dept_physics — CSSE report is invisible
+        client = self._auth_client(self.hod_phys)
+        res = client.get('/api/queries/pending/')
+        self.assertEqual(res.status_code, 200)
+        ids = [r['report_id'] for r in res.data]
+        self.assertNotIn(str(self.report.report_id), ids)
+
+    def test_academic_cannot_access_pending_queries(self):
+        client = self._auth_client(self.academic)
+        res = client.get('/api/queries/pending/')
+        self.assertEqual(res.status_code, 403)
+
+    # ── POST /api/queries/<id>/approve/ ──────────────────────────────────────
+
+    def test_hod_can_approve_query(self):
+        from api.models import AuditLog
+        client = self._auth_client(self.hod_csse)
+        res = client.post(
+            f'/api/queries/{self.report.report_id}/approve/',
+            data={'reason': 'Hours look correct after review.'},
+            format='json',
+        )
+        self.assertEqual(res.status_code, 200)
+        self.report.refresh_from_db()
+        self.assertEqual(self.report.status, 'APPROVED')
+        self.assertTrue(
+            AuditLog.objects.filter(report=self.report, action_type='APPROVE').exists()
+        )
+
+    def test_hod_can_approve_without_reason(self):
+        # reason is optional for approve
+        client = self._auth_client(self.hod_csse)
+        res = client.post(
+            f'/api/queries/{self.report.report_id}/approve/',
+            data={},
+            format='json',
+        )
+        self.assertEqual(res.status_code, 200)
+
+    def test_hod_physics_cannot_approve_csse_query(self):
+        # get_workload_queryset scopes to dept_physics → report not found → 404
+        client = self._auth_client(self.hod_phys)
+        res = client.post(
+            f'/api/queries/{self.report.report_id}/approve/',
+            data={'reason': 'Looks fine.'},
+            format='json',
+        )
+        self.assertEqual(res.status_code, 404)
+
+    def test_cannot_approve_already_approved_query(self):
+        client = self._auth_client(self.hod_csse)
+        client.post(f'/api/queries/{self.report.report_id}/approve/', data={}, format='json')
+        res = client.post(f'/api/queries/{self.report.report_id}/approve/', data={}, format='json')
+        self.assertEqual(res.status_code, 409)
+
+    # ── POST /api/queries/<id>/reject/ ───────────────────────────────────────
+
+    def test_hod_can_reject_query_with_reason(self):
+        from api.models import AuditLog
+        client = self._auth_client(self.hod_csse)
+        res = client.post(
+            f'/api/queries/{self.report.report_id}/reject/',
+            data={'reason': 'Teaching hours are within the agreed allocation.'},
+            format='json',
+        )
+        self.assertEqual(res.status_code, 200)
+        self.report.refresh_from_db()
+        self.assertEqual(self.report.status, 'REJECTED')
+        self.assertTrue(
+            AuditLog.objects.filter(report=self.report, action_type='REJECT').exists()
+        )
+
+    def test_hod_reject_without_reason_returns_422(self):
+        client = self._auth_client(self.hod_csse)
+        res = client.post(
+            f'/api/queries/{self.report.report_id}/reject/',
+            data={},
+            format='json',
+        )
+        self.assertEqual(res.status_code, 422)
+
+    def test_cannot_reject_already_rejected_query(self):
+        client = self._auth_client(self.hod_csse)
+        client.post(
+            f'/api/queries/{self.report.report_id}/reject/',
+            data={'reason': 'First rejection.'},
+            format='json',
+        )
+        res = client.post(
+            f'/api/queries/{self.report.report_id}/reject/',
+            data={'reason': 'Second rejection.'},
+            format='json',
+        )
+        self.assertEqual(res.status_code, 409)
+
+    def test_academic_cannot_call_approve_endpoint(self):
+        client = self._auth_client(self.academic)
+        res = client.post(
+            f'/api/queries/{self.report.report_id}/approve/',
+            data={},
+            format='json',
+        )
+        self.assertEqual(res.status_code, 403)
