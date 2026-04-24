@@ -1,4 +1,10 @@
 import { useEffect, useMemo, useState } from "react";
+import DashboardHeader from "../components/common/DashboardHeader";
+import InfoField from "../components/common/InfoField";
+import PaginationControls from "../components/common/PaginationControls";
+import ProfileModal from "../components/common/ProfileModal";
+import SearchButton from "../components/common/SearchButton";
+import StatusPill from "../components/common/StatusPill";
 import WorkHoursBadge from "../components/common/WorkHoursBadge";
 
 type AcademicItem = {
@@ -9,6 +15,7 @@ type AcademicItem = {
   hours: number;
   status: "pending" | "approved" | "rejected" | "";
   confirmation: "confirmed" | "unconfirmed";
+  supervisorNote?: string;
 };
 
 type BreakdownEntry = {
@@ -37,8 +44,10 @@ type SupervisorDraftRequest = {
 
 const SUPERVISOR_DRAFT_KEY = "academic_to_supervisor_requests_v1";
 const ACADEMIC_STATUS_SYNC_KEY = "academic_status_sync_v1";
+const ACADEMIC_NOTES_SYNC_KEY = "academic_notes_sync_v1";
 const SUPERVISOR_SYNC_EVENT = "supervisor-status-updated";
 const ACADEMIC_DRAFT_EVENT = "academic-drafts-updated";
+const REQUEST_REASON_MAX_LENGTH = 240;
 
 function readAcademicStatusSync(): Record<string, "pending" | "approved" | "rejected"> {
   if (typeof window === "undefined") return {};
@@ -58,16 +67,32 @@ function readAcademicStatusSync(): Record<string, "pending" | "approved" | "reje
   }
 }
 
+function readAcademicNotesSync(): Record<string, string> {
+  if (typeof window === "undefined") return {};
+  try {
+    const storedAcademicNotesJson = window.localStorage.getItem(ACADEMIC_NOTES_SYNC_KEY);
+    if (!storedAcademicNotesJson) return {};
+    const academicNotesMap = JSON.parse(storedAcademicNotesJson);
+    if (!academicNotesMap || typeof academicNotesMap !== "object") return {};
+    return academicNotesMap as Record<string, string>;
+  } catch {
+    return {};
+  }
+}
+
 function applySyncedStatus(
   rows: AcademicItem[],
-  synced: Record<string, "pending" | "approved" | "rejected">
+  synced: Record<string, "pending" | "approved" | "rejected">,
+  noteMap: Record<string, string>
 ) {
   return rows.map((item) => {
     const syncedStatus = synced[item.employeeId];
-    if (!syncedStatus) return item;
+    const syncedNote = noteMap[item.employeeId];
+    if (!syncedStatus && !syncedNote) return item;
     return {
       ...item,
-      status: syncedStatus,
+      status: syncedStatus || item.status,
+      supervisorNote: syncedNote || item.supervisorNote || "",
     };
   });
 }
@@ -76,6 +101,15 @@ function pushedTimeById(id: number) {
   const day = ((id - 1) % 28) + 1;
   const hour = 9 + (id % 8);
   return `2026-03-${String(day).padStart(2, "0")} ${String(hour).padStart(2, "0")}:30`;
+}
+
+function titleById(id: number) {
+  const titles = ["Professor", "Associate Professor", "Senior Lecturer", "Lecturer"];
+  return titles[id % titles.length];
+}
+
+function parseDateTime(value: string) {
+  return new Date(value.replace(" ", "T"));
 }
 
 function breakdownById(id: number): BreakdownData {
@@ -130,13 +164,6 @@ function breakdownById(id: number): BreakdownData {
   return patterns[id % patterns.length];
 }
 
-function statusPillClass(status: AcademicItem["status"]) {
-  if (status === "approved") return "bg-[#dcfce7] text-[#16a34a] ring-1 ring-[#86efac]";
-  if (status === "rejected") return "bg-[#fee2e2] text-[#dc2626] ring-1 ring-[#fca5a5]";
-  if (status === "pending") return "bg-[#fff3d6] text-[#d97706] ring-1 ring-[#fcd34d]";
-  return "bg-slate-100 text-slate-400 ring-1 ring-slate-200";
-}
-
 function statusLabel(status: AcademicItem["status"]) {
   if (status === "approved") return "Approved";
   if (status === "rejected") return "Rejected";
@@ -151,25 +178,6 @@ function confirmationPillClass(confirmation: AcademicItem["confirmation"]) {
 
 function confirmationLabel(confirmation: AcademicItem["confirmation"]) {
   return confirmation === "confirmed" ? "Confirmed" : "Unconfirmed";
-}
-
-function HeaderBar() {
-  return (
-    <div className="flex items-center justify-between rounded-md bg-[#2f4d9c] px-6 py-3">
-      <div className="flex items-center gap-3">
-        <img src="/logo512.png" alt="UWA" className="h-10 w-10 rounded-full bg-white/90 object-contain" />
-        <div className="leading-tight text-white">
-          <div className="text-xs font-semibold tracking-wide opacity-95">THE UNIVERSITY OF</div>
-          <div className="text-xl font-bold leading-none">WESTERN AUSTRALIA</div>
-        </div>
-      </div>
-      <div className="text-center text-2xl font-semibold text-white">Workload Verification</div>
-      <div className="flex items-center gap-3 text-white">
-        <div className="text-right text-sm font-semibold">Hi, Sam</div>
-        <div className="h-11 w-11 rounded-full bg-white/90" />
-      </div>
-    </div>
-  );
 }
 
 function ConfirmationIndicator({ confirmation }: { confirmation: AcademicItem["confirmation"] }) {
@@ -188,15 +196,6 @@ function ConfirmationIndicator({ confirmation }: { confirmation: AcademicItem["c
   );
 }
 
-function InfoField({ label, value }: { label: string; value: string }) {
-  return (
-    <div className="flex flex-col gap-1">
-      <div className="w-fit rounded bg-[#2f4d9c] px-3 py-1 text-xs font-bold text-white">{label}</div>
-      <input readOnly value={value} className="rounded border border-slate-300 px-3 py-2 text-sm" />
-    </div>
-  );
-}
-
 function AcademicDetailModal({
   item,
   onClose,
@@ -208,9 +207,14 @@ function AcademicDetailModal({
 }) {
   const tabs: BreakdownCategory[] = ["Teaching", "Assigned Roles", "HDR", "Service"];
   const [activeTab, setActiveTab] = useState<BreakdownCategory>("Teaching");
+  const [descriptionExpanded, setDescriptionExpanded] = useState(true);
   const breakdown = breakdownById(item.id);
   const tabRows = breakdown[activeTab];
   const tabTotal = tabRows.reduce((sum, row) => sum + row.hours, 0);
+  const overallTotal = (["Teaching", "Assigned Roles", "HDR", "Service"] as BreakdownCategory[]).reduce(
+    (sum, tab) => sum + breakdown[tab].reduce((tabSum, row) => tabSum + row.hours, 0),
+    0
+  );
 
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 p-4" onClick={onClose}>
@@ -230,7 +234,7 @@ function AcademicDetailModal({
           <div className="grid grid-cols-2 gap-4">
             <InfoField label="Name" value={item.name} />
             <InfoField label="Employee ID" value={item.employeeId} />
-            <InfoField label="Total Work Hours" value={String(item.hours)} />
+            <InfoField label="Total Work Hours" value={String(overallTotal)} />
             <InfoField label="Status" value={statusLabel(item.status) || "-"} />
           </div>
           <div>
@@ -275,11 +279,28 @@ function AcademicDetailModal({
             </div>
           </div>
           <div>
-            <div className="text-xs font-semibold uppercase text-slate-500">Description</div>
+            <button
+              type="button"
+              onClick={() => setDescriptionExpanded((v) => !v)}
+              className="flex w-full items-center justify-between rounded border border-slate-300 bg-slate-50 px-3 py-2 text-left text-xs font-semibold uppercase text-slate-500"
+            >
+              <span>Description</span>
+              <span className="text-base leading-none">{descriptionExpanded ? "−" : "+"}</span>
+            </button>
+            {descriptionExpanded && (
+              <textarea
+                readOnly
+                value={item.description}
+                className="mt-1 h-24 w-full resize-none rounded border border-slate-300 px-3 py-2 text-sm"
+              />
+            )}
+          </div>
+          <div>
+            <div className="text-xs font-semibold uppercase text-slate-500">Supervisor Notes</div>
             <textarea
               readOnly
-              value={item.description}
-              className="mt-1 h-24 w-full resize-none rounded border border-slate-300 px-3 py-2 text-sm"
+              value={item.supervisorNote || "- no notes yet -"}
+              className="mt-1 h-20 w-full resize-none rounded border border-slate-300 px-3 py-2 text-sm"
             />
           </div>
           <div className="flex items-center justify-center pt-1">
@@ -302,13 +323,19 @@ function AcademicDetailModal({
 }
 
 export default function Academic() {
+  type ChatMessage = {
+    sender: "Sam" | "Admin";
+    message: string;
+    time: string;
+    date: string;
+  };
+
   const user = {
     surname: "Sam",
     firstName: "Yaka",
     employeeId: "2345678",
     title: "Professor",
     department: "Computer Science",
-    school: "Physics",
   };
 
   const [items, setItems] = useState<AcademicItem[]>(() => {
@@ -531,34 +558,103 @@ export default function Academic() {
     },
     ];
     const synced = readAcademicStatusSync();
-    return applySyncedStatus(base, synced);
+    const syncedNotes = readAcademicNotesSync();
+    return applySyncedStatus(base, synced, syncedNotes);
   });
 
   const [selectedIds, setSelectedIds] = useState<Set<number>>(new Set([1]));
+  const [page, setPage] = useState(1);
+  const pageSize = 10;
   const [filter, setFilter] = useState<"all" | "pending" | "approved" | "rejected">("all");
   const [detailId, setDetailId] = useState<number | null>(null);
   const [requestModalOpen, setRequestModalOpen] = useState(false);
   const [requestReason, setRequestReason] = useState("");
   const [requestReasonError, setRequestReasonError] = useState("");
   const [requestInfo, setRequestInfo] = useState("");
+  const [confirmationFilter, setConfirmationFilter] = useState<"" | "confirmed" | "unconfirmed">("");
+  const [profileOpen, setProfileOpen] = useState(false);
+  const [avatarSrc, setAvatarSrc] = useState<string | null>(null);
+  const [hasNewMessage, setHasNewMessage] = useState(true);
+  const [messagePanelOpen, setMessagePanelOpen] = useState(false);
+  const [chatInput, setChatInput] = useState("");
+  const [chatHistory, setChatHistory] = useState<ChatMessage[]>([
+    { sender: "Sam", message: "Could you review my latest workload draft?", time: "10:03", date: "2026-04-22" },
+    { sender: "Admin", message: "Sure, please ensure all teaching units are listed.", time: "10:11", date: "2026-04-22" },
+    { sender: "Sam", message: "Got it, I will update now.", time: "10:15", date: "2026-04-23" },
+  ]);
+  const [selectedChatDate, setSelectedChatDate] = useState("2026-04-23");
+  const visibleChatHistory = useMemo(
+    () => chatHistory.filter((entry) => entry.date === selectedChatDate),
+    [chatHistory, selectedChatDate]
+  );
+  const currentYear = useMemo(() => new Date().getFullYear(), []);
+  const [searchYearInput, setSearchYearInput] = useState("");
+  const [searchSemesterInput, setSearchSemesterInput] = useState<"" | "S1" | "S2">("");
+  const [searchFilters, setSearchFilters] = useState<{
+    status: "all" | "pending" | "approved" | "rejected";
+    confirmation: "" | "confirmed" | "unconfirmed";
+    year: string;
+    semester: "" | "S1" | "S2";
+  }>({
+    status: "all",
+    confirmation: "",
+    year: "",
+    semester: "",
+  });
+  const selectedYear = Number(searchYearInput) || currentYear;
+  const yearOptions = useMemo(
+    () => Array.from({ length: 11 }, (_, i) => String(selectedYear - 5 + i)),
+    [selectedYear]
+  );
 
   const filteredItems = useMemo(() => {
-    if (filter === "all") return items;
-    return items.filter((x) => x.status === filter);
-  }, [items, filter]);
+    let next = searchFilters.status === "all" ? items : items.filter((x) => x.status === searchFilters.status);
 
-  const pendingCount = useMemo(() => items.filter((x) => x.status === "pending").length, [items]);
+    if (searchFilters.confirmation) {
+      next = next.filter((x) => x.confirmation === searchFilters.confirmation);
+    }
+
+    const selectedYearNumber = Number(searchFilters.year);
+    if (searchFilters.year && Number.isFinite(selectedYearNumber)) {
+      next = next.filter((x) => {
+        const submitted = parseDateTime(pushedTimeById(x.id));
+        if (Number.isNaN(submitted.getTime())) return false;
+
+        if (searchFilters.semester === "S1") {
+          const s1Start = new Date(selectedYearNumber, 0, 1);
+          const s1End = new Date(selectedYearNumber, 6, 1);
+          return submitted >= s1Start && submitted < s1End;
+        }
+
+        if (searchFilters.semester === "S2") {
+          const s2Start = new Date(selectedYearNumber, 6, 1);
+          const s2End = new Date(selectedYearNumber + 1, 0, 1);
+          return submitted >= s2Start && submitted < s2End;
+        }
+
+        return submitted.getFullYear() === selectedYearNumber;
+      });
+    }
+
+    return next;
+  }, [items, searchFilters]);
+  const totalPages = Math.max(1, Math.ceil(filteredItems.length / pageSize));
+  const pageItems = useMemo(() => {
+    const start = (page - 1) * pageSize;
+    return filteredItems.slice(start, start + pageSize);
+  }, [filteredItems, page]);
 
   const detailItem = useMemo(() => items.find((x) => x.id === detailId) || null, [items, detailId]);
 
   useEffect(() => {
     function syncFromSupervisor() {
       const synced = readAcademicStatusSync();
-      setItems((prev) => applySyncedStatus(prev, synced));
+      const syncedNotes = readAcademicNotesSync();
+      setItems((prev) => applySyncedStatus(prev, synced, syncedNotes));
     }
 
     function onStorage(e: StorageEvent) {
-      if (e.key === ACADEMIC_STATUS_SYNC_KEY) syncFromSupervisor();
+      if (e.key === ACADEMIC_STATUS_SYNC_KEY || e.key === ACADEMIC_NOTES_SYNC_KEY) syncFromSupervisor();
     }
 
     window.addEventListener("storage", onStorage);
@@ -628,8 +724,24 @@ export default function Academic() {
       setRequestReasonError("Application reason is required.");
       return;
     }
+    if (trimmed.length > REQUEST_REASON_MAX_LENGTH) {
+      setRequestReasonError(`Application reason must be ${REQUEST_REASON_MAX_LENGTH} characters or less.`);
+      return;
+    }
     submitRequestToSupervisor(trimmed);
     setRequestModalOpen(false);
+  }
+
+  function handleAvatarUpload(event: React.ChangeEvent<HTMLInputElement>) {
+    const file = event.target.files?.[0];
+    if (!file) return;
+    const reader = new FileReader();
+    reader.onload = () => {
+      const result = reader.result;
+      if (typeof result === "string") setAvatarSrc(result);
+    };
+    reader.readAsDataURL(file);
+    event.target.value = "";
   }
 
   function handleConfirmFromDetail(id: number) {
@@ -645,87 +757,177 @@ export default function Academic() {
     );
   }
 
+  function openMessagePanel() {
+    setMessagePanelOpen(true);
+    setHasNewMessage(false);
+  }
+
+  function handleSendMessage() {
+    const trimmed = chatInput.trim();
+    if (!trimmed) return;
+    const now = new Date();
+    const hh = String(now.getHours()).padStart(2, "0");
+    const mm = String(now.getMinutes()).padStart(2, "0");
+    const today = now.toISOString().slice(0, 10);
+    setChatHistory((prev) => [...prev, { sender: "Sam", message: trimmed, time: `${hh}:${mm}`, date: today }]);
+    setSelectedChatDate(today);
+    setChatInput("");
+  }
+
+  function handleSearch() {
+    setSearchFilters({
+      status: filter,
+      confirmation: confirmationFilter,
+      year: searchYearInput,
+      semester: searchSemesterInput,
+    });
+    setPage(1);
+  }
+
   return (
     <div className="min-h-screen bg-[#f3f4f6] font-serif">
       <div className="mx-auto max-w-7xl px-4 pb-10 pt-8">
-        <HeaderBar />
+        <DashboardHeader
+          title="Academic Dashboard"
+          hasNewMessage={hasNewMessage}
+          onMessageClick={openMessagePanel}
+          onAvatarClick={() => setProfileOpen(true)}
+          avatarSrc={avatarSrc}
+        />
+
+        {messagePanelOpen && (
+          <div
+            className="fixed inset-0 z-[70] flex items-center justify-center bg-black/30 p-4"
+            onClick={() => setMessagePanelOpen(false)}
+          >
+            <div
+              className="w-full max-w-3xl rounded-2xl border border-slate-200 bg-slate-50 p-6 shadow-xl"
+              onClick={(e) => e.stopPropagation()}
+            >
+              <div className="mb-4 flex items-center justify-between">
+                <div className="text-3xl font-semibold text-slate-800">Contact Admin</div>
+                <button
+                  type="button"
+                  aria-label="Close"
+                  className="rounded p-1 text-slate-500 hover:bg-slate-200"
+                  onClick={() => setMessagePanelOpen(false)}
+                >
+                  ✕
+                </button>
+              </div>
+
+              <div className="mb-4 rounded-lg border border-slate-200 bg-white p-4">
+                <div className="mb-3 flex items-center gap-3">
+                  <div className="text-sm font-semibold text-slate-700">Chat Record Date</div>
+                  <input
+                    type="date"
+                    value={selectedChatDate}
+                    onChange={(e) => setSelectedChatDate(e.target.value)}
+                    className="rounded border border-slate-300 px-2 py-1 text-sm text-slate-800"
+                  />
+                </div>
+                <div className="max-h-72 space-y-2 overflow-y-auto pr-1 font-mono text-[15px] leading-6 text-slate-800">
+                  {visibleChatHistory.length > 0 ? (
+                    visibleChatHistory.map((entry, idx) => (
+                      <div key={idx}>
+                        <span className="text-slate-500">[{entry.time}]</span>{" "}
+                        <span className="font-semibold">{entry.sender}:</span> {entry.message}
+                      </div>
+                    ))
+                  ) : (
+                    <div className="text-sm text-slate-500">No chat records for this date.</div>
+                  )}
+                </div>
+              </div>
+
+              <div className="flex items-end gap-3">
+                <textarea
+                  value={chatInput}
+                  onChange={(e) => setChatInput(e.target.value)}
+                  placeholder="Write your message..."
+                  className="h-16 flex-1 resize-none rounded-lg border border-slate-300 bg-white px-3 py-2 text-base text-slate-800 outline-none focus:border-[#2f4d9c]"
+                />
+                <button
+                  type="button"
+                  onClick={handleSendMessage}
+                  className="rounded-lg bg-[#2f4d9c] px-5 py-2 text-sm font-semibold text-white hover:bg-[#264183]"
+                >
+                  Send
+                </button>
+              </div>
+            </div>
+          </div>
+        )}
+
+        <ProfileModal
+          open={profileOpen}
+          onClose={() => setProfileOpen(false)}
+          avatarSrc={avatarSrc}
+          onAvatarUpload={handleAvatarUpload}
+          user={user}
+        />
 
         <div className="mt-6 rounded-md bg-white p-8 shadow-sm">
-          <div className="mb-6 text-3xl text-slate-300">Home Page</div>
-
-          <div className="text-center text-3xl font-semibold text-slate-700">User Information</div>
-
-          <div className="mt-6 grid grid-cols-3 gap-10">
-            <div className="space-y-5">
-              <InfoField label="Surname" value={user.surname} />
-              <InfoField label="First name" value={user.firstName} />
+          <div className="mt-2 grid grid-cols-3 gap-6">
+            <div className="flex flex-col gap-1">
+              <div className="w-fit rounded bg-[#2f4d9c] px-3 py-1 text-xs font-bold text-white">Status</div>
+              <select
+                value={filter}
+                onChange={(e) => setFilter(e.target.value as "all" | "pending" | "approved" | "rejected")}
+                className="w-full rounded border border-slate-300 px-3 py-2 text-sm"
+              >
+                <option value="all">All</option>
+                <option value="pending">Pending</option>
+                <option value="approved">Approved</option>
+                <option value="rejected">Rejected</option>
+              </select>
             </div>
-            <div className="space-y-5">
-              <InfoField label="Employee ID" value={user.employeeId} />
-              <InfoField label="Title" value={user.title} />
+            <div className="flex flex-col gap-1">
+              <div className="w-fit rounded bg-[#2f4d9c] px-3 py-1 text-xs font-bold text-white">Confirmation</div>
+              <select
+                value={confirmationFilter}
+                onChange={(e) => setConfirmationFilter(e.target.value as "" | "confirmed" | "unconfirmed")}
+                className="w-full rounded border border-slate-300 px-3 py-2 text-sm"
+              >
+                <option value="">All</option>
+                <option value="confirmed">Yes</option>
+                <option value="unconfirmed">No</option>
+              </select>
             </div>
-            <div className="space-y-5">
-              <InfoField label="Department" value={user.department} />
-              <InfoField label="School" value={user.school} />
+            <div className="flex flex-col gap-1">
+              <div className="w-fit rounded bg-[#2f4d9c] px-3 py-1 text-xs font-bold text-white">Year & Semester</div>
+              <div className="grid grid-cols-2 gap-3">
+                <select
+                  value={searchYearInput}
+                  onChange={(e) => setSearchYearInput(e.target.value)}
+                  className="w-full rounded border border-slate-300 px-3 py-2 text-sm"
+                >
+                  <option value="">Year</option>
+                  {yearOptions.map((year) => (
+                    <option key={year} value={year}>
+                      {year}
+                    </option>
+                  ))}
+                </select>
+                <select
+                  value={searchSemesterInput}
+                  onChange={(e) => setSearchSemesterInput(e.target.value as "" | "S1" | "S2")}
+                  className="w-full rounded border border-slate-300 px-3 py-2 text-sm"
+                >
+                  <option value="">Semester</option>
+                  <option value="S1">S1</option>
+                  <option value="S2">S2</option>
+                </select>
+              </div>
             </div>
+          </div>
+          <div className="mt-4 flex justify-center">
+            <SearchButton onClick={handleSearch} />
           </div>
 
           <div className="mt-10 text-4xl font-semibold text-slate-700">Workload Report Sem 1 - 2025</div>
 
           <div className="mt-6 rounded-md bg-white p-4 ring-1 ring-slate-200">
-            <div className="mb-4 flex flex-wrap items-center justify-start gap-4 rounded-md bg-[#f4f7ff] px-4 py-3">
-              <div className="text-base font-semibold text-[#2f4d9c]">Status Filter:</div>
-              <button
-                type="button"
-                onClick={() => setFilter("all")}
-                className={`rounded-md border px-4 py-2 text-sm font-semibold ${
-                  filter === "all"
-                    ? "border-[#2f4d9c] bg-[#2f4d9c] text-white"
-                    : "border-[#2f4d9c] bg-white text-[#2f4d9c]"
-                }`}
-              >
-                All
-              </button>
-              <button
-                type="button"
-                onClick={() => setFilter("pending")}
-                className={`relative rounded-md border px-4 py-2 text-sm font-semibold ${
-                  filter === "pending"
-                    ? "border-[#d97706] bg-[#d97706] text-white"
-                    : "border-[#2f4d9c] bg-white text-[#2f4d9c]"
-                }`}
-              >
-                Pending
-                {pendingCount > 0 && (
-                  <span className="pointer-events-none absolute -right-2 -top-2 inline-flex h-4 w-4 items-center justify-center rounded-full bg-[#d97706] text-[10px] font-bold leading-none text-white">
-                    !
-                  </span>
-                )}
-              </button>
-              <button
-                type="button"
-                onClick={() => setFilter("approved")}
-                className={`rounded-md border px-4 py-2 text-sm font-semibold ${
-                  filter === "approved"
-                    ? "border-[#16a34a] bg-[#16a34a] text-white"
-                    : "border-[#2f4d9c] bg-white text-[#2f4d9c]"
-                }`}
-              >
-                Approved
-              </button>
-              <button
-                type="button"
-                onClick={() => setFilter("rejected")}
-                className={`rounded-md border px-4 py-2 text-sm font-semibold ${
-                  filter === "rejected"
-                    ? "border-[#dc2626] bg-[#dc2626] text-white"
-                    : "border-[#2f4d9c] bg-white text-[#2f4d9c]"
-                }`}
-              >
-                Rejected
-              </button>
-            </div>
-
             <div className="overflow-x-auto">
               <div className="max-h-[520px] overflow-y-auto">
                 <table className="min-w-full border-separate border-spacing-y-0">
@@ -734,6 +936,7 @@ export default function Academic() {
                     <th className="w-10 px-2 py-2"></th>
                     <th className="w-10 px-2 py-2">#</th>
                     <th className="px-3 py-2">Name</th>
+                    <th className="px-3 py-2 whitespace-nowrap">Title</th>
                     <th className="px-3 py-2">Description</th>
                     <th className="px-3 py-2 text-center">Status</th>
                     <th className="px-3 py-2 text-center whitespace-nowrap min-w-[170px]">Total Work Hours</th>
@@ -742,7 +945,7 @@ export default function Academic() {
                   </tr>
                 </thead>
                 <tbody className="divide-y divide-slate-200 bg-white">
-                  {filteredItems.map((item, idx) => {
+                  {pageItems.map((item, idx) => {
                     const selected = selectedIds.has(item.id);
                     return (
                       <tr
@@ -758,17 +961,18 @@ export default function Academic() {
                             className="h-4 w-4 accent-[#2f4d9c]"
                           />
                         </td>
-                        <td className="px-2 py-3 text-center tabular-nums font-sans text-slate-600">{idx + 1}</td>
+                        <td className="px-2 py-3 text-center tabular-nums font-sans text-slate-600">
+                          {(page - 1) * pageSize + idx + 1}
+                        </td>
                         <td className="px-3 py-3 font-medium text-slate-700">
                           <div>{item.name}</div>
                           <div className="text-xs text-slate-400">{item.employeeId}</div>
                         </td>
+                        <td className="px-3 py-3 text-slate-600 whitespace-nowrap">{titleById(item.id)}</td>
                         <td className="px-3 py-3 text-slate-600">{item.description}</td>
                         <td className="px-3 py-3 text-center">
                           {item.status ? (
-                            <span className={`rounded px-2 py-1 text-xs font-semibold ${statusPillClass(item.status)}`}>
-                              {statusLabel(item.status)}
-                            </span>
+                            <StatusPill status={item.status} variant="academic" />
                           ) : (
                             <span className="text-sm font-semibold text-slate-500">-</span>
                           )}
@@ -789,6 +993,14 @@ export default function Academic() {
                 </table>
               </div>
             </div>
+            <PaginationControls
+              page={page}
+              totalPages={totalPages}
+              onPrev={() => setPage((p) => Math.max(1, p - 1))}
+              onNext={() => setPage((p) => Math.min(totalPages, p + 1))}
+              disablePrev={page <= 1}
+              disableNext={page >= totalPages}
+            />
           </div>
 
           <div className="mt-8 flex items-center justify-center">
@@ -836,9 +1048,11 @@ export default function Academic() {
                   setRequestReason(e.target.value);
                   if (requestReasonError) setRequestReasonError("");
                 }}
+                maxLength={REQUEST_REASON_MAX_LENGTH}
                 placeholder="Please write the reason for this submission."
                 className="h-28 w-full resize-none rounded border border-slate-300 px-3 py-2 text-sm outline-none focus:border-[#2f4d9c]"
               />
+              <div className="text-right text-xs text-slate-500">{requestReason.length}/{REQUEST_REASON_MAX_LENGTH}</div>
               {requestReasonError && <div className="text-sm font-semibold text-[#dc2626]">{requestReasonError}</div>}
               <div className="flex items-center justify-center gap-3 pt-1">
                 <button
