@@ -1,4 +1,5 @@
 import { useEffect, useMemo, useState } from "react";
+import WorkHoursBadge from "../components/common/WorkHoursBadge";
 
 type MockRequest = {
   id: number;
@@ -799,7 +800,7 @@ export default function Supervisor() {
                     <th className="px-3 py-2">NAME</th>
                     <th className="px-3 py-2">DESCRIPTION</th>
                     <th className="px-3 py-2">STATUS</th>
-                    <th className="px-3 py-2 text-right">TOTAL WORK HOURS</th>
+                    <th className="px-3 py-2 text-center">TOTAL WORK HOURS</th>
                     <th className="px-3 py-2 text-right">SUBMITTED TIME</th>
                   </tr>
                 </thead>
@@ -877,8 +878,8 @@ export default function Supervisor() {
                               {statusLabel(item.status)}
                             </span>
                           </td>
-                          <td className="px-3 py-3 text-right tabular-nums font-sans text-slate-700">
-                            {item.hours}
+                          <td className="px-3 py-3 text-center">
+                            <WorkHoursBadge hours={item.hours} />
                           </td>
                           <td className="px-3 py-3 text-right tabular-nums font-sans font-semibold text-slate-800">
                             {submittedTimeById(item.id)}

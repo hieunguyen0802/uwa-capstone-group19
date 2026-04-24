@@ -1,4 +1,5 @@
 import { useEffect, useMemo, useState } from "react";
+import WorkHoursBadge from "../components/common/WorkHoursBadge";
 
 type AcademicItem = {
   id: number;
@@ -41,12 +42,17 @@ const ACADEMIC_DRAFT_EVENT = "academic-drafts-updated";
 
 function readAcademicStatusSync(): Record<string, "pending" | "approved" | "rejected"> {
   if (typeof window === "undefined") return {};
+
   try {
-    const raw = window.localStorage.getItem(ACADEMIC_STATUS_SYNC_KEY);
-    if (!raw) return {};
-    const parsed = JSON.parse(raw);
-    if (!parsed || typeof parsed !== "object") return {};
-    return parsed as Record<string, "pending" | "approved" | "rejected">;
+    const storedAcademicStatusJson = window.localStorage.getItem(ACADEMIC_STATUS_SYNC_KEY);
+
+    if (!storedAcademicStatusJson) return {};
+
+    const academicStatusMap = JSON.parse(storedAcademicStatusJson);
+
+    if (!academicStatusMap || typeof academicStatusMap !== "object") return {};
+
+    return academicStatusMap as Record<string, "pending" | "approved" | "rejected">;
   } catch {
     return {};
   }
@@ -145,14 +151,6 @@ function confirmationPillClass(confirmation: AcademicItem["confirmation"]) {
 
 function confirmationLabel(confirmation: AcademicItem["confirmation"]) {
   return confirmation === "confirmed" ? "Confirmed" : "Unconfirmed";
-}
-
-function WorkHoursBadge({ hours }: { hours: number }) {
-  return (
-    <span className="inline-flex min-w-[54px] items-center justify-center rounded-md bg-[#e0ecff] px-2 py-1 text-sm font-bold tabular-nums font-sans text-[#1e3a8a] ring-1 ring-[#93c5fd]">
-      {hours}
-    </span>
-  );
 }
 
 function HeaderBar() {
@@ -492,6 +490,42 @@ export default function Academic() {
       employeeId: "5684236545",
       description: "Lorem ipsum dolor sit amet, consectetur adipiscing elit. Nulla...",
       hours: 9,
+      status: "",
+      confirmation: "unconfirmed",
+    },
+    {
+      id: 21,
+      name: "Nina Adams",
+      employeeId: "5684236546",
+      description: "Lorem ipsum dolor sit amet, consectetur adipiscing elit. Nulla...",
+      hours: 22,
+      status: "",
+      confirmation: "unconfirmed",
+    },
+    {
+      id: 22,
+      name: "Leo Murphy",
+      employeeId: "5684236547",
+      description: "Lorem ipsum dolor sit amet, consectetur adipiscing elit. Nulla...",
+      hours: 3,
+      status: "",
+      confirmation: "unconfirmed",
+    },
+    {
+      id: 23,
+      name: "Grace Howard",
+      employeeId: "5684236548",
+      description: "Lorem ipsum dolor sit amet, consectetur adipiscing elit. Nulla...",
+      hours: 14,
+      status: "",
+      confirmation: "unconfirmed",
+    },
+    {
+      id: 24,
+      name: "Owen Bailey",
+      employeeId: "5684236549",
+      description: "Lorem ipsum dolor sit amet, consectetur adipiscing elit. Nulla...",
+      hours: 10,
       status: "",
       confirmation: "unconfirmed",
     },
