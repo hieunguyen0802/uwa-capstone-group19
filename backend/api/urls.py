@@ -16,6 +16,11 @@ from api.view.hod_views import (
     approve_query,
     reject_query,
 )
+from api.view.hos_views import (
+    get_hod_summary,
+    hos_approve,
+    hos_reject,
+)
 
 urlpatterns = [
     # Auth
@@ -36,4 +41,9 @@ urlpatterns = [
     path('queries/pending/', get_pending_queries),
     path('queries/<str:id>/approve/', approve_query),
     path('queries/<str:id>/reject/', reject_query),
+
+    # HOS approval of HOD workload (#5)
+    path('workloads/hod-summary/', get_hod_summary),
+    path('workloads/<str:id>/hos-approve/', hos_approve),
+    path('workloads/<str:id>/hos-reject/', hos_reject),
 ]
