@@ -38,9 +38,12 @@ class BaseTestCase(APITestCase):
 
     def _make_staff(self, username, role, department):
         user = User.objects.create_user(username=username, password='testpass')
+        # Use a hash suffix to guarantee uniqueness across all test methods
+        import hashlib
+        staff_number = hashlib.md5(username.encode()).hexdigest()[:8]
         return Staff.objects.create(
             user=user,
-            staff_number=username[:8].ljust(8, '0'),
+            staff_number=staff_number,
             role=role,
             department=department,
         )
@@ -80,12 +83,12 @@ class TestRequireRole(BaseTestCase):
     def test_hod_cannot_access_academic_endpoint(self):
         # HOD calling an ACADEMIC-only endpoint must get 403
         client = self._auth_client(self.hod_csse)
-        res = client.get('/api/academic/my-workloads/')
+        res = client.get('/api/workloads/my/')
         self.assertEqual(res.status_code, 403)
 
     def test_academic_can_access_own_workloads(self):
         client = self._auth_client(self.academic)
-        res = client.get('/api/academic/my-workloads/')
+        res = client.get('/api/workloads/my/')
         self.assertEqual(res.status_code, 200)
 
 
@@ -171,17 +174,94 @@ class TestApprovalStateMachine(BaseTestCase):
         self.assertEqual(self.report.status, 'REJECTED')
 
     def test_academic_cannot_submit_twice(self):
-        # First submission
+        # First query submission
         client = self._auth_client(self.academic)
         client.post(
-            '/api/academic/submit-request/',
-            data={'report_id': str(self.report.report_id), 'action': 'approve'},
+            '/api/queries/',
+            data={'workload_report_id': str(self.report.report_id), 'comment': 'I disagree with this.'},
             format='json'
         )
-        # Second submission on same report — already APPROVED, should fail
+        # Second submission on same report — already has a COMMENT log, should fail
         res = client.post(
-            '/api/academic/submit-request/',
-            data={'report_id': str(self.report.report_id), 'action': 'approve'},
+            '/api/queries/',
+            data={'workload_report_id': str(self.report.report_id), 'comment': 'Trying again.'},
             format='json'
         )
         self.assertEqual(res.status_code, 409)
+
+
+# ─── Test: Academic workload view + query submission (#3) ─────────────────────
+
+class TestAcademicWorkloadAndQuery(BaseTestCase):
+    """
+    Verifies GET /api/workloads/my/ and POST /api/queries/ behaviour.
+    """
+
+    def test_academic_sees_own_report(self):
+        client = self._auth_client(self.academic)
+        res = client.get('/api/workloads/my/')
+        self.assertEqual(res.status_code, 200)
+        ids = [r['report_id'] for r in res.data]
+        self.assertIn(str(self.report.report_id), ids)
+
+    def test_academic_does_not_see_other_report(self):
+        # Create a second academic in the same dept and verify they cannot see each other's reports
+        other = self._make_staff('academic2', 'ACADEMIC', self.dept_csse)
+        client = self._auth_client(other)
+        res = client.get('/api/workloads/my/')
+        self.assertEqual(res.status_code, 200)
+        ids = [r['report_id'] for r in res.data]
+        self.assertNotIn(str(self.report.report_id), ids)
+
+    def test_submit_query_creates_audit_log(self):
+        from api.models import AuditLog
+        client = self._auth_client(self.academic)
+        res = client.post(
+            '/api/queries/',
+            data={'workload_report_id': str(self.report.report_id), 'comment': 'Hours look wrong.'},
+            format='json'
+        )
+        self.assertEqual(res.status_code, 201)
+        self.assertEqual(res.data['report_id'], str(self.report.report_id))
+        self.assertTrue(
+            AuditLog.objects.filter(report=self.report, action_type='COMMENT').exists()
+        )
+
+    def test_submit_query_missing_comment_returns_400(self):
+        client = self._auth_client(self.academic)
+        res = client.post(
+            '/api/queries/',
+            data={'workload_report_id': str(self.report.report_id)},
+            format='json'
+        )
+        self.assertEqual(res.status_code, 400)
+
+    def test_submit_query_missing_report_id_returns_400(self):
+        client = self._auth_client(self.academic)
+        res = client.post(
+            '/api/queries/',
+            data={'comment': 'Something is off.'},
+            format='json'
+        )
+        self.assertEqual(res.status_code, 400)
+
+    def test_hod_cannot_submit_query(self):
+        # POST /api/queries/ is ACADEMIC-only
+        client = self._auth_client(self.hod_csse)
+        res = client.post(
+            '/api/queries/',
+            data={'workload_report_id': str(self.report.report_id), 'comment': 'test'},
+            format='json'
+        )
+        self.assertEqual(res.status_code, 403)
+
+    def test_academic_cannot_query_other_academic_report(self):
+        # Academic2 tries to query Academic1's report — should get 404
+        other = self._make_staff('academic3', 'ACADEMIC', self.dept_csse)
+        client = self._auth_client(other)
+        res = client.post(
+            '/api/queries/',
+            data={'workload_report_id': str(self.report.report_id), 'comment': 'Not mine.'},
+            format='json'
+        )
+        self.assertEqual(res.status_code, 404)

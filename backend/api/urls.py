@@ -8,8 +8,8 @@ from api.view.supervisor_views import (
     get_pending_requests,
 )
 from api.view.academic_views import (
-    get_my_workloads as academic_get_my_workloads,
-    submit_request,
+    get_my_workloads,
+    submit_query,
 )
 
 urlpatterns = [
@@ -24,6 +24,6 @@ urlpatterns = [
     path('supervisor/pending-requests/', get_pending_requests),
 
     # Academic APIs
-    path('academic/my-workloads/', academic_get_my_workloads),
-    path('academic/submit-request/', submit_request),
+    path('workloads/my/', get_my_workloads),
+    path('queries/', submit_query),
 ]
