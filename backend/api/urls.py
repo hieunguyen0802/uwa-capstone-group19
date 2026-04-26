@@ -21,6 +21,7 @@ from api.view.hos_views import (
     hos_approve,
     hos_reject,
 )
+from api.view.ops_views import import_excel
 
 urlpatterns = [
     # Auth
@@ -46,4 +47,7 @@ urlpatterns = [
     path('workloads/hod-summary/', get_hod_summary),
     path('workloads/<str:id>/hos-approve/', hos_approve),
     path('workloads/<str:id>/hos-reject/', hos_reject),
+
+    # SCHOOL_OPS Excel import (#6)
+    path('ops/import/', import_excel),
 ]
