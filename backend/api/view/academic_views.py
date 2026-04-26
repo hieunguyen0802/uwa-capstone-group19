@@ -4,16 +4,17 @@ from rest_framework.response import Response
 from rest_framework import status
 from django.shortcuts import get_object_or_404
 from django.db import transaction
-from api.models import Staff, WorkloadReport, AuditLog
+from api.models import WorkloadReport, AuditLog
+from api.decorators import require_role
 
 
 @api_view(['GET'])
 @permission_classes([IsAuthenticated])
+@require_role('ACADEMIC')
 def get_my_workloads(request):
     """Return workload reports for the currently authenticated academic."""
-    staff = get_object_or_404(Staff, user=request.user)
     reports = WorkloadReport.objects.filter(
-        staff=staff, is_current=True
+        staff=request.staff, is_current=True
     ).order_by('-created_at').values(
         'report_id', 'academic_year', 'semester', 'status', 'is_anomaly', 'created_at'
     )
@@ -22,6 +23,7 @@ def get_my_workloads(request):
 
 @api_view(['POST'])
 @permission_classes([IsAuthenticated])
+@require_role('ACADEMIC')
 @transaction.atomic
 def submit_request(request):
     """
@@ -38,39 +40,38 @@ def submit_request(request):
 
     if not report_id or not action:
         return Response(
-            {"error": "report_id and action are required"},
+            {"code": "VALIDATION_ERROR", "message": "report_id and action are required"},
             status=status.HTTP_400_BAD_REQUEST
         )
 
     if action not in ['approve', 'reject']:
         return Response(
-            {"error": "action must be 'approve' or 'reject'"},
+            {"code": "VALIDATION_ERROR", "message": "action must be 'approve' or 'reject'"},
             status=status.HTTP_400_BAD_REQUEST
         )
 
     if action == 'reject' and not comment:
         return Response(
-            {"error": "comment is required when rejecting"},
+            {"code": "VALIDATION_ERROR", "message": "comment is required when rejecting"},
             status=status.HTTP_400_BAD_REQUEST
         )
 
-    staff = get_object_or_404(Staff, user=request.user)
-    report = get_object_or_404(WorkloadReport, report_id=report_id, staff=staff, is_current=True)
+    # filter by staff=request.staff ensures academic can only act on their own reports
+    report = get_object_or_404(WorkloadReport, report_id=report_id, staff=request.staff, is_current=True)
 
     if report.status != 'PENDING':
         return Response(
-            {"error": f"This report is already '{report.status}', cannot submit again"},
-            status=status.HTTP_400_BAD_REQUEST
+            {"code": "CONFLICT", "message": f"This report is already '{report.status}', cannot submit again"},
+            status=status.HTTP_409_CONFLICT
         )
 
-    action_type = 'APPROVE' if action == 'approve' else 'REJECT'
     report.status = 'APPROVED' if action == 'approve' else 'REJECTED'
     report.save()
 
     AuditLog.objects.create(
         report=report,
-        action_by=staff,
-        action_type=action_type,
+        action_by=request.staff,
+        action_type='APPROVE' if action == 'approve' else 'REJECT',
         comment=comment or None,
     )
 
