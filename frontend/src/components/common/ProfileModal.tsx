@@ -15,9 +15,23 @@ type ProfileModalProps = {
   avatarSrc: string | null;
   onAvatarUpload: (event: ChangeEvent<HTMLInputElement>) => void;
   user: ProfileUser;
+  departmentLabel?: string;
+  titleLabel?: string;
+  titleBeforeDepartment?: boolean;
+  departmentFullWidth?: boolean;
 };
 
-export default function ProfileModal({ open, onClose, avatarSrc, onAvatarUpload, user }: ProfileModalProps) {
+export default function ProfileModal({
+  open,
+  onClose,
+  avatarSrc,
+  onAvatarUpload,
+  user,
+  departmentLabel = "Department",
+  titleLabel = "Title",
+  titleBeforeDepartment = false,
+  departmentFullWidth = false,
+}: ProfileModalProps) {
   if (!open) return null;
 
   return (
@@ -53,8 +67,25 @@ export default function ProfileModal({ open, onClose, avatarSrc, onAvatarUpload,
           <InfoField label="Staff ID" value={user.employeeId} />
           <InfoField label="First name" value={user.firstName} />
           <InfoField label="Last name" value={user.surname} />
-          <InfoField label="Department" value={user.department} />
-          <InfoField label="Title" value={user.title} />
+          {titleBeforeDepartment ? (
+            <>
+              <InfoField label={titleLabel} value={user.title} />
+              <InfoField
+                label={departmentLabel}
+                value={user.department}
+                className={departmentFullWidth ? "col-span-2" : ""}
+              />
+            </>
+          ) : (
+            <>
+              <InfoField
+                label={departmentLabel}
+                value={user.department}
+                className={departmentFullWidth ? "col-span-2" : ""}
+              />
+              <InfoField label={titleLabel} value={user.title} />
+            </>
+          )}
         </div>
       </div>
     </div>
