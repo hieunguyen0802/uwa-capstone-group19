@@ -1,4 +1,5 @@
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
+import WorkHoursBadge from "../components/common/WorkHoursBadge";
 
 type MockRequest = {
   id: number;
@@ -8,6 +9,7 @@ type MockRequest = {
   name: string;
   unit: string;
   description: string;
+  requestReason?: string;
   title: string;
   department: string;
   rate: number;
@@ -15,17 +17,118 @@ type MockRequest = {
   hours: number;
 };
 
-const RATE = 70; // Placeholder until you tell us rate/total calculation rules
+type BreakdownCategory = "Teaching" | "Assigned Roles" | "HDR" | "Service";
+type BreakdownEntry = { name: string; hours: number };
+type BreakdownData = Record<BreakdownCategory, BreakdownEntry[]>;
 
-function formatMoney(amount: number) {
-  return `$${amount.toFixed(2)}`;
+const SUPERVISOR_DRAFT_KEY = "academic_to_supervisor_requests_v1";
+const SUPERVISOR_STATE_KEY = "supervisor_requests_state_v1";
+const ACADEMIC_STATUS_SYNC_KEY = "academic_status_sync_v1";
+const SUPERVISOR_SYNC_EVENT = "supervisor-status-updated";
+const ACADEMIC_DRAFT_EVENT = "academic-drafts-updated";
+
+function submittedTimeById(id: number) {
+  const day = ((id - 1) % 28) + 1;
+  const hour = 8 + (id % 9);
+  return `2026-03-${String(day).padStart(2, "0")} ${String(hour).padStart(2, "0")}:00`;
+}
+
+function readAcademicDrafts(): MockRequest[] {
+  if (typeof window === "undefined") return [];
+  try {
+    const raw = window.localStorage.getItem(SUPERVISOR_DRAFT_KEY);
+    if (!raw) return [];
+    const parsed = JSON.parse(raw);
+    if (!Array.isArray(parsed)) return [];
+    return parsed as MockRequest[];
+  } catch {
+    return [];
+  }
+}
+
+function consumeAcademicDrafts(): MockRequest[] {
+  if (typeof window === "undefined") return [];
+  const drafts = readAcademicDrafts();
+  window.localStorage.removeItem(SUPERVISOR_DRAFT_KEY);
+  return drafts;
+}
+
+function readSupervisorState(): MockRequest[] {
+  if (typeof window === "undefined") return [];
+  try {
+    const raw = window.localStorage.getItem(SUPERVISOR_STATE_KEY);
+    if (!raw) return [];
+    const parsed = JSON.parse(raw);
+    if (!Array.isArray(parsed)) return [];
+    return parsed as MockRequest[];
+  } catch {
+    return [];
+  }
+}
+
+function mergeDraftsIntoRequests(current: MockRequest[], drafts: MockRequest[]) {
+  if (!drafts.length) return current;
+  const existingIds = new Set(current.map((row) => row.id));
+  const incoming = drafts.filter((row) => !existingIds.has(row.id));
+  if (!incoming.length) return current;
+  return [...incoming, ...current];
+}
+
+function breakdownById(id: number): BreakdownData {
+  const patterns: BreakdownData[] = [
+    {
+      Teaching: [
+        { name: "CITS2401", hours: 15 },
+        { name: "CITS2200", hours: 5 },
+      ],
+      "Assigned Roles": [
+        { name: "Program Chair", hours: 20 },
+        { name: "Outreach Chair", hours: 10 },
+      ],
+      HDR: [
+        { name: "Student A", hours: 2 },
+        { name: "Student B", hours: 2 },
+      ],
+      Service: [{ name: "Committee support", hours: 10 }],
+    },
+    {
+      Teaching: [{ name: "CITS3002", hours: 15 }],
+      "Assigned Roles": [{ name: "Industry liaison", hours: 6 }],
+      HDR: [
+        { name: "Student D", hours: 3 },
+        { name: "Student E", hours: 2 },
+      ],
+      Service: [{ name: "Peer review", hours: 4 }],
+    },
+  ];
+  return patterns[id % patterns.length];
+}
+
+function extractRequestReason(description: string) {
+  const marker = "Request reason:";
+  const idx = description.indexOf(marker);
+  if (idx === -1) return "";
+  return description.slice(idx + marker.length).trim();
+}
+
+function cleanDescription(description: string) {
+  const marker = "Request reason:";
+  const idx = description.indexOf(marker);
+  if (idx === -1) return description;
+  return description.slice(0, idx).trim();
 }
 
 export default function Supervisor() {
   const [loading] = useState(false);
   const [pending, setPending] = useState<MockRequest[]>(() => {
-    // Fake data: initial 5 rows (you'll replace later with real API fields)
-    return [
+    const saved = readSupervisorState();
+    if (saved.length > 0) {
+      const drafts = consumeAcademicDrafts();
+      return mergeDraftsIntoRequests(saved, drafts);
+    }
+
+    // Fake data (plus requests submitted from Academic page via localStorage)
+    const base: MockRequest[] = [
       {
         id: 1,
         studentId: "2345678",
@@ -222,7 +325,47 @@ export default function Supervisor() {
         hours: 8,
       },
     ];
+    const drafts = consumeAcademicDrafts();
+    return [...drafts, ...base];
   });
+
+  useEffect(() => {
+    function mergeLatestDrafts() {
+      const drafts = consumeAcademicDrafts();
+      if (!drafts.length) return;
+      setPending((prev) => mergeDraftsIntoRequests(prev, drafts));
+    }
+
+    function onStorage(e: StorageEvent) {
+      if (e.key === SUPERVISOR_DRAFT_KEY) mergeLatestDrafts();
+    }
+
+    function onDraftEvent() {
+      mergeLatestDrafts();
+    }
+
+    window.addEventListener("storage", onStorage);
+    window.addEventListener(ACADEMIC_DRAFT_EVENT, onDraftEvent as EventListener);
+    return () => {
+      window.removeEventListener("storage", onStorage);
+      window.removeEventListener(ACADEMIC_DRAFT_EVENT, onDraftEvent as EventListener);
+    };
+  }, []);
+
+  useEffect(() => {
+    if (typeof window === "undefined") return;
+    window.localStorage.setItem(SUPERVISOR_STATE_KEY, JSON.stringify(pending));
+  }, [pending]);
+
+  useEffect(() => {
+    if (typeof window === "undefined") return;
+    const sync: Record<string, "pending" | "approved" | "rejected"> = {};
+    pending.forEach((row) => {
+      if (row.studentId) sync[row.studentId] = row.status;
+    });
+    window.localStorage.setItem(ACADEMIC_STATUS_SYNC_KEY, JSON.stringify(sync));
+    window.dispatchEvent(new Event(SUPERVISOR_SYNC_EVENT));
+  }, [pending]);
   const [selectedIds, setSelectedIds] = useState<Set<number>>(new Set());
   const [page, setPage] = useState(1);
   const pageSize = 10; // Items per page
@@ -246,6 +389,8 @@ export default function Supervisor() {
 
   const [detailsOpen, setDetailsOpen] = useState(false);
   const [detailsItem, setDetailsItem] = useState<MockRequest | null>(null);
+  const [detailsTab, setDetailsTab] = useState<BreakdownCategory>("Teaching");
+  const [descriptionExpanded, setDescriptionExpanded] = useState(false);
 
   const userInfo = useMemo(
     () => ({
@@ -285,8 +430,8 @@ export default function Supervisor() {
   }
 
   function statusLabel(status: string) {
-    if (status === "pending") return "Open";
-    if (status === "approved") return "Paid";
+    if (status === "pending") return "Pending";
+    if (status === "approved") return "Approved";
     if (status === "rejected") return "Rejected";
     return status;
   }
@@ -655,9 +800,8 @@ export default function Supervisor() {
                     <th className="px-3 py-2">NAME</th>
                     <th className="px-3 py-2">DESCRIPTION</th>
                     <th className="px-3 py-2">STATUS</th>
-                    <th className="px-3 py-2 text-right">RATE</th>
-                    <th className="px-3 py-2 text-right">HOUR</th>
-                    <th className="px-3 py-2 text-right">TOTAL</th>
+                    <th className="px-3 py-2 text-center">TOTAL WORK HOURS</th>
+                    <th className="px-3 py-2 text-right">SUBMITTED TIME</th>
                   </tr>
                 </thead>
                 <tbody className="divide-y divide-slate-200 bg-white">
@@ -683,7 +827,6 @@ export default function Supervisor() {
                     pageItems.map((item, idx) => {
                       const isSelected = selectedIds.has(item.id);
                       const rowIndex = (page - 1) * pageSize + idx + 1;
-                      const total = RATE * Number(item.hours || 0);
                       return (
                         <tr
                           key={item.id}
@@ -693,6 +836,7 @@ export default function Supervisor() {
                           onClick={() => {
                             setDetailsItem(item);
                             setDetailsOpen(true);
+                            setDescriptionExpanded(false);
                           }}
                         >
                           <td className="px-2 py-3">
@@ -734,14 +878,11 @@ export default function Supervisor() {
                               {statusLabel(item.status)}
                             </span>
                           </td>
-                          <td className="px-3 py-3 text-right tabular-nums font-sans text-slate-700">
-                            {formatMoney(RATE)}
-                          </td>
-                          <td className="px-3 py-3 text-right tabular-nums font-sans text-slate-700">
-                            {item.hours}
+                          <td className="px-3 py-3 text-center">
+                            <WorkHoursBadge hours={item.hours} />
                           </td>
                           <td className="px-3 py-3 text-right tabular-nums font-sans font-semibold text-slate-800">
-                            {formatMoney(total)}
+                            {submittedTimeById(item.id)}
                           </td>
                         </tr>
                       );
@@ -819,11 +960,23 @@ export default function Supervisor() {
                           {detailsItem.periodLabel}
                         </div>
                       </div>
-                      <div className="flex items-center gap-2 text-sm font-semibold text-slate-800">
-                        <div className="flex h-8 w-8 items-center justify-center rounded-full bg-white ring-1 ring-black">
-                          ☁
+                      <div className="flex items-center gap-3 text-sm font-semibold text-slate-800">
+                        <div className="flex items-center gap-2">
+                          <div className="flex h-8 w-8 items-center justify-center rounded-full bg-white ring-1 ring-black">
+                            ☁
+                          </div>
+                          <span className="text-base">{statusLabel(detailsItem.status)}</span>
                         </div>
-                        <span className="text-base">{statusLabel(detailsItem.status)}</span>
+                        <button
+                          type="button"
+                          onClick={() => {
+                            setDetailsOpen(false);
+                            setDetailsItem(null);
+                          }}
+                          className="rounded bg-slate-200 px-3 py-1 text-xs font-bold text-slate-700 hover:bg-slate-300"
+                        >
+                          Close
+                        </button>
                       </div>
                     </div>
 
@@ -846,17 +999,6 @@ export default function Supervisor() {
 
                         <div className="flex items-center gap-3">
                           <div className="w-32 rounded-sm bg-[#2f4d9c] px-3 py-2 text-center text-base font-semibold text-white">
-                            Unit
-                          </div>
-                          <input
-                            readOnly
-                            value={detailsItem.unit}
-                            className="w-full flex-1 rounded-sm border border-[#2f4d9c] px-3 py-2 text-base"
-                          />
-                        </div>
-
-                        <div className="flex items-center gap-3">
-                          <div className="w-32 rounded-sm bg-[#2f4d9c] px-3 py-2 text-center text-base font-semibold text-white">
                             Title
                           </div>
                           <input
@@ -868,7 +1010,7 @@ export default function Supervisor() {
 
                         <div className="flex items-center gap-3">
                           <div className="w-32 rounded-sm bg-[#2f4d9c] px-3 py-2 text-center text-base font-semibold text-white">
-                            Hour
+                            Total Work Hours
                           </div>
                           <input
                             readOnly
@@ -888,28 +1030,80 @@ export default function Supervisor() {
                           />
                         </div>
 
-                        <div className="flex items-center gap-3">
-                          <div className="w-32 rounded-sm bg-[#2f4d9c] px-3 py-2 text-center text-base font-semibold text-white">
-                            Rate
+                      </div>
+
+                      <div>
+                        <div className="text-sm font-semibold uppercase text-slate-700">Workload Breakdown</div>
+                        <div className="mt-2 overflow-hidden rounded-sm border border-slate-300">
+                          <div className="flex flex-wrap gap-2 border-b border-slate-200 bg-slate-50 px-3 py-2">
+                            {(["Teaching", "Assigned Roles", "HDR", "Service"] as BreakdownCategory[]).map((tab) => (
+                              <button
+                                key={tab}
+                                type="button"
+                                onClick={() => setDetailsTab(tab)}
+                                className={`rounded px-3 py-1 text-xs font-semibold ${
+                                  detailsTab === tab
+                                    ? "bg-[#2f4d9c] text-white"
+                                    : "bg-white text-slate-700 ring-1 ring-slate-300 hover:bg-slate-100"
+                                }`}
+                              >
+                                {tab}
+                              </button>
+                            ))}
                           </div>
-                          <input
-                            readOnly
-                            value={`$${detailsItem.rate}`}
-                            className="w-full flex-1 rounded-sm border border-[#2f4d9c] px-3 py-2 text-base tabular-nums font-sans"
-                          />
+                          <table className="min-w-full">
+                            <thead className="bg-white">
+                              <tr className="text-left text-xs font-semibold uppercase text-slate-600">
+                                <th className="px-3 py-2">{detailsTab}</th>
+                                <th className="px-3 py-2 text-right">Hours</th>
+                              </tr>
+                            </thead>
+                            <tbody className="divide-y divide-slate-200 bg-white text-sm text-slate-700">
+                              {breakdownById(detailsItem.id)[detailsTab].map((row, idx) => (
+                                <tr key={`${detailsItem.id}-${detailsTab}-${idx}`}>
+                                  <td className="px-3 py-2">{row.name}</td>
+                                  <td className="px-3 py-2 text-right tabular-nums font-sans">{row.hours}</td>
+                                </tr>
+                              ))}
+                              <tr className="bg-slate-50">
+                                <td className="px-3 py-2 font-semibold">Total</td>
+                                <td className="px-3 py-2 text-right font-semibold tabular-nums font-sans">
+                                  {breakdownById(detailsItem.id)[detailsTab].reduce((sum, row) => sum + row.hours, 0)}
+                                </td>
+                              </tr>
+                            </tbody>
+                          </table>
                         </div>
                       </div>
 
                       <div>
-                        <div className="text-sm font-semibold text-slate-700">
-                          Reasons to cancel
-                        </div>
+                        <button
+                          type="button"
+                          onClick={() => setDescriptionExpanded((v) => !v)}
+                          className="flex w-full items-center justify-between rounded-sm border border-slate-300 bg-slate-50 px-3 py-2 text-left text-sm font-semibold uppercase text-slate-700"
+                        >
+                          <span>Description</span>
+                          <span className="text-base leading-none">{descriptionExpanded ? "−" : "+"}</span>
+                        </button>
+                        {descriptionExpanded && (
+                          <textarea
+                            readOnly
+                            value={cleanDescription(detailsItem.description)}
+                            className="mt-2 h-28 w-full resize-none rounded-sm border border-slate-300 bg-white px-4 py-3 text-sm text-slate-700"
+                          />
+                        )}
+                      </div>
+
+                      <div>
+                        <div className="text-sm font-semibold text-slate-700">Application Reason</div>
                         <textarea
                           readOnly
                           value={
-                            "- incorrect hours\n- wrong rates\n- wrong name / unit / description"
+                            detailsItem.requestReason ||
+                            extractRequestReason(detailsItem.description) ||
+                            "- no reason provided -"
                           }
-                          className="mt-2 h-28 w-full resize-none rounded-sm border border-slate-400 bg-white px-4 py-3 font-mono text-sm text-slate-700"
+                          className="mt-2 h-24 w-full resize-none rounded-sm border border-slate-300 bg-white px-4 py-3 text-sm text-slate-700"
                         />
                       </div>
 
