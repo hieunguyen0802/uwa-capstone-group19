@@ -34,16 +34,13 @@ def _serialize_query(report):
 def get_pending_queries(request):
     """
     GET /api/queries/pending/
-    Returns PENDING reports where the Academic has submitted a query (COMMENT log exists).
+    Returns all PENDING reports scoped to the caller's role.
     HOD sees only their department; HOS and SCHOOL_OPS see all.
+    Academic's query comment (if any) is included as context — it is NOT a filter condition.
     """
-    queried_report_ids = AuditLog.objects.filter(
-        action_type='COMMENT'
-    ).values_list('report_id', flat=True)
-
     qs = (
         get_workload_queryset(request.staff)
-        .filter(status='PENDING', report_id__in=queried_report_ids)
+        .filter(status='PENDING')
         .select_related('staff')
         .order_by('-created_at')
     )
