@@ -4,6 +4,7 @@ import Role from "./pages/Role";
 import Academic from "./pages/Academic";
 import Supervisor from "./pages/Supervisor";
 import Admin from "./pages/Admin";
+import HeadofSchool from "./pages/HeadofSchool";
 
 function App() {
   return (
@@ -14,6 +15,7 @@ function App() {
         <Route path="/academic" element={<Academic />} />
         <Route path="/supervisor" element={<Supervisor />} />
         <Route path="/admin" element={<Admin />} />
+        <Route path="/headofschool" element={<HeadofSchool />} />
       </Routes>
     </BrowserRouter>
   );
