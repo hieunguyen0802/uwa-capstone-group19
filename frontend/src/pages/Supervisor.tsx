@@ -1,4 +1,9 @@
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useState, type ChangeEvent } from "react";
+import DashboardHeader from "../components/common/DashboardHeader";
+import PaginationControls from "../components/common/PaginationControls";
+import ProfileModal from "../components/common/ProfileModal";
+import SearchButton from "../components/common/SearchButton";
+import StatusPill from "../components/common/StatusPill";
 import WorkHoursBadge from "../components/common/WorkHoursBadge";
 
 type MockRequest = {
@@ -15,6 +20,7 @@ type MockRequest = {
   rate: number;
   status: "pending" | "approved" | "rejected";
   hours: number;
+  supervisorNote?: string;
 };
 
 type BreakdownCategory = "Teaching" | "Assigned Roles" | "HDR" | "Service";
@@ -24,6 +30,7 @@ type BreakdownData = Record<BreakdownCategory, BreakdownEntry[]>;
 const SUPERVISOR_DRAFT_KEY = "academic_to_supervisor_requests_v1";
 const SUPERVISOR_STATE_KEY = "supervisor_requests_state_v1";
 const ACADEMIC_STATUS_SYNC_KEY = "academic_status_sync_v1";
+const ACADEMIC_NOTES_SYNC_KEY = "academic_notes_sync_v1";
 const SUPERVISOR_SYNC_EVENT = "supervisor-status-updated";
 const ACADEMIC_DRAFT_EVENT = "academic-drafts-updated";
 
@@ -119,6 +126,41 @@ function cleanDescription(description: string) {
 }
 
 export default function Supervisor() {
+  type ChatMessage = {
+    sender: "Sam" | "Admin";
+    message: string;
+    time: string;
+    date: string;
+  };
+
+  const user = {
+    surname: "Sam",
+    firstName: "Yaka",
+    employeeId: "2345678",
+    title: "Professor",
+    department: "Computer Science",
+  };
+
+  const [hasNewMessage, setHasNewMessage] = useState(true);
+  const [messagePanelOpen, setMessagePanelOpen] = useState(false);
+  const [profileOpen, setProfileOpen] = useState(false);
+  const [avatarSrc, setAvatarSrc] = useState<string | null>(null);
+  const [chatInput, setChatInput] = useState("");
+  const [chatHistory, setChatHistory] = useState<ChatMessage[]>([
+    { sender: "Sam", message: "I have a question about workload item #11.", time: "09:10", date: "2026-04-22" },
+    { sender: "Admin", message: "Please check the teaching hours again.", time: "09:16", date: "2026-04-22" },
+    { sender: "Sam", message: "Thank you, I will update it.", time: "09:18", date: "2026-04-23" },
+  ]);
+  const [selectedChatDate, setSelectedChatDate] = useState("2026-04-23");
+  const [calendarOpen, setCalendarOpen] = useState(false);
+  const [calendarMonth, setCalendarMonth] = useState("2026-04");
+  const availableChatDates = useMemo(() => new Set(chatHistory.map((entry) => entry.date)), [chatHistory]);
+  const visibleChatHistory = useMemo(
+    () => chatHistory.filter((entry) => entry.date === selectedChatDate),
+    [chatHistory, selectedChatDate]
+  );
+  const currentYear = useMemo(() => new Date().getFullYear(), []);
+
   const [loading] = useState(false);
   const [pending, setPending] = useState<MockRequest[]>(() => {
     const saved = readSupervisorState();
@@ -360,10 +402,13 @@ export default function Supervisor() {
   useEffect(() => {
     if (typeof window === "undefined") return;
     const sync: Record<string, "pending" | "approved" | "rejected"> = {};
+    const notesSync: Record<string, string> = {};
     pending.forEach((row) => {
       if (row.studentId) sync[row.studentId] = row.status;
+      if (row.studentId && row.supervisorNote) notesSync[row.studentId] = row.supervisorNote;
     });
     window.localStorage.setItem(ACADEMIC_STATUS_SYNC_KEY, JSON.stringify(sync));
+    window.localStorage.setItem(ACADEMIC_NOTES_SYNC_KEY, JSON.stringify(notesSync));
     window.dispatchEvent(new Event(SUPERVISOR_SYNC_EVENT));
   }, [pending]);
   const [selectedIds, setSelectedIds] = useState<Set<number>>(new Set());
@@ -389,19 +434,33 @@ export default function Supervisor() {
 
   const [detailsOpen, setDetailsOpen] = useState(false);
   const [detailsItem, setDetailsItem] = useState<MockRequest | null>(null);
+  const [detailsBreakdown, setDetailsBreakdown] = useState<BreakdownData | null>(null);
   const [detailsTab, setDetailsTab] = useState<BreakdownCategory>("Teaching");
   const [descriptionExpanded, setDescriptionExpanded] = useState(false);
+  const [noteModalOpen, setNoteModalOpen] = useState(false);
+  const [noteDraft, setNoteDraft] = useState("");
+  const [noteError, setNoteError] = useState("");
+  const [noteDecision, setNoteDecision] = useState<"approve" | "reject">("approve");
+  const [noteTargetId, setNoteTargetId] = useState<number | null>(null);
 
-  const userInfo = useMemo(
-    () => ({
-      surname: "Sam",
-      firstName: "Yaka",
-      employeeId: "2345678",
-      department: "Computer Science",
-      school: "Physics",
-      title: "Professor",
-    }),
-    []
+  const [searchEmployeeIdInput, setSearchEmployeeIdInput] = useState("");
+  const [searchLastNameInput, setSearchLastNameInput] = useState("");
+  const [searchFirstNameInput, setSearchFirstNameInput] = useState("");
+  const [searchTitleInput, setSearchTitleInput] = useState("");
+  const [searchYearInput, setSearchYearInput] = useState("");
+  const [searchSemesterInput, setSearchSemesterInput] = useState<"" | "S1" | "S2">("");
+  const [searchFilters, setSearchFilters] = useState({
+    employeeId: "",
+    lastName: "",
+    firstName: "",
+    title: "",
+    year: "",
+    semester: "",
+  });
+  const selectedYear = Number(searchYearInput) || currentYear;
+  const yearOptions = useMemo(
+    () => Array.from({ length: 11 }, (_, i) => String(selectedYear - 5 + i)),
+    [selectedYear]
   );
 
   const pendingCount = useMemo(
@@ -410,9 +469,63 @@ export default function Supervisor() {
   );
 
   const itemsForFilter = useMemo(() => {
-    if (statusFilter === "all") return pending;
-    return pending.filter((it) => it.status === statusFilter);
-  }, [pending, statusFilter]);
+    const byStatus =
+      statusFilter === "all"
+        ? pending
+        : pending.filter((it) => it.status === statusFilter);
+
+    const hasSearchFilter = Object.values(searchFilters).some((value) => value);
+    if (!hasSearchFilter) return byStatus;
+
+    return byStatus.filter((it) => {
+      const fullName = it.name.toLowerCase();
+      const nameParts = it.name.trim().toLowerCase().split(/\s+/);
+      const firstName = nameParts[0] || "";
+      const lastName = nameParts[nameParts.length - 1] || "";
+
+      if (
+        searchFilters.employeeId &&
+        !it.studentId.toLowerCase().includes(searchFilters.employeeId)
+      ) {
+        return false;
+      }
+
+      if (searchFilters.firstName && !firstName.includes(searchFilters.firstName)) {
+        return false;
+      }
+
+      if (searchFilters.lastName && !lastName.includes(searchFilters.lastName)) {
+        return false;
+      }
+
+      if (searchFilters.title && !it.title.toLowerCase().includes(searchFilters.title)) {
+        return false;
+      }
+
+      const submittedText = submittedTimeById(it.id);
+      const submittedDate = new Date(submittedText.replace(" ", "T"));
+      const hasValidSubmittedDate = !Number.isNaN(submittedDate.getTime());
+      const selectedYear = Number(searchFilters.year);
+
+      if (searchFilters.year && Number.isFinite(selectedYear) && hasValidSubmittedDate) {
+        if (searchFilters.semester === "s1") {
+          // S1: [YYYY-01-01, YYYY-07-01)
+          const s1Start = new Date(selectedYear, 0, 1);
+          const s1End = new Date(selectedYear, 6, 1);
+          if (!(submittedDate >= s1Start && submittedDate < s1End)) return false;
+        } else if (searchFilters.semester === "s2") {
+          // S2: [YYYY-07-01, YYYY+1-01-01)
+          const s2Start = new Date(selectedYear, 6, 1);
+          const s2End = new Date(selectedYear + 1, 0, 1);
+          if (!(submittedDate >= s2Start && submittedDate < s2End)) return false;
+        } else if (submittedDate.getFullYear() !== selectedYear) {
+          return false;
+        }
+      }
+
+      return fullName.length > 0;
+    });
+  }, [pending, statusFilter, searchFilters]);
 
   const totalPages = Math.max(1, Math.ceil(itemsForFilter.length / pageSize));
   const pageItems = useMemo(() => {
@@ -434,14 +547,6 @@ export default function Supervisor() {
     if (status === "approved") return "Approved";
     if (status === "rejected") return "Rejected";
     return status;
-  }
-
-  function statusPillClass(status: MockRequest["status"]) {
-    if (status === "pending")
-      return "bg-[#fff3d6] text-[#d97706] ring-1 ring-[#fef08a]";
-    if (status === "approved")
-      return "bg-[#dcfce7] text-[#16a34a] ring-1 ring-[#86efac]";
-    return "bg-[#fee2e2] text-[#dc2626] ring-1 ring-[#fca5a5]";
   }
 
   const canSubmit =
@@ -479,13 +584,17 @@ export default function Supervisor() {
     });
   }
 
-  async function handleDecisionForId(kind: "approve" | "reject", id: number) {
+  async function handleDecisionForId(kind: "approve" | "reject", id: number, note: string) {
     setSubmitting(true);
     try {
       const nextStatus: MockRequest["status"] =
         kind === "approve" ? "approved" : "rejected";
       setPending((prev) =>
-        prev.map((it) => (it.id === id ? { ...it, status: nextStatus } : it))
+        prev.map((it) =>
+          it.id === id
+            ? { ...it, status: nextStatus, supervisorNote: note.trim() }
+            : it
+        )
       );
       // Clear selection if it contains the same row.
       setSelectedIds((prev) => {
@@ -508,62 +617,292 @@ export default function Supervisor() {
     });
   }
 
-  async function handleWithdrawForId(id: number) {
-    setSubmitting(true);
-    try {
-      setPending((prev) =>
-        prev.map((it) => (it.id === id ? { ...it, status: "pending" } : it))
-      );
-    } finally {
-      setSubmitting(false);
-    }
+  function openNoteModal(kind: "approve" | "reject", id: number) {
+    setNoteDecision(kind);
+    setNoteTargetId(id);
+    setNoteDraft("");
+    setNoteError("");
+    setNoteModalOpen(true);
+  }
 
-    setStatusFilter("pending");
-    setSelectedIds(new Set());
+  async function handleFinishNote() {
+    const trimmed = noteDraft.trim();
+    if (!trimmed) {
+      setNoteError("Supervisor note is required.");
+      return;
+    }
+    if (trimmed.length > 240) {
+      setNoteError("Supervisor note must be 240 characters or less.");
+      return;
+    }
+    if (noteTargetId === null) return;
+    await handleDecisionForId(noteDecision, noteTargetId, trimmed);
+    setNoteModalOpen(false);
+    closeDetails();
+  }
+
+  function handleSearch() {
+    setSearchFilters({
+      employeeId: searchEmployeeIdInput.trim().toLowerCase(),
+      lastName: searchLastNameInput.trim().toLowerCase(),
+      firstName: searchFirstNameInput.trim().toLowerCase(),
+      title: searchTitleInput.trim().toLowerCase(),
+      year: searchYearInput.trim().toLowerCase(),
+      semester: searchSemesterInput.trim().toLowerCase(),
+    });
     setPage(1);
+    setSelectedIds(new Set());
     setDetailsOpen(false);
     setDetailsItem(null);
-    setPopup({
-      open: true,
-      title: "Withdrawn",
-      message:
-        "This request has been moved back to Pending. Please review it in the Pending list.",
-      status: "pending",
+    setDetailsBreakdown(null);
+  }
+
+  function openDetails(item: MockRequest) {
+    setDetailsItem(item);
+    setDetailsBreakdown(breakdownById(item.id));
+    setDetailsOpen(true);
+    setDescriptionExpanded(false);
+  }
+
+  function closeDetails() {
+    setDetailsOpen(false);
+    setDetailsItem(null);
+    setDetailsBreakdown(null);
+    setNoteModalOpen(false);
+    setNoteDraft("");
+    setNoteError("");
+    setNoteTargetId(null);
+  }
+
+  function updateBreakdownRow(tab: BreakdownCategory, idx: number, field: "name" | "hours", value: string) {
+    setDetailsBreakdown((prev) => {
+      if (!prev) return prev;
+      const nextRows = prev[tab].map((row, rowIdx) => {
+        if (rowIdx !== idx) return row;
+        if (field === "name") return { ...row, name: value };
+        const parsedHours = Number.parseFloat(value);
+        const normalizedHours = Number.isFinite(parsedHours) ? parsedHours : 0;
+        return { ...row, hours: normalizedHours };
+      });
+      return { ...prev, [tab]: nextRows };
     });
+  }
+
+  function handleYearWheel(event: React.WheelEvent<HTMLSelectElement>) {
+    event.preventDefault();
+    const delta = event.deltaY > 0 ? 1 : -1;
+    const nextYear = (Number(searchYearInput) || currentYear) + delta;
+    setSearchYearInput(String(nextYear));
+  }
+
+  function handleSearchKeyDown(event: React.KeyboardEvent<HTMLInputElement | HTMLSelectElement>) {
+    if (event.key === "Enter") {
+      event.preventDefault();
+      handleSearch();
+    }
+  }
+
+  function openMessagePanel() {
+    setMessagePanelOpen(true);
+    setHasNewMessage(false);
+  }
+
+  function handleSendMessage() {
+    const trimmed = chatInput.trim();
+    if (!trimmed) return;
+    const now = new Date();
+    const hh = String(now.getHours()).padStart(2, "0");
+    const mm = String(now.getMinutes()).padStart(2, "0");
+    const today = now.toISOString().slice(0, 10);
+    setChatHistory((prev) => [
+      ...prev,
+      { sender: "Sam", message: trimmed, time: `${hh}:${mm}`, date: today },
+    ]);
+    setSelectedChatDate(today);
+    setCalendarMonth(today.slice(0, 7));
+    setChatInput("");
+  }
+
+  function handleAvatarUpload(event: ChangeEvent<HTMLInputElement>) {
+    const file = event.target.files?.[0];
+    if (!file) return;
+    const reader = new FileReader();
+    reader.onload = () => {
+      const result = reader.result;
+      if (typeof result === "string") setAvatarSrc(result);
+    };
+    reader.readAsDataURL(file);
+    event.target.value = "";
+  }
+
+  function changeCalendarMonth(offset: number) {
+    const [yearStr, monthStr] = calendarMonth.split("-");
+    const date = new Date(Number(yearStr), Number(monthStr) - 1 + offset, 1);
+    setCalendarMonth(
+      `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, "0")}`
+    );
   }
 
   return (
     <div className="min-h-screen bg-[#f3f4f6] font-serif">
       <div className="mx-auto max-w-7xl px-3 pb-10 pt-8">
-        {/* Header Bar */}
-        <div className="flex items-center justify-between rounded-md bg-[#2f4d9c] px-6 py-3">
-          <div className="flex items-center gap-3">
-            <img
-              src="/logo512.png"
-              alt="UWA"
-              className="h-10 w-10 rounded-full bg-white/90 object-contain"
-            />
-            <div className="leading-tight text-white">
-              <div className="text-xs font-semibold tracking-wide opacity-95">
-                THE UNIVERSITY OF
+        <DashboardHeader
+          title="HoD Dashboard"
+          hasNewMessage={hasNewMessage}
+          onMessageClick={openMessagePanel}
+          onAvatarClick={() => setProfileOpen(true)}
+          avatarSrc={avatarSrc}
+        />
+
+        {messagePanelOpen && (
+          <div
+            className="fixed inset-0 z-[70] flex items-center justify-center bg-black/30 p-4"
+            onClick={() => setMessagePanelOpen(false)}
+          >
+            <div
+              className="w-full max-w-3xl rounded-2xl border border-slate-200 bg-slate-50 p-6 shadow-xl"
+              onClick={(e) => e.stopPropagation()}
+            >
+              <div className="mb-4 flex items-center justify-between">
+                <div className="text-3xl font-semibold text-slate-800">Contact Admin</div>
+                <button
+                  type="button"
+                  aria-label="Close"
+                  className="rounded p-1 text-slate-500 hover:bg-slate-200"
+                  onClick={() => setMessagePanelOpen(false)}
+                >
+                  ✕
+                </button>
               </div>
-              <div className="text-xl font-bold leading-none">
-                WESTERN AUSTRALIA
+
+              <div className="mb-4 rounded-lg border border-slate-200 bg-white p-4">
+                <div className="mb-3 flex items-center gap-3">
+                  <div className="text-sm font-semibold text-slate-700">Chat Record Date</div>
+                  <div className="relative">
+                    <button
+                      type="button"
+                      onClick={() => setCalendarOpen((v) => !v)}
+                      className="inline-flex items-center gap-2 rounded border border-slate-300 bg-white px-3 py-1 text-sm text-slate-800"
+                    >
+                      {selectedChatDate}
+                      <span aria-hidden="true">📅</span>
+                    </button>
+                    {calendarOpen && (
+                      <div className="absolute z-20 mt-2 w-72 rounded-lg border border-slate-200 bg-white p-3 shadow-lg">
+                        <div className="mb-2 flex items-center justify-between">
+                          <button
+                            type="button"
+                            onClick={() => changeCalendarMonth(-1)}
+                            className="rounded px-2 py-1 text-sm hover:bg-slate-100"
+                          >
+                            ‹
+                          </button>
+                          <div className="text-sm font-semibold text-slate-700">{calendarMonth}</div>
+                          <button
+                            type="button"
+                            onClick={() => changeCalendarMonth(1)}
+                            className="rounded px-2 py-1 text-sm hover:bg-slate-100"
+                          >
+                            ›
+                          </button>
+                        </div>
+
+                        <div className="mb-1 grid grid-cols-7 gap-1 text-center text-xs font-semibold text-slate-500">
+                          {["Su", "Mo", "Tu", "We", "Th", "Fr", "Sa"].map((d) => (
+                            <div key={d}>{d}</div>
+                          ))}
+                        </div>
+
+                        <div className="grid grid-cols-7 gap-1">
+                          {(() => {
+                            const [yearStr, monthStr] = calendarMonth.split("-");
+                            const year = Number(yearStr);
+                            const month = Number(monthStr) - 1;
+                            const firstDay = new Date(year, month, 1).getDay();
+                            const totalDays = new Date(year, month + 1, 0).getDate();
+                            const cells = [];
+
+                            for (let i = 0; i < firstDay; i += 1) {
+                              cells.push(<div key={`empty-${i}`} />);
+                            }
+
+                            for (let day = 1; day <= totalDays; day += 1) {
+                              const dateKey = `${year}-${String(month + 1).padStart(2, "0")}-${String(day).padStart(
+                                2,
+                                "0"
+                              )}`;
+                              const selectable = availableChatDates.has(dateKey);
+                              const isSelected = selectedChatDate === dateKey;
+
+                              cells.push(
+                                <button
+                                  key={dateKey}
+                                  type="button"
+                                  disabled={!selectable}
+                                  onClick={() => {
+                                    setSelectedChatDate(dateKey);
+                                    setCalendarOpen(false);
+                                  }}
+                                  className={`h-8 rounded text-xs ${
+                                    !selectable
+                                      ? "cursor-not-allowed bg-slate-100 text-slate-300"
+                                      : isSelected
+                                        ? "bg-[#2f4d9c] text-white"
+                                        : "text-slate-700 hover:bg-slate-100"
+                                  }`}
+                                >
+                                  {day}
+                                </button>
+                              );
+                            }
+
+                            return cells;
+                          })()}
+                        </div>
+                      </div>
+                    )}
+                  </div>
+                </div>
+                <div className="max-h-72 space-y-2 overflow-y-auto pr-1 font-mono text-[15px] leading-6 text-slate-800">
+                  {visibleChatHistory.length > 0 ? (
+                    visibleChatHistory.map((entry, idx) => (
+                      <div key={idx}>
+                        <span className="text-slate-500">[{entry.time}]</span>{" "}
+                        <span className="font-semibold">{entry.sender}:</span> {entry.message}
+                      </div>
+                    ))
+                  ) : (
+                    <div className="text-sm text-slate-500">No chat records for this date.</div>
+                  )}
+                </div>
+              </div>
+
+              <div className="flex items-end gap-3">
+                <textarea
+                  value={chatInput}
+                  onChange={(e) => setChatInput(e.target.value)}
+                  placeholder="Write your message..."
+                  className="h-16 flex-1 resize-none rounded-lg border border-slate-300 bg-white px-3 py-2 text-base text-slate-800 outline-none focus:border-[#2f4d9c]"
+                />
+                <button
+                  type="button"
+                  onClick={handleSendMessage}
+                  className="rounded-lg bg-[#2f4d9c] px-5 py-2 text-sm font-semibold text-white hover:bg-[#264183]"
+                >
+                  Send
+                </button>
               </div>
             </div>
           </div>
+        )}
 
-          <div className="text-center text-2xl font-semibold text-white">
-            Workload Verification
-          </div>
-
-          <div className="flex items-center gap-3 text-white">
-            <div className="text-right text-sm">
-              <div className="font-semibold">Hi, Sam</div>
-            </div>
-            <div className="h-11 w-11 rounded-full bg-white/90" />
-          </div>
-        </div>
+        <ProfileModal
+          open={profileOpen}
+          onClose={() => setProfileOpen(false)}
+          avatarSrc={avatarSrc}
+          onAvatarUpload={handleAvatarUpload}
+          user={user}
+        />
 
         {/* Body Card */}
         <div className="mt-6 rounded-md bg-white p-8 shadow-sm">
@@ -626,75 +965,85 @@ export default function Supervisor() {
             </div>
           )}
 
-          {/* User Info */}
-          <div className="grid grid-cols-3 gap-8">
-            <div className="space-y-5">
-              <div className="flex flex-col gap-1">
-                <div className="w-fit rounded bg-[#2f4d9c] px-3 py-1 text-xs font-bold text-white">
-                  Surname
-                </div>
-                <input
-                  readOnly
-                  value={userInfo.surname}
-                  className="rounded border border-slate-300 px-3 py-2 text-sm"
-                />
+          {/* Search Fields */}
+          <div className="grid grid-cols-3 gap-6">
+            <div className="flex flex-col gap-1">
+              <div className="w-fit rounded bg-[#2f4d9c] px-3 py-1 text-xs font-bold text-white">
+                First name
               </div>
-              <div className="flex flex-col gap-1">
-                <div className="w-fit rounded bg-[#2f4d9c] px-3 py-1 text-xs font-bold text-white">
-                  First name
-                </div>
-                <input
-                  readOnly
-                  value={userInfo.firstName}
-                  className="rounded border border-slate-300 px-3 py-2 text-sm"
-                />
+              <input
+                value={searchFirstNameInput}
+                onChange={(e) => setSearchFirstNameInput(e.target.value)}
+                onKeyDown={handleSearchKeyDown}
+                className="rounded border border-slate-300 px-3 py-2 text-sm"
+              />
+            </div>
+            <div className="flex flex-col gap-1">
+              <div className="w-fit rounded bg-[#2f4d9c] px-3 py-1 text-xs font-bold text-white">
+                Last name
+              </div>
+              <input
+                value={searchLastNameInput}
+                onChange={(e) => setSearchLastNameInput(e.target.value)}
+                onKeyDown={handleSearchKeyDown}
+                className="rounded border border-slate-300 px-3 py-2 text-sm"
+              />
+            </div>
+            <div className="flex flex-col gap-1">
+              <div className="w-fit rounded bg-[#2f4d9c] px-3 py-1 text-xs font-bold text-white">
+                Staff ID
+              </div>
+              <input
+                value={searchEmployeeIdInput}
+                onChange={(e) => setSearchEmployeeIdInput(e.target.value)}
+                onKeyDown={handleSearchKeyDown}
+                className="rounded border border-slate-300 px-3 py-2 text-sm tabular-nums font-sans"
+              />
+            </div>
+            <div className="flex flex-col gap-1">
+              <div className="w-fit rounded bg-[#2f4d9c] px-3 py-1 text-xs font-bold text-white">
+                Title
+              </div>
+              <input
+                value={searchTitleInput}
+                onChange={(e) => setSearchTitleInput(e.target.value)}
+                onKeyDown={handleSearchKeyDown}
+                className="rounded border border-slate-300 px-3 py-2 text-sm"
+              />
+            </div>
+            <div className="flex flex-col gap-1">
+              <div className="w-fit rounded bg-[#2f4d9c] px-3 py-1 text-xs font-bold text-white">
+                Year & Semester
+              </div>
+              <div className="flex items-center gap-2">
+                <select
+                  value={searchYearInput}
+                  onChange={(e) => setSearchYearInput(e.target.value)}
+                  onKeyDown={handleSearchKeyDown}
+                  onWheel={handleYearWheel}
+                  className="w-full rounded border border-slate-300 px-2 py-2 text-sm"
+                >
+                  <option value="">Year</option>
+                  {yearOptions.map((year) => (
+                    <option key={year} value={year}>
+                      {year}
+                    </option>
+                  ))}
+                </select>
+                <select
+                  value={searchSemesterInput}
+                  onChange={(e) => setSearchSemesterInput(e.target.value as "" | "S1" | "S2")}
+                  onKeyDown={handleSearchKeyDown}
+                  className="w-full rounded border border-slate-300 px-2 py-2 text-sm"
+                >
+                  <option value="">Semester</option>
+                  <option value="S1">S1</option>
+                  <option value="S2">S2</option>
+                </select>
               </div>
             </div>
-
-            <div className="space-y-5">
-              <div className="flex flex-col gap-1">
-                <div className="w-fit rounded bg-[#2f4d9c] px-3 py-1 text-xs font-bold text-white">
-                  Employee ID
-                </div>
-                <input
-                  readOnly
-                  value={userInfo.employeeId}
-                  className="rounded border border-slate-300 px-3 py-2 text-sm tabular-nums font-sans"
-                />
-              </div>
-              <div className="flex flex-col gap-1">
-                <div className="w-fit rounded bg-[#2f4d9c] px-3 py-1 text-xs font-bold text-white">
-                  Title
-                </div>
-                <input
-                  readOnly
-                  value={userInfo.title}
-                  className="rounded border border-slate-300 px-3 py-2 text-sm"
-                />
-              </div>
-            </div>
-
-            <div className="space-y-5">
-              <div className="flex flex-col gap-1">
-                <div className="w-fit rounded bg-[#2f4d9c] px-3 py-1 text-xs font-bold text-white">
-                  Department
-                </div>
-                <input
-                  readOnly
-                  value={userInfo.department}
-                  className="rounded border border-slate-300 px-3 py-2 text-sm"
-                />
-              </div>
-              <div className="flex flex-col gap-1">
-                <div className="w-fit rounded bg-[#2f4d9c] px-3 py-1 text-xs font-bold text-white">
-                  School
-                </div>
-                <input
-                  readOnly
-                  value={userInfo.school}
-                  className="rounded border border-slate-300 px-3 py-2 text-sm"
-                />
-              </div>
+            <div className="flex items-end justify-start">
+              <SearchButton onClick={handleSearch} />
             </div>
           </div>
 
@@ -798,7 +1147,8 @@ export default function Supervisor() {
                     <th className="w-10 px-2 py-2"></th>
                     <th className="w-14 px-2 py-2">Task</th>
                     <th className="px-3 py-2">NAME</th>
-                    <th className="px-3 py-2">DESCRIPTION</th>
+                    <th className="px-3 py-2">TITLE</th>
+                    <th className="px-3 py-2">REASONS</th>
                     <th className="px-3 py-2">STATUS</th>
                     <th className="px-3 py-2 text-center">TOTAL WORK HOURS</th>
                     <th className="px-3 py-2 text-right">SUBMITTED TIME</th>
@@ -834,9 +1184,7 @@ export default function Supervisor() {
                             isSelected ? "border-l-4 border-[#2f4d9c] bg-[#e9f2ff]" : ""
                           }`}
                           onClick={() => {
-                            setDetailsItem(item);
-                            setDetailsOpen(true);
-                            setDescriptionExpanded(false);
+                            openDetails(item);
                           }}
                         >
                           <td className="px-2 py-3">
@@ -864,19 +1212,17 @@ export default function Supervisor() {
                             {rowIndex}
                           </td>
                           <td className="px-3 py-3 font-medium text-slate-700">
-                            {item.name}
+                            <div>{item.name}</div>
+                            <div className="text-xs text-slate-400">{item.studentId}</div>
                           </td>
+                          <td className="px-3 py-3 text-slate-700">{item.title}</td>
                           <td className="px-3 py-3 text-slate-600">
-                            {item.description}
+                            {item.requestReason ||
+                              extractRequestReason(item.description) ||
+                              "- no reason provided -"}
                           </td>
                           <td className="px-3 py-3">
-                            <span
-                              className={`rounded px-2 py-1 text-xs font-semibold ${statusPillClass(
-                                item.status
-                              )}`}
-                            >
-                              {statusLabel(item.status)}
-                            </span>
+                            <StatusPill status={item.status} variant="supervisor" />
                           </td>
                           <td className="px-3 py-3 text-center">
                             <WorkHoursBadge hours={item.hours} />
@@ -892,59 +1238,20 @@ export default function Supervisor() {
             </div>
 
             {/* Pagination */}
-            <div className="mt-4 flex items-center justify-center gap-4">
-              <button
-                type="button"
-                onClick={() => setPage((p) => Math.max(1, p - 1))}
-                disabled={page <= 1 || submitting}
-                className="rounded bg-slate-200 px-4 py-2 text-sm font-semibold text-slate-700 disabled:cursor-not-allowed disabled:opacity-60"
-              >
-                Previous
-              </button>
-              <div className="text-sm tabular-nums font-sans text-slate-600">
-                Page {page} / {totalPages}
-              </div>
-              <button
-                type="button"
-                onClick={() => setPage((p) => Math.min(totalPages, p + 1))}
-                disabled={page >= totalPages || submitting}
-                className="rounded bg-slate-200 px-4 py-2 text-sm font-semibold text-slate-700 disabled:cursor-not-allowed disabled:opacity-60"
-              >
-                Next
-              </button>
-            </div>
-
-            {/* Actions (only on To-do) */}
-            {statusFilter === "pending" && (
-              <div className="mt-6 flex items-center justify-center gap-6">
-                <button
-                  type="button"
-                  disabled={!canSubmit}
-                  onClick={() => handleDecision("approve")}
-                  className="flex items-center gap-2 rounded bg-[#2f4d9c] px-10 py-2 text-sm font-bold text-white shadow disabled:cursor-not-allowed disabled:opacity-60"
-                >
-                  <span className="text-base">✓</span>
-                  Confirm
-                </button>
-                <button
-                  type="button"
-                  disabled={!canSubmit}
-                  onClick={() => handleDecision("reject")}
-                  className="rounded bg-slate-200 px-10 py-2 text-sm font-bold text-slate-500 shadow disabled:cursor-not-allowed disabled:opacity-60"
-                >
-                  Reject
-                </button>
-              </div>
-            )}
+            <PaginationControls
+              page={page}
+              totalPages={totalPages}
+              onPrev={() => setPage((p) => Math.max(1, p - 1))}
+              onNext={() => setPage((p) => Math.min(totalPages, p + 1))}
+              disablePrev={page <= 1 || submitting}
+              disableNext={page >= totalPages || submitting}
+            />
 
             {/* Details Modal (placeholder format for now) */}
             {detailsOpen && detailsItem && (
               <div
                 className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 p-4"
-                onClick={() => {
-                  setDetailsOpen(false);
-                  setDetailsItem(null);
-                }}
+                onClick={closeDetails}
               >
                 <div
                   className="w-full max-w-2xl rounded-sm bg-white p-0 shadow"
@@ -969,10 +1276,7 @@ export default function Supervisor() {
                         </div>
                         <button
                           type="button"
-                          onClick={() => {
-                            setDetailsOpen(false);
-                            setDetailsItem(null);
-                          }}
+                          onClick={closeDetails}
                           className="rounded bg-slate-200 px-3 py-1 text-xs font-bold text-slate-700 hover:bg-slate-300"
                         >
                           Close
@@ -1012,11 +1316,23 @@ export default function Supervisor() {
                           <div className="w-32 rounded-sm bg-[#2f4d9c] px-3 py-2 text-center text-base font-semibold text-white">
                             Total Work Hours
                           </div>
+                          {(() => {
+                            const totalHours =
+                              detailsBreakdown
+                                ? (["Teaching", "Assigned Roles", "HDR", "Service"] as BreakdownCategory[]).reduce(
+                                    (tabSum, tab) =>
+                                      tabSum + detailsBreakdown[tab].reduce((sum, row) => sum + row.hours, 0),
+                                    0
+                                  )
+                                : detailsItem.hours;
+                            return (
                           <input
                             readOnly
-                            value={detailsItem.hours}
+                            value={totalHours}
                             className="w-full flex-1 rounded-sm border border-[#2f4d9c] px-3 py-2 text-base tabular-nums font-sans"
                           />
+                            );
+                          })()}
                         </div>
 
                         <div className="flex items-center gap-3">
@@ -1055,20 +1371,39 @@ export default function Supervisor() {
                             <thead className="bg-white">
                               <tr className="text-left text-xs font-semibold uppercase text-slate-600">
                                 <th className="px-3 py-2">{detailsTab}</th>
-                                <th className="px-3 py-2 text-right">Hours</th>
+                                <th className="w-[120px] px-3 py-2 text-right">Hours</th>
                               </tr>
                             </thead>
                             <tbody className="divide-y divide-slate-200 bg-white text-sm text-slate-700">
-                              {breakdownById(detailsItem.id)[detailsTab].map((row, idx) => (
+                              {(detailsBreakdown?.[detailsTab] ?? breakdownById(detailsItem.id)[detailsTab]).map((row, idx) => (
                                 <tr key={`${detailsItem.id}-${detailsTab}-${idx}`}>
-                                  <td className="px-3 py-2">{row.name}</td>
-                                  <td className="px-3 py-2 text-right tabular-nums font-sans">{row.hours}</td>
+                                  <td className="px-3 py-2">
+                                    <input
+                                      value={row.name}
+                                      onChange={(e) => updateBreakdownRow(detailsTab, idx, "name", e.target.value)}
+                                      maxLength={60}
+                                      className="w-[240px] max-w-full overflow-hidden text-ellipsis whitespace-nowrap rounded border border-slate-300 px-2 py-1 text-sm"
+                                    />
+                                  </td>
+                                  <td className="px-3 py-2">
+                                    <input
+                                      type="text"
+                                      inputMode="decimal"
+                                      maxLength={8}
+                                      value={String(row.hours)}
+                                      onChange={(e) => updateBreakdownRow(detailsTab, idx, "hours", e.target.value)}
+                                      className="ml-auto w-24 rounded border border-slate-300 px-2 py-1 text-right tabular-nums font-sans text-sm"
+                                    />
+                                  </td>
                                 </tr>
                               ))}
                               <tr className="bg-slate-50">
                                 <td className="px-3 py-2 font-semibold">Total</td>
                                 <td className="px-3 py-2 text-right font-semibold tabular-nums font-sans">
-                                  {breakdownById(detailsItem.id)[detailsTab].reduce((sum, row) => sum + row.hours, 0)}
+                                  {(detailsBreakdown?.[detailsTab] ?? breakdownById(detailsItem.id)[detailsTab]).reduce(
+                                    (sum, row) => sum + row.hours,
+                                    0
+                                  )}
                                 </td>
                               </tr>
                             </tbody>
@@ -1107,19 +1442,12 @@ export default function Supervisor() {
                         />
                       </div>
 
-                      {detailsItem.status === "pending" ? (
+                      {detailsItem.status === "pending" && (
                         <div className="flex items-center justify-center gap-24 pt-2">
                           <button
                             type="button"
                             disabled={submitting}
-                            onClick={() => {
-                              handleDecisionForId("approve", detailsItem.id).then(
-                                () => {
-                                  setDetailsOpen(false);
-                                  setDetailsItem(null);
-                                }
-                              );
-                            }}
+                            onClick={() => openNoteModal("approve", detailsItem.id)}
                             className="w-56 rounded-sm bg-[#4a9a3d] py-3 text-center text-lg font-semibold text-white shadow-sm disabled:opacity-60"
                           >
                             Approve
@@ -1127,32 +1455,61 @@ export default function Supervisor() {
                           <button
                             type="button"
                             disabled={submitting}
-                            onClick={() => {
-                              handleDecisionForId("reject", detailsItem.id).then(
-                                () => {
-                                  setDetailsOpen(false);
-                                  setDetailsItem(null);
-                                }
-                              );
-                            }}
+                            onClick={() => openNoteModal("reject", detailsItem.id)}
                             className="w-56 rounded-sm bg-[#e53935] py-3 text-center text-lg font-semibold text-white shadow-sm disabled:opacity-60"
                           >
                             Decline
                           </button>
                         </div>
-                      ) : (
-                        <div className="flex items-center justify-center pt-2">
-                          <button
-                            type="button"
-                            disabled={submitting}
-                            onClick={() => handleWithdrawForId(detailsItem.id)}
-                            className="w-full max-w-md rounded-sm bg-[#2f4d9c] py-3 text-center text-lg font-semibold text-white shadow-sm disabled:opacity-60"
-                          >
-                            Withdraw
-                          </button>
-                        </div>
                       )}
                     </form>
+                  </div>
+                </div>
+              </div>
+            )}
+            {noteModalOpen && (
+              <div className="fixed inset-0 z-[80] flex items-center justify-center bg-black/40 p-4">
+                <div className="w-full max-w-lg rounded-md bg-white shadow-lg">
+                  <div className="flex items-center justify-between rounded-t-md bg-[#2f4d9c] px-5 py-3 text-white">
+                    <div className="text-base font-bold">
+                      {noteDecision === "approve" ? "Approved Notes" : "Rejected Notes"}
+                    </div>
+                    <button
+                      type="button"
+                      className="inline-flex h-8 w-8 items-center justify-center rounded bg-white/10 text-lg hover:bg-white/20"
+                      onClick={() => {
+                        setNoteModalOpen(false);
+                        setNoteError("");
+                      }}
+                    >
+                      ×
+                    </button>
+                  </div>
+                  <div className="space-y-3 p-5">
+                    <div className="text-sm font-semibold text-slate-700">Notes for Academic</div>
+                    <textarea
+                      value={noteDraft}
+                      onChange={(e) => {
+                        setNoteDraft(e.target.value);
+                        if (noteError) setNoteError("");
+                      }}
+                      maxLength={240}
+                      placeholder="Write your feedback..."
+                      className="h-32 w-full resize-none rounded border border-slate-300 px-3 py-2 text-sm text-slate-800 outline-none focus:border-[#2f4d9c]"
+                    />
+                    <div className="flex items-center justify-between text-xs text-slate-500">
+                      <span>{noteError ? <span className="text-[#dc2626]">{noteError}</span> : " "}</span>
+                      <span>{noteDraft.length}/240</span>
+                    </div>
+                    <div className="flex justify-center">
+                      <button
+                        type="button"
+                        onClick={handleFinishNote}
+                        className="rounded bg-[#2f4d9c] px-6 py-2 text-sm font-semibold text-white hover:bg-[#264183]"
+                      >
+                        Finished
+                      </button>
+                    </div>
                   </div>
                 </div>
               </div>
