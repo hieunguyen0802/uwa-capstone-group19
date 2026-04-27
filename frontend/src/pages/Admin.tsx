@@ -63,6 +63,12 @@ function submittedTimeById(id: number) {
   return `2026-03-${String(day).padStart(2, "0")} ${String(hour).padStart(2, "0")}:00`;
 }
 
+function modifiedTimeById(id: number) {
+  const day = ((id + 1) % 28) + 1;
+  const hour = 9 + (id % 8);
+  return `2026-03-${String(day).padStart(2, "0")} ${String(hour).padStart(2, "0")}:30`;
+}
+
 function readAcademicDrafts(): MockRequest[] {
   if (typeof window === "undefined") return [];
   try {
@@ -166,7 +172,7 @@ function maxValue(values: number[]) {
   return Math.max(...values);
 }
 
-export default function HeadofSchool() {
+export default function Admin() {
   type ChatMessage = {
     sender: "Sam" | "Admin";
     message: string;
@@ -225,8 +231,8 @@ export default function HeadofSchool() {
     "approval" | "admin" | "visualization" | "export"
   >("approval");
   const sectionTabs = [
-    { key: "approval", label: "HoS Workload Approval" },
-    { key: "admin", label: "Permission Assignment" },
+    { key: "approval", label: "Workload Management" },
+    { key: "admin", label: "Employee Management" },
     { key: "visualization", label: "Visualization" },
     { key: "export", label: "Export Excel" },
   ];
@@ -494,7 +500,7 @@ export default function HeadofSchool() {
 
   const [statusFilter, setStatusFilter] = useState<
     "all" | "pending" | "approved" | "rejected"
-  >("pending");
+  >("all");
 
   const [popup, setPopup] = useState<{
     open: boolean;
@@ -518,6 +524,10 @@ export default function HeadofSchool() {
   const [noteError, setNoteError] = useState("");
   const [noteDecision, setNoteDecision] = useState<"approve" | "reject">("approve");
   const [noteTargetId, setNoteTargetId] = useState<number | null>(null);
+  const [distributeModalOpen, setDistributeModalOpen] = useState(false);
+  const [distributeYearInput, setDistributeYearInput] = useState(String(currentYear));
+  const [distributeSemesterInput, setDistributeSemesterInput] = useState<"S1" | "S2">("S1");
+  const [distributeError, setDistributeError] = useState("");
 
   const [searchEmployeeIdInput, setSearchEmployeeIdInput] = useState("");
   const [searchLastNameInput, setSearchLastNameInput] = useState("");
@@ -543,6 +553,7 @@ export default function HeadofSchool() {
     lastName: "",
     staffId: "",
   });
+  const [adminPage, setAdminPage] = useState(1);
   const [selectedPerson, setSelectedPerson] = useState<AssignablePerson | null>(null);
   const [assignRole, setAssignRole] = useState<AssignRole>("HoD");
   const [assignDepartment, setAssignDepartment] = useState<AssignDepartment>("Physics");
@@ -640,6 +651,66 @@ export default function HeadofSchool() {
       currentDepartment: "Computer Science & Software Engineering",
       isActive: true,
     },
+    {
+      id: 6,
+      staffId: "50123506",
+      firstName: "Chris",
+      lastName: "Martin",
+      email: "chris.martin@uwa.edu.au",
+      title: "Senior Lecturer",
+      currentDepartment: "Physics",
+      isActive: true,
+    },
+    {
+      id: 7,
+      staffId: "50123517",
+      firstName: "Tom",
+      lastName: "Lee",
+      email: "tom.lee@uwa.edu.au",
+      title: "Lecturer",
+      currentDepartment: "Mathematics & Statistics",
+      isActive: true,
+    },
+    {
+      id: 8,
+      staffId: "50123528",
+      firstName: "Rachel",
+      lastName: "Green",
+      email: "rachel.green@uwa.edu.au",
+      title: "Professor",
+      currentDepartment: "Physics",
+      isActive: true,
+    },
+    {
+      id: 9,
+      staffId: "50123539",
+      firstName: "David",
+      lastName: "Hall",
+      email: "david.hall@uwa.edu.au",
+      title: "Professor",
+      currentDepartment: "Computer Science & Software Engineering",
+      isActive: true,
+    },
+    {
+      id: 10,
+      staffId: "50123540",
+      firstName: "Emily",
+      lastName: "Wong",
+      email: "emily.wong@uwa.edu.au",
+      title: "Lecturer",
+      currentDepartment: "Physics",
+      isActive: false,
+    },
+    {
+      id: 11,
+      staffId: "50123551",
+      firstName: "Jack",
+      lastName: "Wilson",
+      email: "jack.wilson@uwa.edu.au",
+      title: "Senior Lecturer",
+      currentDepartment: "Mathematics & Statistics",
+      isActive: true,
+    },
   ];
   const [assignablePeople, setAssignablePeople] = useState<AssignablePerson[]>(initialAssignablePeople);
   const [importMessage, setImportMessage] = useState("");
@@ -647,15 +718,11 @@ export default function HeadofSchool() {
   const [staffDraft, setStaffDraft] = useState<StaffProfileDraft | null>(null);
   const [staffModalError, setStaffModalError] = useState("");
   const fileInputRef = useRef<HTMLInputElement | null>(null);
+  const workloadImportInputRef = useRef<HTMLInputElement | null>(null);
   const selectedYear = Number(searchYearInput) || currentYear;
   const yearOptions = useMemo(
     () => Array.from({ length: 11 }, (_, i) => String(selectedYear - 5 + i)),
     [selectedYear]
-  );
-
-  const pendingCount = useMemo(
-    () => pending.filter((it) => it.status === "pending").length,
-    [pending]
   );
 
   const itemsForFilter = useMemo(() => {
@@ -749,6 +816,17 @@ export default function HeadofSchool() {
       return true;
     });
   }, [adminSearchFilters, assignablePeople]);
+  const adminPageSize = 10;
+  const adminTotalPages = Math.max(1, Math.ceil(adminSearchResults.length / adminPageSize));
+  const adminPageItems = useMemo(() => {
+    const start = (adminPage - 1) * adminPageSize;
+    return adminSearchResults.slice(start, start + adminPageSize);
+  }, [adminPage, adminSearchResults]);
+  useEffect(() => {
+    if (adminPage > adminTotalPages) {
+      setAdminPage(adminTotalPages);
+    }
+  }, [adminPage, adminTotalPages]);
 
   const departmentStats = useMemo(
     () => [
@@ -1100,12 +1178,40 @@ export default function HeadofSchool() {
     setDetailsBreakdown(null);
   }
 
+  function openDistributeModal() {
+    setDistributeYearInput(String(currentYear));
+    setDistributeSemesterInput("S1");
+    setDistributeError("");
+    setDistributeModalOpen(true);
+  }
+
+  function closeDistributeModal() {
+    setDistributeModalOpen(false);
+    setDistributeError("");
+  }
+
+  function handleConfirmDistributeWorkload() {
+    const parsedYear = Number(distributeYearInput);
+    if (!Number.isFinite(parsedYear) || parsedYear < 2000 || parsedYear > 2100) {
+      setDistributeError("Please enter a valid year.");
+      return;
+    }
+    setDistributeModalOpen(false);
+    setPopup({
+      open: true,
+      title: "Workload Distributed",
+      message: `Workload distributed for ${parsedYear} ${distributeSemesterInput}.`,
+      status: "approved",
+    });
+  }
+
   function handleAdminSearch() {
     setAdminSearchFilters({
       firstName: adminSearchFirstNameInput.trim().toLowerCase(),
       lastName: adminSearchLastNameInput.trim().toLowerCase(),
       staffId: adminSearchStaffIdInput.trim().toLowerCase(),
     });
+    setAdminPage(1);
   }
 
   function handlePersonDepartmentChange(personId: number, nextDepartment: string) {
@@ -1311,6 +1417,50 @@ export default function HeadofSchool() {
 
   function handleOpenImport() {
     fileInputRef.current?.click();
+  }
+
+  function handleDownloadWorkloadTemplate() {
+    const sheet = XLSX.utils.json_to_sheet([
+      {
+        employee_id: "",
+        name: "",
+        description: "",
+        total_work_hours: "",
+        status: "",
+      },
+    ]);
+    const workbook = XLSX.utils.book_new();
+    XLSX.utils.book_append_sheet(workbook, sheet, "workload_import_template");
+    XLSX.writeFile(workbook, "Workload_Template.xlsx");
+  }
+
+  function handleOpenWorkloadImport() {
+    workloadImportInputRef.current?.click();
+  }
+
+  function handleImportWorkload(event: ChangeEvent<HTMLInputElement>) {
+    const file = event.target.files?.[0];
+    if (!file) return;
+    const isXlsx =
+      file.name.toLowerCase().endsWith(".xlsx") ||
+      file.type === "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet";
+    if (!isXlsx) {
+      setPopup({
+        open: true,
+        title: "Import Failed",
+        message: "Please upload an .xlsx file.",
+        status: "rejected",
+      });
+      event.target.value = "";
+      return;
+    }
+    setPopup({
+      open: true,
+      title: "Import Received",
+      message: `${file.name} uploaded successfully.`,
+      status: "approved",
+    });
+    event.target.value = "";
   }
 
   function parseActiveStatus(value: string) {
@@ -1544,7 +1694,7 @@ export default function HeadofSchool() {
     <div className="min-h-screen bg-[#f3f4f6] font-serif">
       <div className="mx-auto max-w-7xl px-3 pb-10 pt-8">
         <DashboardHeader
-          title="HoS Dashboard"
+          title="Admin Dashboard"
           hasNewMessage={hasNewMessage}
           onMessageClick={openMessagePanel}
           onAvatarClick={() => setProfileOpen(true)}
@@ -1740,7 +1890,6 @@ export default function HeadofSchool() {
                         <button
                           type="button"
                           onClick={() => {
-                            setStatusFilter("pending");
                             setSelectedIds(new Set());
                             setPage(1);
                             setDetailsOpen(false);
@@ -1768,195 +1917,142 @@ export default function HeadofSchool() {
                 </div>
               )}
 
-              <div className="grid grid-cols-3 gap-6">
-                <div className="flex flex-col gap-1">
-                  <div className="w-fit rounded bg-[#2f4d9c] px-3 py-1 text-xs font-bold text-white">First name</div>
-                  <input
-                    value={searchFirstNameInput}
-                    onChange={(e) => setSearchFirstNameInput(e.target.value)}
-                    onKeyDown={handleSearchKeyDown}
-                    className="rounded border border-slate-300 px-3 py-2 text-sm"
-                  />
-                </div>
-                <div className="flex flex-col gap-1">
-                  <div className="w-fit rounded bg-[#2f4d9c] px-3 py-1 text-xs font-bold text-white">Last name</div>
-                  <input
-                    value={searchLastNameInput}
-                    onChange={(e) => setSearchLastNameInput(e.target.value)}
-                    onKeyDown={handleSearchKeyDown}
-                    className="rounded border border-slate-300 px-3 py-2 text-sm"
-                  />
-                </div>
-                <div className="flex flex-col gap-1">
-                  <div className="w-fit rounded bg-[#2f4d9c] px-3 py-1 text-xs font-bold text-white">Staff ID</div>
-                  <input
-                    value={searchEmployeeIdInput}
-                    onChange={(e) => setSearchEmployeeIdInput(e.target.value)}
-                    onKeyDown={handleSearchKeyDown}
-                    className="rounded border border-slate-300 px-3 py-2 text-sm tabular-nums font-sans"
-                  />
-                </div>
-                <div className="flex flex-col gap-1">
-                  <div className="w-fit rounded bg-[#2f4d9c] px-3 py-1 text-xs font-bold text-white">Title</div>
-                  <input
-                    value={searchTitleInput}
-                    onChange={(e) => setSearchTitleInput(e.target.value)}
-                    onKeyDown={handleSearchKeyDown}
-                    className="rounded border border-slate-300 px-3 py-2 text-sm"
-                  />
-                </div>
-                <div className="flex flex-col gap-1">
-                  <div className="w-fit rounded bg-[#2f4d9c] px-3 py-1 text-xs font-bold text-white">
-                    Department / School
-                  </div>
-                  <input
-                    value={searchDepartmentInput}
-                    onChange={(e) => setSearchDepartmentInput(e.target.value)}
-                    onKeyDown={handleSearchKeyDown}
-                    className="rounded border border-slate-300 px-3 py-2 text-sm"
-                  />
-                </div>
-                <div className="flex flex-col gap-1">
-                  <div className="w-fit rounded bg-[#2f4d9c] px-3 py-1 text-xs font-bold text-white">Year & Semester</div>
-                  <div className="flex items-center gap-2">
-                    <select
-                      value={searchYearInput}
-                      onChange={(e) => setSearchYearInput(e.target.value)}
+              <div className="mt-4 rounded-md bg-[#f4f7ff] p-4">
+                <div className="grid grid-cols-3 gap-6">
+                  <div className="flex flex-col gap-1">
+                    <div className="w-fit rounded bg-[#2f4d9c] px-3 py-1 text-xs font-bold text-white">First name</div>
+                    <input
+                      value={searchFirstNameInput}
+                      onChange={(e) => setSearchFirstNameInput(e.target.value)}
                       onKeyDown={handleSearchKeyDown}
-                      onWheel={handleYearWheel}
-                      className="w-full rounded border border-slate-300 px-2 py-2 text-sm"
-                    >
-                      <option value="">Year</option>
-                      {yearOptions.map((year) => (
-                        <option key={year} value={year}>
-                          {year}
-                        </option>
-                      ))}
-                    </select>
-                    <select
-                      value={searchSemesterInput}
-                      onChange={(e) => setSearchSemesterInput(e.target.value as "" | "S1" | "S2")}
+                      className="rounded border border-slate-300 px-3 py-2 text-sm"
+                    />
+                  </div>
+                  <div className="flex flex-col gap-1">
+                    <div className="w-fit rounded bg-[#2f4d9c] px-3 py-1 text-xs font-bold text-white">Last name</div>
+                    <input
+                      value={searchLastNameInput}
+                      onChange={(e) => setSearchLastNameInput(e.target.value)}
                       onKeyDown={handleSearchKeyDown}
-                      className="w-full rounded border border-slate-300 px-2 py-2 text-sm"
-                    >
-                      <option value="">Semester</option>
-                      <option value="S1">S1</option>
-                      <option value="S2">S2</option>
-                    </select>
+                      className="rounded border border-slate-300 px-3 py-2 text-sm"
+                    />
+                  </div>
+                  <div className="flex flex-col gap-1">
+                    <div className="w-fit rounded bg-[#2f4d9c] px-3 py-1 text-xs font-bold text-white">Staff ID</div>
+                    <input
+                      value={searchEmployeeIdInput}
+                      onChange={(e) => setSearchEmployeeIdInput(e.target.value)}
+                      onKeyDown={handleSearchKeyDown}
+                      className="rounded border border-slate-300 px-3 py-2 text-sm tabular-nums font-sans"
+                    />
+                  </div>
+                  <div className="flex flex-col gap-1">
+                    <div className="w-fit rounded bg-[#2f4d9c] px-3 py-1 text-xs font-bold text-white">Title</div>
+                    <input
+                      value={searchTitleInput}
+                      onChange={(e) => setSearchTitleInput(e.target.value)}
+                      onKeyDown={handleSearchKeyDown}
+                      className="rounded border border-slate-300 px-3 py-2 text-sm"
+                    />
+                  </div>
+                  <div className="flex flex-col gap-1">
+                    <div className="w-fit rounded bg-[#2f4d9c] px-3 py-1 text-xs font-bold text-white">
+                      Department / School
+                    </div>
+                    <input
+                      value={searchDepartmentInput}
+                      onChange={(e) => setSearchDepartmentInput(e.target.value)}
+                      onKeyDown={handleSearchKeyDown}
+                      className="rounded border border-slate-300 px-3 py-2 text-sm"
+                    />
+                  </div>
+                  <div className="flex flex-col gap-1">
+                    <div className="w-fit rounded bg-[#2f4d9c] px-3 py-1 text-xs font-bold text-white">Year & Semester</div>
+                    <div className="flex items-center gap-2">
+                      <select
+                        value={searchYearInput}
+                        onChange={(e) => setSearchYearInput(e.target.value)}
+                        onKeyDown={handleSearchKeyDown}
+                        onWheel={handleYearWheel}
+                        className="w-full rounded border border-slate-300 px-2 py-2 text-sm"
+                      >
+                        <option value="">Year</option>
+                        {yearOptions.map((year) => (
+                          <option key={year} value={year}>
+                            {year}
+                          </option>
+                        ))}
+                      </select>
+                      <select
+                        value={searchSemesterInput}
+                        onChange={(e) => setSearchSemesterInput(e.target.value as "" | "S1" | "S2")}
+                        onKeyDown={handleSearchKeyDown}
+                        className="w-full rounded border border-slate-300 px-2 py-2 text-sm"
+                      >
+                        <option value="">Semester</option>
+                        <option value="S1">S1</option>
+                        <option value="S2">S2</option>
+                      </select>
+                    </div>
                   </div>
                 </div>
-              </div>
-              <div className="mt-4 flex justify-center">
-                <SearchButton onClick={handleSearch} />
+                <div className="mt-4 flex justify-center">
+                  <SearchButton onClick={handleSearch} />
+                </div>
               </div>
 
-              <div className="mt-6 text-lg font-semibold text-slate-700">Workload Report Sem 1 - 2025</div>
+              <div className="mt-6 flex items-center justify-between gap-3">
+                <div className="text-lg font-semibold text-slate-700">Workload Report Sem 1 - 2025</div>
+                <div className="flex items-center gap-3">
+                  <button
+                    type="button"
+                    onClick={handleDownloadWorkloadTemplate}
+                    className="rounded border border-[#2f4d9c] bg-white px-4 py-2 text-sm font-semibold text-[#2f4d9c] hover:bg-[#eef2ff]"
+                  >
+                    Download Template
+                  </button>
+                  <button
+                    type="button"
+                    onClick={handleOpenWorkloadImport}
+                    className="rounded bg-[#2f4d9c] px-4 py-2 text-sm font-semibold text-white hover:bg-[#264183]"
+                  >
+                    Import Workload
+                  </button>
+                  <input
+                    ref={workloadImportInputRef}
+                    type="file"
+                    accept=".xlsx,application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+                    onChange={handleImportWorkload}
+                    className="hidden"
+                  />
+                </div>
+              </div>
               <div className="mt-6 rounded-md bg-[#f4f7ff] p-4">
-                <div className="mb-4 flex flex-wrap items-center justify-start gap-5">
-                  <div className="text-base font-semibold text-[#2f4d9c]">Status Filter:</div>
-                  <div className="flex flex-wrap items-center justify-start gap-4">
-                    <button
-                      type="button"
-                      onClick={() => {
-                        setStatusFilter("all");
-                        setSelectedIds(new Set());
-                        setPage(1);
-                        setDetailsOpen(false);
-                        setDetailsItem(null);
-                      }}
-                      className={`rounded-md border px-5 py-2 text-base font-semibold ${
-                        statusFilter === "all"
-                          ? "border-[#2f4d9c] bg-[#2f4d9c] text-white"
-                          : "border-[#2f4d9c] bg-white text-[#2f4d9c]"
-                      }`}
-                    >
-                      All
-                    </button>
-                    <button
-                      type="button"
-                      onClick={() => {
-                        setStatusFilter("pending");
-                        setSelectedIds(new Set());
-                        setPage(1);
-                        setDetailsOpen(false);
-                        setDetailsItem(null);
-                      }}
-                      className={`relative rounded-md border px-5 py-2 text-base font-semibold ${
-                        statusFilter === "pending"
-                          ? "border-[#d97706] bg-[#d97706] text-white"
-                          : "border-[#2f4d9c] bg-white text-[#2f4d9c]"
-                      }`}
-                    >
-                      Pending
-                      {pendingCount > 0 && (
-                        <span className="pointer-events-none absolute -right-2 -top-2 inline-flex h-4 w-4 items-center justify-center rounded-full bg-[#d97706] text-[10px] font-bold leading-none text-white">
-                          !
-                        </span>
-                      )}
-                    </button>
-                    <button
-                      type="button"
-                      onClick={() => {
-                        setStatusFilter("approved");
-                        setSelectedIds(new Set());
-                        setPage(1);
-                        setDetailsOpen(false);
-                        setDetailsItem(null);
-                      }}
-                      className={`rounded-md border px-5 py-2 text-base font-semibold ${
-                        statusFilter === "approved"
-                          ? "border-[#16a34a] bg-[#16a34a] text-white"
-                          : "border-[#2f4d9c] bg-white text-[#2f4d9c]"
-                      }`}
-                    >
-                      Approved
-                    </button>
-                    <button
-                      type="button"
-                      onClick={() => {
-                        setStatusFilter("rejected");
-                        setSelectedIds(new Set());
-                        setPage(1);
-                        setDetailsOpen(false);
-                        setDetailsItem(null);
-                      }}
-                      className={`rounded-md border px-5 py-2 text-base font-semibold ${
-                        statusFilter === "rejected"
-                          ? "border-[#dc2626] bg-[#dc2626] text-white"
-                          : "border-[#2f4d9c] bg-white text-[#2f4d9c]"
-                      }`}
-                    >
-                      Rejected
-                    </button>
-                  </div>
-                </div>
-
                 <div className="max-h-[460px] overflow-x-auto overflow-y-auto pr-1">
                   <table className="min-w-full border-separate border-spacing-y-0">
                     <thead>
                       <tr className="text-left text-sm font-extrabold uppercase tracking-wide text-slate-700">
                         <th className="w-10 px-2 py-2"></th>
-                        <th className="w-14 px-2 py-2">Task</th>
+                        <th className="w-14 px-2 py-2">#</th>
                         <th className="px-3 py-2">NAME</th>
-                        <th className="px-3 py-2">TITLE</th>
-                        <th className="px-3 py-2">DEPARTMENT / SCHOOL</th>
-                        <th className="px-3 py-2">REASONS</th>
-                        <th className="px-3 py-2">STATUS</th>
-                        <th className="px-3 py-2 text-center">TOTAL WORK HOURS</th>
-                        <th className="px-3 py-2 text-right">SUBMITTED TIME</th>
+                        <th className="px-3 py-2">DESCRIPTION</th>
+                        <th className="px-3 py-2 text-center">STATUS</th>
+                        <th className="px-3 py-2 text-center whitespace-nowrap">TOTAL WORK HOURS</th>
+                        <th className="px-3 py-2">CONFIRMATION</th>
+                        <th className="px-3 py-2 text-right whitespace-nowrap">PUSHED TIME</th>
                       </tr>
                     </thead>
                     <tbody className="divide-y divide-slate-200 bg-white">
                       {loading && (
                         <tr>
-                          <td colSpan={9} className="px-3 py-6 text-center text-sm text-slate-500">
+                          <td colSpan={8} className="px-3 py-6 text-center text-sm text-slate-500">
                             Loading...
                           </td>
                         </tr>
                       )}
                       {!loading && pageItems.length === 0 && (
                         <tr>
-                          <td colSpan={9} className="px-3 py-6 text-center text-sm text-slate-500">
+                          <td colSpan={8} className="px-3 py-6 text-center text-sm text-slate-500">
                             {statusFilter === "pending" ? "No pending requests" : "No items found"}
                           </td>
                         </tr>
@@ -2000,16 +2096,29 @@ export default function HeadofSchool() {
                                 <div>{item.name}</div>
                                 <div className="text-xs text-slate-400">{item.studentId}</div>
                               </td>
-                              <td className="px-3 py-3 text-slate-700">{item.title}</td>
-                              <td className="px-3 py-3 text-slate-700">{item.department || "-"}</td>
-                              <td className="px-3 py-3 text-slate-600">
-                                {item.requestReason || extractRequestReason(item.description) || "- no reason provided -"}
-                              </td>
-                              <td className="px-3 py-3">
+                              <td className="px-3 py-3 text-slate-600">{item.description}</td>
+                              <td className="px-3 py-3 text-center">
                                 <StatusPill status={item.status} variant="supervisor" />
                               </td>
                               <td className="px-3 py-3 text-center">
                                 <WorkHoursBadge hours={item.hours} />
+                              </td>
+                              <td className="px-3 py-3">
+                                {item.status === "approved" ? (
+                                  <span className="inline-flex items-center gap-2 text-xs font-semibold text-[#15803d]">
+                                    <span className="inline-flex h-4 w-4 items-center justify-center rounded-full border border-[#15803d] bg-[#15803d] text-[10px] text-white">
+                                      ✓
+                                    </span>
+                                    Confirmed
+                                  </span>
+                                ) : (
+                                  <span className="inline-flex items-center gap-2 text-xs font-semibold text-[#c2410c]">
+                                    <span className="inline-flex h-4 w-4 items-center justify-center rounded-full border border-[#c2410c] bg-white text-[10px] text-[#c2410c]">
+                                      ○
+                                    </span>
+                                    Unconfirmed
+                                  </span>
+                                )}
                               </td>
                               <td className="px-3 py-3 text-right tabular-nums font-sans font-semibold text-slate-800">
                                 {submittedTimeById(item.id)}
@@ -2028,6 +2137,15 @@ export default function HeadofSchool() {
                   disablePrev={page <= 1 || submitting}
                   disableNext={page >= totalPages || submitting}
                 />
+                <div className="mt-3 flex justify-end">
+                  <button
+                    type="button"
+                    onClick={openDistributeModal}
+                    className="rounded bg-[#2f4d9c] px-4 py-2 text-sm font-semibold text-white hover:bg-[#264183]"
+                  >
+                    Distribute Workload
+                  </button>
+                </div>
               </div>
 
               {detailsOpen && detailsItem && (
@@ -2057,10 +2175,10 @@ export default function HeadofSchool() {
                         </div>
                       </div>
 
-                      <form className="space-y-4 px-6 py-5" onSubmit={(e) => e.preventDefault()}>
-                        <div className="grid grid-cols-2 gap-5">
-                          <InfoField label="Full name" value={detailsItem.name} />
-                          <InfoField label="Title" value={detailsItem.title} />
+                      <div className="space-y-4 px-5 py-4">
+                        <div className="grid grid-cols-2 gap-4">
+                          <InfoField label="Name" value={detailsItem.name} />
+                          <InfoField label="Employee ID" value={detailsItem.studentId} />
                           <InfoField
                             label="Total Work Hours"
                             value={String(
@@ -2073,12 +2191,11 @@ export default function HeadofSchool() {
                             )}
                             className="tabular-nums font-sans"
                           />
-                          <InfoField label="Department" value={detailsItem.department} />
+                          <InfoField label="Status" value={statusLabel(detailsItem.status)} />
                         </div>
-
                         <div>
-                          <div className="text-sm font-semibold uppercase text-slate-700">Workload Breakdown</div>
-                          <div className="mt-2 overflow-hidden rounded-sm border border-slate-300">
+                          <div className="text-xs font-semibold uppercase text-slate-500">Workload Breakdown</div>
+                          <div className="mt-1 overflow-hidden rounded border border-slate-300">
                             <div className="flex flex-wrap gap-2 border-b border-slate-200 bg-slate-50 px-3 py-2">
                               {(["Teaching", "Assigned Roles", "HDR", "Service"] as BreakdownCategory[]).map((tab) => (
                                 <button
@@ -2099,85 +2216,108 @@ export default function HeadofSchool() {
                               <thead className="bg-white">
                                 <tr className="text-left text-xs font-semibold uppercase text-slate-600">
                                   <th className="px-3 py-2">{detailsTab}</th>
-                                  <th className="w-[120px] px-3 py-2 text-right">Hours</th>
+                                  <th className="px-3 py-2 text-right">Hours</th>
                                 </tr>
                               </thead>
                               <tbody className="divide-y divide-slate-200 bg-white text-sm text-slate-700">
                                 {(detailsBreakdown?.[detailsTab] ?? breakdownById(detailsItem.id)[detailsTab]).map((row, idx) => (
                                   <tr key={`${detailsItem.id}-${detailsTab}-${idx}`}>
-                                    <td className="px-3 py-2">
-                                      <input
-                                        value={row.name}
-                                        onChange={(e) => updateBreakdownRow(detailsTab, idx, "name", e.target.value)}
-                                        maxLength={60}
-                                        className="w-[240px] max-w-full overflow-hidden text-ellipsis whitespace-nowrap rounded border border-slate-300 px-2 py-1 text-sm"
-                                      />
-                                    </td>
-                                    <td className="px-3 py-2">
-                                      <input
-                                        type="text"
-                                        inputMode="decimal"
-                                        maxLength={8}
-                                        value={String(row.hours)}
-                                        onChange={(e) => updateBreakdownRow(detailsTab, idx, "hours", e.target.value)}
-                                        className="ml-auto w-24 rounded border border-slate-300 px-2 py-1 text-right tabular-nums font-sans text-sm"
-                                      />
-                                    </td>
+                                    <td className="px-3 py-2">{row.name}</td>
+                                    <td className="px-3 py-2 text-right tabular-nums font-sans">{row.hours}</td>
                                   </tr>
                                 ))}
+                                <tr className="bg-slate-50">
+                                  <td className="px-3 py-2 font-semibold">Total</td>
+                                  <td className="px-3 py-2 text-right font-semibold tabular-nums font-sans">
+                                    {(detailsBreakdown?.[detailsTab] ?? breakdownById(detailsItem.id)[detailsTab]).reduce(
+                                      (sum, row) => sum + row.hours,
+                                      0
+                                    )}
+                                  </td>
+                                </tr>
                               </tbody>
                             </table>
                           </div>
                         </div>
-
                         <div>
-                          <button
-                            type="button"
-                            onClick={() => setDescriptionExpanded((v) => !v)}
-                            className="flex w-full items-center justify-between rounded-sm border border-slate-300 bg-slate-50 px-3 py-2 text-left text-sm font-semibold uppercase text-slate-700"
-                          >
-                            <span>Description</span>
-                            <span className="text-base leading-none">{descriptionExpanded ? "−" : "+"}</span>
-                          </button>
-                          {descriptionExpanded && (
-                            <textarea
-                              readOnly
-                              value={cleanDescription(detailsItem.description)}
-                              className="mt-2 h-28 w-full resize-none rounded-sm border border-slate-300 bg-white px-4 py-3 text-sm text-slate-700"
-                            />
-                          )}
-                        </div>
-
-                        <div>
-                          <div className="text-sm font-semibold text-slate-700">Application Reason</div>
+                          <div className="text-xs font-semibold uppercase text-slate-500">Description</div>
                           <textarea
                             readOnly
-                            value={detailsItem.requestReason || extractRequestReason(detailsItem.description) || "- no reason provided -"}
-                            className="mt-2 h-24 w-full resize-none rounded-sm border border-slate-300 bg-white px-4 py-3 text-sm text-slate-700"
+                            value={cleanDescription(detailsItem.description)}
+                            className="mt-1 h-24 w-full resize-none rounded border border-slate-300 px-3 py-2 text-sm"
                           />
                         </div>
+                        <div className="flex items-center justify-center pt-1">
+                          <button
+                            type="button"
+                            onClick={closeDetails}
+                            className={`rounded-md px-6 py-2 text-sm font-semibold ${
+                              detailsItem.status === "approved"
+                                ? "bg-[#16a34a] text-white"
+                                : "bg-[#2f4d9c] text-white hover:bg-[#29458c]"
+                            }`}
+                          >
+                            Confirmed
+                          </button>
+                        </div>
+                      </div>
+                    </div>
+                  </div>
+                </div>
+              )}
 
-                        {detailsItem.status === "pending" && (
-                          <div className="flex items-center justify-center gap-24 pt-2">
-                            <button
-                              type="button"
-                              disabled={submitting}
-                              onClick={() => openNoteModal("approve", detailsItem.id)}
-                              className="w-56 rounded-sm bg-[#4a9a3d] py-3 text-center text-lg font-semibold text-white shadow-sm disabled:opacity-60"
-                            >
-                              Approve
-                            </button>
-                            <button
-                              type="button"
-                              disabled={submitting}
-                              onClick={() => openNoteModal("reject", detailsItem.id)}
-                              className="w-56 rounded-sm bg-[#e53935] py-3 text-center text-lg font-semibold text-white shadow-sm disabled:opacity-60"
-                            >
-                              Decline
-                            </button>
-                          </div>
-                        )}
-                      </form>
+              {distributeModalOpen && (
+                <div className="fixed inset-0 z-[82] flex items-center justify-center bg-black/40 p-4">
+                  <div className="w-full max-w-md rounded-md bg-white shadow-lg">
+                    <div className="flex items-center justify-between rounded-t-md bg-[#2f4d9c] px-5 py-3 text-white">
+                      <div className="text-base font-bold">Distribute Workload</div>
+                      <button
+                        type="button"
+                        className="inline-flex h-8 w-8 items-center justify-center rounded bg-white/10 text-lg hover:bg-white/20"
+                        onClick={closeDistributeModal}
+                      >
+                        ×
+                      </button>
+                    </div>
+                    <div className="space-y-4 p-5">
+                      <div>
+                        <div className="mb-1 text-xs font-semibold uppercase text-slate-500">Year</div>
+                        <input
+                          type="number"
+                          value={distributeYearInput}
+                          onChange={(e) => setDistributeYearInput(e.target.value)}
+                          className="w-full rounded border border-slate-300 px-3 py-2 text-sm"
+                          placeholder="Year"
+                        />
+                      </div>
+                      <div>
+                        <div className="mb-1 text-xs font-semibold uppercase text-slate-500">Semester</div>
+                        <select
+                          value={distributeSemesterInput}
+                          onChange={(e) => setDistributeSemesterInput(e.target.value as "S1" | "S2")}
+                          className="w-full rounded border border-slate-300 px-3 py-2 text-sm"
+                        >
+                          <option value="S1">S1</option>
+                          <option value="S2">S2</option>
+                        </select>
+                      </div>
+                      {distributeError && <div className="text-sm font-semibold text-[#dc2626]">{distributeError}</div>}
+                      <div className="flex items-center justify-end gap-3 pt-1">
+                        <button
+                          type="button"
+                          onClick={closeDistributeModal}
+                          className="rounded bg-slate-200 px-4 py-2 text-sm font-semibold text-slate-700 hover:bg-slate-300"
+                        >
+                          Cancel
+                        </button>
+                        <button
+                          type="button"
+                          onClick={handleConfirmDistributeWorkload}
+                          className="rounded bg-[#2f4d9c] px-4 py-2 text-sm font-semibold text-white hover:bg-[#264183]"
+                        >
+                          Confirm
+                        </button>
+                      </div>
                     </div>
                   </div>
                 </div>
@@ -2236,8 +2376,8 @@ export default function HeadofSchool() {
           {activeSection === "admin" && (
             <div className="rounded-md bg-white p-8">
               <SectionTitleBlock
-                title="Permission Assignment"
-                description="Search staff members, choose one of three schools, and assign HoD/Admin permissions."
+                title="Employee Management"
+                description="Search staff members, import templates, and review latest profile update times."
                 rightSlot={
                   <TemplateImportExportActions
                     onDownload={handleDownloadTemplate}
@@ -2315,7 +2455,7 @@ export default function HeadofSchool() {
                   }
                 />
 
-                <div className="mt-4 max-h-52 overflow-y-auto rounded border border-slate-200 bg-white">
+                <div className="mt-4 rounded border border-slate-200 bg-white">
                   <table className="min-w-full text-sm">
                     <thead className="bg-slate-100 text-slate-700">
                       <tr>
@@ -2323,11 +2463,11 @@ export default function HeadofSchool() {
                         <th className="px-3 py-2 text-left">Name</th>
                         <th className="px-3 py-2 text-left">Title</th>
                         <th className="px-3 py-2 text-left">Department</th>
-                        <th className="px-3 py-2 text-right">Action</th>
+                        <th className="px-3 py-2 text-right">Modified Time</th>
                       </tr>
                     </thead>
                     <tbody>
-                      {adminSearchResults.map((person) => (
+                      {adminPageItems.map((person) => (
                         <tr
                           key={person.id}
                           className={`border-t border-slate-100 ${
@@ -2341,35 +2481,29 @@ export default function HeadofSchool() {
                           </td>
                           <td className="px-3 py-2">{person.title || "-"}</td>
                           <td className="px-3 py-2">{person.currentDepartment || "-"}</td>
-                          <td className="px-3 py-2 text-right">
-                            <button
-                              type="button"
-                              onClick={(e) => {
-                                e.stopPropagation();
-                                if (!person.isActive) return;
-                                setSelectedPerson(person);
-                                if (availableDepartments.includes(person.currentDepartment as AssignDepartment)) {
-                                  setAssignDepartment(person.currentDepartment as AssignDepartment);
-                                }
-                                setAssignMessage("");
-                              }}
-                              disabled={!person.isActive}
-                              className={`rounded px-3 py-1 text-xs font-semibold ${
-                                !person.isActive
-                                  ? "cursor-not-allowed bg-slate-200 text-slate-400"
-                                  : selectedPerson?.id === person.id
-                                  ? "bg-[#2f4d9c] text-white"
-                                  : "bg-slate-200 text-slate-700 hover:bg-slate-300"
-                              }`}
-                            >
-                              {selectedPerson?.id === person.id ? "Selected" : "Select"}
-                            </button>
+                          <td className="px-3 py-2 text-right tabular-nums font-sans text-slate-700">
+                            {modifiedTimeById(person.id)}
                           </td>
                         </tr>
                       ))}
+                      {adminPageItems.length === 0 && (
+                        <tr>
+                          <td colSpan={5} className="px-3 py-4 text-center text-slate-500">
+                            No staff found.
+                          </td>
+                        </tr>
+                      )}
                     </tbody>
                   </table>
                 </div>
+                <PaginationControls
+                  page={adminPage}
+                  totalPages={adminTotalPages}
+                  onPrev={() => setAdminPage((p) => Math.max(1, p - 1))}
+                  onNext={() => setAdminPage((p) => Math.min(adminTotalPages, p + 1))}
+                  disablePrev={adminPage <= 1}
+                  disableNext={adminPage >= adminTotalPages}
+                />
               </div>
               <StaffProfileModal
                 open={staffModalOpen}
@@ -2389,157 +2523,6 @@ export default function HeadofSchool() {
                 }}
                 onUpdate={handleUpdateStaffDraft}
               />
-
-              <div className="mt-6 rounded-md border border-slate-200 bg-white p-4">
-                <div className="grid grid-cols-1 gap-4 md:grid-cols-3">
-                  <div>
-                    <div className="mb-1 text-xs font-semibold uppercase text-slate-500">Selected Person</div>
-                    <div className="rounded border border-slate-300 bg-slate-50 px-3 py-2 text-sm">
-                      {selectedPerson
-                        ? `${selectedPerson.firstName} ${selectedPerson.lastName} (${selectedPerson.staffId})`
-                        : "No person selected"}
-                    </div>
-                  </div>
-                  <div>
-                    <div className="mb-1 text-xs font-semibold uppercase text-slate-500">Role</div>
-                    <select
-                      value={assignRole}
-                      onChange={(e) => {
-                        const nextRole = e.target.value as AssignRole;
-                        setAssignRole(nextRole);
-                        if (nextRole === "Admin") {
-                          setAssignDepartment(adminBoundDepartment);
-                          setBindingSource("role");
-                        } else {
-                          if (bindingSource === "role") setBindingSource(null);
-                          if (assignDepartment === adminBoundDepartment) {
-                            setAssignDepartment("Physics");
-                          }
-                        }
-                      }}
-                      disabled={isRoleLocked}
-                      className={`w-full rounded border border-slate-300 px-3 py-2 text-sm ${
-                        isRoleLocked ? "cursor-not-allowed bg-slate-100 text-slate-500" : ""
-                      }`}
-                    >
-                      <option value="HoD">HoD</option>
-                      <option value="Admin">Admin</option>
-                    </select>
-                  </div>
-                  <div>
-                    <div className="mb-1 text-xs font-semibold uppercase text-slate-500">Department</div>
-                    <select
-                      value={assignDepartment}
-                      onChange={(e) => {
-                        const nextDepartment = e.target.value as AssignDepartment;
-                        setAssignDepartment(nextDepartment);
-                        if (selectedPerson) {
-                          handlePersonDepartmentChange(selectedPerson.id, nextDepartment);
-                        }
-                        if (nextDepartment === adminBoundDepartment) {
-                          setAssignRole("Admin");
-                          setBindingSource("department");
-                        } else {
-                          if (bindingSource === "department") setBindingSource(null);
-                          if (assignRole === "Admin") {
-                            setAssignRole("HoD");
-                          }
-                        }
-                      }}
-                      disabled={isDepartmentLocked}
-                      className={`w-full rounded border border-slate-300 px-3 py-2 text-sm ${
-                        isDepartmentLocked ? "cursor-not-allowed bg-slate-100 text-slate-500" : ""
-                      }`}
-                    >
-                      {availableDepartments.map((department) => (
-                        <option key={department} value={department}>
-                          {department}
-                        </option>
-                      ))}
-                    </select>
-                  </div>
-                </div>
-
-                <div className="mt-4">
-                  <div className="mb-2 text-xs font-semibold uppercase text-slate-500">Permissions</div>
-                  <div className="flex flex-wrap gap-2">
-                    {availablePermissions.map((permission) => (
-                      <span
-                        key={permission}
-                        className="rounded-full bg-[#2f4d9c] px-3 py-1 text-xs font-semibold text-white"
-                      >
-                        {permission}
-                      </span>
-                    ))}
-                  </div>
-                </div>
-
-                <div className="mt-4 flex items-center justify-between">
-                  <div className="text-sm text-slate-600">{assignMessage || "Ready to assign permissions."}</div>
-                  <button
-                    type="button"
-                    onClick={handleAssignRole}
-                    className="rounded bg-[#2f4d9c] px-5 py-2 text-sm font-semibold text-white hover:bg-[#264183]"
-                  >
-                    Assign Permission
-                  </button>
-                </div>
-              </div>
-
-              <div className="mt-6 rounded-md border border-slate-200 bg-white p-4">
-                <div className="mb-3 text-sm font-semibold uppercase text-slate-600">Assigned Roles</div>
-                <div className="max-h-60 overflow-y-auto">
-                  <table className="min-w-full text-sm">
-                    <thead className="bg-slate-100 text-slate-700">
-                      <tr>
-                        <th className="px-3 py-2 text-left">Staff</th>
-                        <th className="px-3 py-2 text-left">Role</th>
-                        <th className="px-3 py-2 text-left">Department</th>
-                        <th className="px-3 py-2 text-left">Permissions</th>
-                        <th className="px-3 py-2 text-center">Action</th>
-                        <th className="px-3 py-2 text-right">Assigned At</th>
-                      </tr>
-                    </thead>
-                    <tbody>
-                      {roleAssignments.length === 0 ? (
-                        <tr>
-                          <td colSpan={6} className="px-3 py-4 text-center text-slate-500">
-                            No assignments yet.
-                          </td>
-                        </tr>
-                      ) : (
-                        roleAssignments.map((assignment) => (
-                          <tr key={assignment.id} className="border-t border-slate-100">
-                            <td className="px-3 py-2">
-                              {assignment.name}
-                              <div className="text-xs text-slate-500">{assignment.staffId}</div>
-                            </td>
-                            <td className="px-3 py-2">{assignment.role}</td>
-                            <td className="px-3 py-2">{assignment.department}</td>
-                            <td className="px-3 py-2">{assignment.permissions.join(", ")}</td>
-                            <td className="px-3 py-2 text-center">
-                              {assignment.status === "active" ? (
-                                <button
-                                  type="button"
-                                  onClick={() => requestCancelPermission(assignment.id)}
-                                  className="rounded bg-[#16a34a] px-3 py-1 text-xs font-semibold text-white hover:bg-[#15803d]"
-                                >
-                                  Active
-                                </button>
-                              ) : (
-                                <span className="inline-flex rounded bg-[#dc2626] px-3 py-1 text-xs font-semibold text-white">
-                                  Disabled
-                                </span>
-                              )}
-                            </td>
-                            <td className="px-3 py-2 text-right tabular-nums font-sans">{assignment.assignedAt}</td>
-                          </tr>
-                        ))
-                      )}
-                    </tbody>
-                  </table>
-                </div>
-              </div>
 
               {cancelConfirmOpen && (
                 <div className="fixed inset-0 z-[90] flex items-center justify-center bg-black/40 p-4">
