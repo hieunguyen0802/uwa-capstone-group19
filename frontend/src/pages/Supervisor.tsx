@@ -1,9 +1,15 @@
 import { useEffect, useMemo, useState, type ChangeEvent } from "react";
+import * as XLSX from "xlsx";
 import DashboardHeader from "../components/common/DashboardHeader";
+import LineMetricChartCard from "../components/common/LineMetricChartCard";
 import PaginationControls from "../components/common/PaginationControls";
 import ProfileModal from "../components/common/ProfileModal";
+import ReportingFilterIntro from "../components/common/ReportingFilterIntro";
+import ReportingPeriodBar from "../components/common/ReportingPeriodBar";
 import SearchButton from "../components/common/SearchButton";
+import SectionTabs from "../components/common/SectionTabs";
 import StatusPill from "../components/common/StatusPill";
+import VisualizationSummaryCards from "../components/common/VisualizationSummaryCards";
 import WorkHoursBadge from "../components/common/WorkHoursBadge";
 
 type MockRequest = {
@@ -81,34 +87,45 @@ function mergeDraftsIntoRequests(current: MockRequest[], drafts: MockRequest[]) 
   return [...incoming, ...current];
 }
 
-function breakdownById(id: number): BreakdownData {
-  const patterns: BreakdownData[] = [
-    {
-      Teaching: [
-        { name: "CITS2401", hours: 15 },
-        { name: "CITS2200", hours: 5 },
-      ],
-      "Assigned Roles": [
-        { name: "Program Chair", hours: 20 },
-        { name: "Outreach Chair", hours: 10 },
-      ],
-      HDR: [
-        { name: "Student A", hours: 2 },
-        { name: "Student B", hours: 2 },
-      ],
-      Service: [{ name: "Committee support", hours: 10 }],
-    },
-    {
-      Teaching: [{ name: "CITS3002", hours: 15 }],
-      "Assigned Roles": [{ name: "Industry liaison", hours: 6 }],
-      HDR: [
-        { name: "Student D", hours: 3 },
-        { name: "Student E", hours: 2 },
-      ],
-      Service: [{ name: "Peer review", hours: 4 }],
-    },
-  ];
-  return patterns[id % patterns.length];
+function breakdownById(id: number, totalHours: number): BreakdownData {
+  const safeTotal = Math.max(0, Math.round(totalHours));
+  const teaching1 = Math.max(0, Math.floor(safeTotal * 0.3));
+  const teaching2 = Math.max(0, Math.floor(safeTotal * 0.15));
+  const role1 = Math.max(0, Math.floor(safeTotal * 0.2));
+  const role2 = Math.max(0, Math.floor(safeTotal * 0.1));
+  const hdr1 = Math.max(0, Math.floor(safeTotal * 0.1));
+  const hdr2 = Math.max(0, Math.floor(safeTotal * 0.05));
+  const used = teaching1 + teaching2 + role1 + role2 + hdr1 + hdr2;
+  const service = Math.max(0, safeTotal - used);
+
+  const teachingUnits = [
+    ["CITS2401", "CITS2200"],
+    ["CITS3002", "CITS1401"],
+    ["CITS1001", "CITS2005"],
+  ] as const;
+  const hdrStudents = [
+    ["Student A", "Student B"],
+    ["Student C", "Student D"],
+    ["Student E", "Student F"],
+  ] as const;
+  const [unitA, unitB] = teachingUnits[id % teachingUnits.length];
+  const [studentA, studentB] = hdrStudents[id % hdrStudents.length];
+
+  return {
+    Teaching: [
+      { name: unitA, hours: teaching1 },
+      { name: unitB, hours: teaching2 },
+    ],
+    "Assigned Roles": [
+      { name: "Program Chair", hours: role1 },
+      { name: "Outreach Chair", hours: role2 },
+    ],
+    HDR: [
+      { name: studentA, hours: hdr1 },
+      { name: studentB, hours: hdr2 },
+    ],
+    Service: [{ name: "Committee support", hours: service }],
+  };
 }
 
 function extractRequestReason(description: string) {
@@ -123,6 +140,59 @@ function cleanDescription(description: string) {
   const idx = description.indexOf(marker);
   if (idx === -1) return description;
   return description.slice(0, idx).trim();
+}
+
+function parsePeriod(periodLabel: string) {
+  const matched = periodLabel.match(/(\d{4})-(1|2)/);
+  if (!matched) return { year: NaN, semester: "" as "" | "S1" | "S2" };
+  return {
+    year: Number(matched[1]),
+    semester: matched[2] === "1" ? ("S1" as const) : ("S2" as const),
+  };
+}
+
+type SemesterSlot = { key: string; year: number; semester: "S1" | "S2"; label: string };
+
+function buildSemesterSlots(yearFrom: number, yearTo: number, semesterFilter: "All" | "S1" | "S2") {
+  const slots: SemesterSlot[] = [];
+  for (let year = yearFrom; year <= yearTo; year += 1) {
+    if (semesterFilter === "All" || semesterFilter === "S1") {
+      slots.push({ key: `${year}-S1`, year, semester: "S1", label: `${year} S1` });
+    }
+    if (semesterFilter === "All" || semesterFilter === "S2") {
+      slots.push({ key: `${year}-S2`, year, semester: "S2", label: `${year} S2` });
+    }
+  }
+  return slots;
+}
+
+function computeYAxisDomain(values: Array<number | null>) {
+  const nums = values.filter((v): v is number => typeof v === "number" && Number.isFinite(v));
+  if (!nums.length) return [0, 10] as [number, number];
+  const min = Math.min(...nums);
+  const max = Math.max(...nums);
+  if (min === max) {
+    const padded = Math.max(1, Math.ceil(max * 0.2));
+    return [Math.max(0, min - padded), max + padded] as [number, number];
+  }
+  const span = max - min;
+  const pad = Math.max(1, Math.ceil(span * 0.15));
+  return [Math.max(0, min - pad), max + pad] as [number, number];
+}
+
+function reseedSemestersIfNeeded(items: MockRequest[]) {
+  const uniquePeriods = new Set(items.map((item) => item.periodLabel));
+  // Old cached data often has only one semester; reseed it for visualization readability.
+  if (uniquePeriods.size >= 5) return items;
+  const semesterPool = ["2024-1", "2024-2", "2025-1", "2025-2", "2026-1"] as const;
+  return items.map((item, idx) => {
+    const periodLabel = semesterPool[idx % semesterPool.length];
+    return {
+      ...item,
+      periodLabel,
+      semesterLabel: periodLabel.endsWith("-2") ? "Sem2" : "Sem1",
+    };
+  });
 }
 
 export default function Supervisor() {
@@ -160,13 +230,21 @@ export default function Supervisor() {
     [chatHistory, selectedChatDate]
   );
   const currentYear = useMemo(() => new Date().getFullYear(), []);
+  const currentSemester = useMemo<"S1" | "S2">(() => {
+    const month = new Date().getMonth() + 1;
+    return month <= 6 ? "S1" : "S2";
+  }, []);
+  const currentSemesterLabel = useMemo(
+    () => `${currentYear} ${currentSemester}`,
+    [currentYear, currentSemester]
+  );
 
   const [loading] = useState(false);
   const [pending, setPending] = useState<MockRequest[]>(() => {
     const saved = readSupervisorState();
     if (saved.length > 0) {
       const drafts = consumeAcademicDrafts();
-      return mergeDraftsIntoRequests(saved, drafts);
+      return mergeDraftsIntoRequests(reseedSemestersIfNeeded(saved), drafts);
     }
 
     // Fake data (plus requests submitted from Academic page via localStorage)
@@ -368,7 +446,7 @@ export default function Supervisor() {
       },
     ];
     const drafts = consumeAcademicDrafts();
-    return [...drafts, ...base];
+    return [...drafts, ...reseedSemestersIfNeeded(base)];
   });
 
   useEffect(() => {
@@ -440,6 +518,7 @@ export default function Supervisor() {
   const [noteModalOpen, setNoteModalOpen] = useState(false);
   const [noteDraft, setNoteDraft] = useState("");
   const [noteError, setNoteError] = useState("");
+  const [detailsModalError, setDetailsModalError] = useState("");
   const [noteDecision, setNoteDecision] = useState<"approve" | "reject">("approve");
   const [noteTargetId, setNoteTargetId] = useState<number | null>(null);
 
@@ -457,6 +536,25 @@ export default function Supervisor() {
     year: "",
     semester: "",
   });
+  const sectionTabs = [
+    { key: "approval", label: "Workload Approval" },
+    { key: "visualization", label: "Visualization" },
+    { key: "export", label: "Export Excel" },
+  ] as const;
+  const [activeSection, setActiveSection] = useState<(typeof sectionTabs)[number]["key"]>("approval");
+  const [visualYearFromInput, setVisualYearFromInput] = useState("");
+  const [visualYearToInput, setVisualYearToInput] = useState("");
+  const [visualSemesterInput, setVisualSemesterInput] = useState<"All" | "S1" | "S2">("All");
+  const [visualError, setVisualError] = useState("");
+  const [appliedVisualFilters, setAppliedVisualFilters] = useState({
+    yearFrom: "",
+    yearTo: "",
+    semester: "All" as "All" | "S1" | "S2",
+  });
+  const [exportYearFromInput, setExportYearFromInput] = useState("");
+  const [exportYearToInput, setExportYearToInput] = useState("");
+  const [exportSemesterInput, setExportSemesterInput] = useState<"All" | "S1" | "S2">("All");
+  const [exportMessage, setExportMessage] = useState("");
   const selectedYear = Number(searchYearInput) || currentYear;
   const yearOptions = useMemo(
     () => Array.from({ length: 11 }, (_, i) => String(selectedYear - 5 + i)),
@@ -532,6 +630,104 @@ export default function Supervisor() {
     const start = (page - 1) * pageSize;
     return itemsForFilter.slice(start, start + pageSize);
   }, [itemsForFilter, page]);
+  const filteredVisualizationItems = useMemo(() => {
+    return pending.filter((item) => {
+      const { year, semester } = parsePeriod(item.periodLabel);
+      if (appliedVisualFilters.semester !== "All" && semester !== appliedVisualFilters.semester) {
+        return false;
+      }
+      if (appliedVisualFilters.yearFrom && Number.isFinite(year) && year < Number(appliedVisualFilters.yearFrom)) {
+        return false;
+      }
+      if (appliedVisualFilters.yearTo && Number.isFinite(year) && year > Number(appliedVisualFilters.yearTo)) {
+        return false;
+      }
+      return true;
+    });
+  }, [pending, appliedVisualFilters]);
+  const visualizationSemesterSlots = useMemo(() => {
+    const parsedYears = filteredVisualizationItems
+      .map((item) => parsePeriod(item.periodLabel).year)
+      .filter((year) => Number.isFinite(year));
+    const dataMaxYear = parsedYears.length > 0 ? Math.max(...parsedYears) : currentYear;
+    const defaultTo = dataMaxYear;
+    const defaultFrom = dataMaxYear - 2;
+    const from = appliedVisualFilters.yearFrom ? Number(appliedVisualFilters.yearFrom) : defaultFrom;
+    const to = appliedVisualFilters.yearTo ? Number(appliedVisualFilters.yearTo) : defaultTo;
+    const safeFrom = Number.isFinite(from) ? from : defaultFrom;
+    const safeTo = Number.isFinite(to) ? to : defaultTo;
+    return buildSemesterSlots(Math.min(safeFrom, safeTo), Math.max(safeFrom, safeTo), appliedVisualFilters.semester);
+  }, [appliedVisualFilters, currentYear, filteredVisualizationItems]);
+  const averageWorkHoursBySemesterData = useMemo(() => {
+    const bucket = new Map<string, { totalHours: number; records: number }>();
+    filteredVisualizationItems.forEach((item) => {
+      const { year, semester } = parsePeriod(item.periodLabel);
+      if (!Number.isFinite(year) || !semester) return;
+      const key = `${year}-${semester}`;
+      const existing = bucket.get(key) ?? { totalHours: 0, records: 0 };
+      existing.totalHours += item.hours;
+      existing.records += 1;
+      bucket.set(key, existing);
+    });
+    return visualizationSemesterSlots.map((slot) => {
+      const value = bucket.get(slot.key);
+      return {
+        semester: slot.label,
+        averageHours: value && value.records > 0 ? Number((value.totalHours / value.records).toFixed(2)) : null,
+      };
+    });
+  }, [filteredVisualizationItems, visualizationSemesterSlots]);
+  const trendChartData = useMemo(() => {
+    const bucket = new Map<string, { totalHours: number }>();
+    filteredVisualizationItems.forEach((item) => {
+      const { year, semester } = parsePeriod(item.periodLabel);
+      if (!Number.isFinite(year) || !semester) return;
+      const key = `${year}-${semester}`;
+      const existing = bucket.get(key) ?? { totalHours: 0 };
+      existing.totalHours += item.hours;
+      bucket.set(key, existing);
+    });
+    return visualizationSemesterSlots.map((slot) => ({
+      semester: slot.label,
+      totalHours: bucket.get(slot.key)?.totalHours ?? null,
+    }));
+  }, [filteredVisualizationItems, visualizationSemesterSlots]);
+  const averageHoursDomain = useMemo(
+    () => computeYAxisDomain(averageWorkHoursBySemesterData.map((item) => item.averageHours)),
+    [averageWorkHoursBySemesterData]
+  );
+  const totalHoursDomain = useMemo(
+    () => computeYAxisDomain(trendChartData.map((item) => item.totalHours)),
+    [trendChartData]
+  );
+  const visualizationSummary = useMemo(() => {
+    const totalAcademics = filteredVisualizationItems.length;
+    const totalWorkHours = filteredVisualizationItems.reduce((sum, item) => sum + item.hours, 0);
+    const pendingRequests = filteredVisualizationItems.filter((item) => item.status === "pending").length;
+    const approvedRequests = filteredVisualizationItems.filter((item) => item.status === "approved").length;
+    const rejectedRequests = filteredVisualizationItems.filter((item) => item.status === "rejected").length;
+    const workHoursPerAcademic =
+      totalAcademics > 0 ? Number((totalWorkHours / totalAcademics).toFixed(1)) : 0;
+    return {
+      totalAcademics,
+      totalWorkHours,
+      pendingRequests,
+      approvedRequests,
+      rejectedRequests,
+      workHoursPerAcademic,
+    };
+  }, [filteredVisualizationItems]);
+  const reportingPeriodLabel = useMemo(() => {
+    if (visualizationSemesterSlots.length === 0) return "N/A";
+    const first = visualizationSemesterSlots[0];
+    const last = visualizationSemesterSlots[visualizationSemesterSlots.length - 1];
+    if (first.year === last.year) {
+      return `${first.year} ${appliedVisualFilters.semester === "All" ? "All Semesters" : appliedVisualFilters.semester}`;
+    }
+    return `${first.year}-${last.year} ${
+      appliedVisualFilters.semester === "All" ? "All Semesters" : appliedVisualFilters.semester
+    }`;
+  }, [visualizationSemesterSlots, appliedVisualFilters.semester]);
 
   function toggleSelected(id: number) {
     setSelectedIds((prev) => {
@@ -547,6 +743,55 @@ export default function Supervisor() {
     if (status === "approved") return "Approved";
     if (status === "rejected") return "Rejected";
     return status;
+  }
+
+  function handleApplyVisualizationFilter() {
+    setVisualError("");
+    const fromYear = Number(visualYearFromInput);
+    const toYear = Number(visualYearToInput);
+    if (!Number.isFinite(fromYear) || !Number.isFinite(toYear)) {
+      setVisualError("Please enter valid year values.");
+      return;
+    }
+    const startYear = Math.min(fromYear, toYear);
+    const endYear = Math.max(fromYear, toYear);
+    if (endYear - startYear > 2) {
+      setVisualError("Maximum range is 3 years.");
+      return;
+    }
+    setAppliedVisualFilters({
+      yearFrom: String(startYear),
+      yearTo: String(endYear),
+      semester: visualSemesterInput,
+    });
+  }
+
+  function handleExportExcel() {
+    setExportMessage("");
+    const rows = pending
+      .filter((item) => {
+        const { year, semester } = parsePeriod(item.periodLabel);
+        if (exportSemesterInput !== "All" && semester !== exportSemesterInput) return false;
+        if (exportYearFromInput && Number.isFinite(year) && year < Number(exportYearFromInput)) return false;
+        if (exportYearToInput && Number.isFinite(year) && year > Number(exportYearToInput)) return false;
+        return true;
+      })
+      .map((item) => ({
+        Name: item.name,
+        StaffID: item.studentId,
+        Title: item.title,
+        Department: item.department,
+        YearSemester: item.periodLabel,
+        Status: statusLabel(item.status),
+        TotalHours: item.hours,
+        SubmittedTime: submittedTimeById(item.id),
+      }));
+
+    const sheet = XLSX.utils.json_to_sheet(rows);
+    const workbook = XLSX.utils.book_new();
+    XLSX.utils.book_append_sheet(workbook, sheet, "Supervisor Workload");
+    XLSX.writeFile(workbook, "Supervisor_Workload.xlsx");
+    setExportMessage(`Exported ${rows.length} records to Supervisor_Workload.xlsx.`);
   }
 
   const canSubmit =
@@ -618,6 +863,15 @@ export default function Supervisor() {
   }
 
   function openNoteModal(kind: "approve" | "reject", id: number) {
+    if (detailsBreakdown) {
+      const hasEmptyRow = (Object.keys(detailsBreakdown) as BreakdownCategory[]).some((tab) =>
+        detailsBreakdown[tab].some((row) => row.name.trim() === "")
+      );
+      if (hasEmptyRow) {
+        setDetailsModalError("Empty breakdown rows must be completed or deleted first.");
+        return;
+      }
+    }
     setNoteDecision(kind);
     setNoteTargetId(id);
     setNoteDraft("");
@@ -659,15 +913,30 @@ export default function Supervisor() {
 
   function openDetails(item: MockRequest) {
     setDetailsItem(item);
-    setDetailsBreakdown(breakdownById(item.id));
+    setDetailsBreakdown(breakdownById(item.id, item.hours));
     setDetailsOpen(true);
     setDescriptionExpanded(false);
+    setDetailsModalError("");
+  }
+
+  function requestCloseDetails() {
+    if (detailsBreakdown) {
+      const hasEmptyRow = (Object.keys(detailsBreakdown) as BreakdownCategory[]).some((tab) =>
+        detailsBreakdown[tab].some((row) => row.name.trim() === "")
+      );
+      if (hasEmptyRow) {
+        setDetailsModalError("Empty breakdown rows must be completed or deleted before closing.");
+        return;
+      }
+    }
+    closeDetails();
   }
 
   function closeDetails() {
     setDetailsOpen(false);
     setDetailsItem(null);
     setDetailsBreakdown(null);
+    setDetailsModalError("");
     setNoteModalOpen(false);
     setNoteDraft("");
     setNoteError("");
@@ -675,6 +944,7 @@ export default function Supervisor() {
   }
 
   function updateBreakdownRow(tab: BreakdownCategory, idx: number, field: "name" | "hours", value: string) {
+    setDetailsModalError("");
     setDetailsBreakdown((prev) => {
       if (!prev) return prev;
       const nextRows = prev[tab].map((row, rowIdx) => {
@@ -685,6 +955,30 @@ export default function Supervisor() {
         return { ...row, hours: normalizedHours };
       });
       return { ...prev, [tab]: nextRows };
+    });
+  }
+
+  function addBreakdownRow(tab: BreakdownCategory) {
+    setDetailsModalError("");
+    setDetailsBreakdown((prev) => {
+      if (!prev) return prev;
+      return {
+        ...prev,
+        [tab]: [...prev[tab], { name: "", hours: 0 }],
+      };
+    });
+  }
+
+  function removeBreakdownRow(tab: BreakdownCategory, idx: number) {
+    setDetailsModalError("");
+    setDetailsBreakdown((prev) => {
+      if (!prev) return prev;
+      const currentRows = prev[tab];
+      if (currentRows.length <= 1) return prev;
+      return {
+        ...prev,
+        [tab]: currentRows.filter((_, rowIdx) => rowIdx !== idx),
+      };
     });
   }
 
@@ -965,6 +1259,10 @@ export default function Supervisor() {
             </div>
           )}
 
+          <SectionTabs tabs={[...sectionTabs]} activeKey={activeSection} onChange={(key) => setActiveSection(key as (typeof sectionTabs)[number]["key"])} />
+
+          {activeSection === "approval" && (
+            <section>
           {/* Search Fields */}
           <div className="grid grid-cols-3 gap-6">
             <div className="flex flex-col gap-1">
@@ -1251,7 +1549,7 @@ export default function Supervisor() {
             {detailsOpen && detailsItem && (
               <div
                 className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 p-4"
-                onClick={closeDetails}
+                onClick={requestCloseDetails}
               >
                 <div
                   className="w-full max-w-2xl rounded-sm bg-white p-0 shadow"
@@ -1276,7 +1574,7 @@ export default function Supervisor() {
                         </div>
                         <button
                           type="button"
-                          onClick={closeDetails}
+                          onClick={requestCloseDetails}
                           className="rounded bg-slate-200 px-3 py-1 text-xs font-bold text-slate-700 hover:bg-slate-300"
                         >
                           Close
@@ -1372,10 +1670,11 @@ export default function Supervisor() {
                               <tr className="text-left text-xs font-semibold uppercase text-slate-600">
                                 <th className="px-3 py-2">{detailsTab}</th>
                                 <th className="w-[120px] px-3 py-2 text-right">Hours</th>
+                                <th className="w-[88px] px-3 py-2 text-center">Action</th>
                               </tr>
                             </thead>
                             <tbody className="divide-y divide-slate-200 bg-white text-sm text-slate-700">
-                              {(detailsBreakdown?.[detailsTab] ?? breakdownById(detailsItem.id)[detailsTab]).map((row, idx) => (
+                              {(detailsBreakdown?.[detailsTab] ?? breakdownById(detailsItem.id, detailsItem.hours)[detailsTab]).map((row, idx) => (
                                 <tr key={`${detailsItem.id}-${detailsTab}-${idx}`}>
                                   <td className="px-3 py-2">
                                     <input
@@ -1395,16 +1694,38 @@ export default function Supervisor() {
                                       className="ml-auto w-24 rounded border border-slate-300 px-2 py-1 text-right tabular-nums font-sans text-sm"
                                     />
                                   </td>
+                                  <td className="px-3 py-2 text-center">
+                                    <button
+                                      type="button"
+                                      onClick={() => removeBreakdownRow(detailsTab, idx)}
+                                      className="rounded bg-slate-200 px-2 py-1 text-xs font-semibold text-slate-700 hover:bg-slate-300 disabled:opacity-50"
+                                      disabled={(detailsBreakdown?.[detailsTab] ?? []).length <= 1}
+                                    >
+                                      Delete
+                                    </button>
+                                  </td>
                                 </tr>
                               ))}
+                              <tr>
+                                <td colSpan={3} className="px-3 py-2">
+                                  <button
+                                    type="button"
+                                    onClick={() => addBreakdownRow(detailsTab)}
+                                    className="rounded bg-[#2f4d9c] px-3 py-1 text-xs font-semibold text-white hover:bg-[#264183]"
+                                  >
+                                    + Add Row
+                                  </button>
+                                </td>
+                              </tr>
                               <tr className="bg-slate-50">
                                 <td className="px-3 py-2 font-semibold">Total</td>
                                 <td className="px-3 py-2 text-right font-semibold tabular-nums font-sans">
-                                  {(detailsBreakdown?.[detailsTab] ?? breakdownById(detailsItem.id)[detailsTab]).reduce(
+                                  {(detailsBreakdown?.[detailsTab] ?? breakdownById(detailsItem.id, detailsItem.hours)[detailsTab]).reduce(
                                     (sum, row) => sum + row.hours,
                                     0
                                   )}
                                 </td>
+                                <td />
                               </tr>
                             </tbody>
                           </table>
@@ -1441,6 +1762,9 @@ export default function Supervisor() {
                           className="mt-2 h-24 w-full resize-none rounded-sm border border-slate-300 bg-white px-4 py-3 text-sm text-slate-700"
                         />
                       </div>
+                      {detailsModalError && (
+                        <div className="text-sm font-semibold text-[#dc2626]">{detailsModalError}</div>
+                      )}
 
                       {detailsItem.status === "pending" && (
                         <div className="flex items-center justify-center gap-24 pt-2">
@@ -1514,7 +1838,155 @@ export default function Supervisor() {
                 </div>
               </div>
             )}
-          </div>
+            </div>
+            </section>
+          )}
+
+          {activeSection === "visualization" && (
+            <div className="space-y-5">
+              <div>
+                <div className="text-2xl font-semibold text-slate-800">Visualization</div>
+                <div className="text-sm text-slate-500">
+                  Use filters to view workload status and work-hour trends.
+                </div>
+              </div>
+
+              <div className="rounded-md bg-[#f4f7ff] p-4">
+                <ReportingFilterIntro
+                  title="Reporting Filter"
+                  description="Select year and semester to update the reporting window for all charts."
+                />
+                <div className="mt-4 grid grid-cols-1 gap-4 md:grid-cols-[260px_260px_280px_auto]">
+                  <label className="flex flex-col gap-1">
+                    <span className="text-xs font-semibold uppercase text-[#2f4d9c]">Year From</span>
+                    <input
+                      value={visualYearFromInput}
+                      onChange={(e) => setVisualYearFromInput(e.target.value)}
+                      placeholder="e.g. 2024"
+                      className="rounded border border-slate-300 px-3 py-2 text-sm"
+                    />
+                  </label>
+                  <label className="flex flex-col gap-1">
+                    <span className="text-xs font-semibold uppercase text-[#2f4d9c]">Year To</span>
+                    <input
+                      value={visualYearToInput}
+                      onChange={(e) => setVisualYearToInput(e.target.value)}
+                      placeholder="e.g. 2026"
+                      className="rounded border border-slate-300 px-3 py-2 text-sm"
+                    />
+                  </label>
+                  <label className="flex flex-col gap-1">
+                    <span className="text-xs font-semibold uppercase text-[#2f4d9c]">Semester</span>
+                    <select
+                      value={visualSemesterInput}
+                      onChange={(e) => setVisualSemesterInput(e.target.value as "All" | "S1" | "S2")}
+                      className="rounded border border-slate-300 px-3 py-2 text-sm"
+                    >
+                      <option value="All">All</option>
+                      <option value="S1">S1</option>
+                      <option value="S2">S2</option>
+                    </select>
+                  </label>
+                  <div className="flex flex-col gap-1">
+                    <span className="select-none text-xs font-semibold uppercase text-transparent">Action</span>
+                    <button
+                      type="button"
+                      onClick={handleApplyVisualizationFilter}
+                      className="rounded bg-[#2f4d9c] px-4 py-2 text-sm font-semibold text-white hover:bg-[#264183]"
+                    >
+                      Search
+                    </button>
+                  </div>
+                </div>
+                {visualError && <div className="mt-3 text-sm font-semibold text-[#dc2626]">{visualError}</div>}
+                <div className="mt-2 text-sm font-semibold text-[#2f4d9c]">
+                  For readability, Visualization supports up to 3 years. Export more data in Export Excel.
+                </div>
+              </div>
+
+              <ReportingPeriodBar periodLabel={reportingPeriodLabel} />
+              <VisualizationSummaryCards summary={visualizationSummary} />
+
+              <div className="grid grid-cols-1 gap-4 lg:grid-cols-2">
+                <LineMetricChartCard
+                  title="Total Work Hours Trend"
+                  data={trendChartData}
+                  dataKey="totalHours"
+                  legendName="Total Hours"
+                  yDomain={totalHoursDomain}
+                  currentSemesterLabel={currentSemesterLabel}
+                />
+                <LineMetricChartCard
+                  title="Average Work Hours by Semester"
+                  data={averageWorkHoursBySemesterData}
+                  dataKey="averageHours"
+                  legendName="Average Hours"
+                  yDomain={averageHoursDomain}
+                  currentSemesterLabel={currentSemesterLabel}
+                />
+              </div>
+            </div>
+          )}
+
+          {activeSection === "export" && (
+            <div className="space-y-5">
+              <div>
+                <div className="text-2xl font-semibold text-slate-800">Export Excel</div>
+                <div className="text-sm text-slate-500">
+                  Configure optional filters and export supervisor workload data.
+                </div>
+              </div>
+
+              <div className="rounded-md bg-[#f4f7ff] p-4">
+                <div className="grid grid-cols-1 gap-4 md:grid-cols-[260px_260px_280px_auto]">
+                  <label className="flex flex-col gap-1">
+                    <span className="text-xs font-semibold uppercase text-[#2f4d9c]">Year From</span>
+                    <input
+                      value={exportYearFromInput}
+                      onChange={(e) => setExportYearFromInput(e.target.value)}
+                      placeholder="Optional"
+                      className="rounded border border-slate-300 px-3 py-2 text-sm"
+                    />
+                  </label>
+                  <label className="flex flex-col gap-1">
+                    <span className="text-xs font-semibold uppercase text-[#2f4d9c]">Year To</span>
+                    <input
+                      value={exportYearToInput}
+                      onChange={(e) => setExportYearToInput(e.target.value)}
+                      placeholder="Optional"
+                      className="rounded border border-slate-300 px-3 py-2 text-sm"
+                    />
+                  </label>
+                  <label className="flex flex-col gap-1">
+                    <span className="text-xs font-semibold uppercase text-[#2f4d9c]">Semester</span>
+                    <select
+                      value={exportSemesterInput}
+                      onChange={(e) => setExportSemesterInput(e.target.value as "All" | "S1" | "S2")}
+                      className="rounded border border-slate-300 px-3 py-2 text-sm"
+                    >
+                      <option value="All">All</option>
+                      <option value="S1">S1</option>
+                      <option value="S2">S2</option>
+                    </select>
+                  </label>
+                  <div className="flex flex-col gap-1">
+                    <span className="select-none text-xs font-semibold uppercase text-transparent">Action</span>
+                    <button
+                      type="button"
+                      onClick={handleExportExcel}
+                      className="rounded bg-[#2f4d9c] px-4 py-2 text-sm font-semibold text-white hover:bg-[#264183]"
+                    >
+                      Export Excel
+                    </button>
+                  </div>
+                </div>
+                {exportMessage && <div className="mt-3 text-sm font-semibold text-[#2f4d9c]">{exportMessage}</div>}
+                <div className="mt-2 text-sm text-slate-600">
+                  If years are blank, export all years. If only one side is blank, export from/to the available range.
+                </div>
+              </div>
+            </div>
+          )}
         </div>
       </div>
     </div>
