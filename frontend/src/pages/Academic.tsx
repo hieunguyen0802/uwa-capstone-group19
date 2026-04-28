@@ -1,10 +1,25 @@
 import { useEffect, useMemo, useState } from "react";
+import * as XLSX from "xlsx";
+import {
+  CartesianGrid,
+  Legend,
+  Line,
+  LineChart,
+  ResponsiveContainer,
+  Tooltip,
+  XAxis,
+  YAxis,
+} from "recharts";
 import DashboardHeader from "../components/common/DashboardHeader";
 import InfoField from "../components/common/InfoField";
 import PaginationControls from "../components/common/PaginationControls";
 import ProfileModal from "../components/common/ProfileModal";
+import ReportingFilterIntro from "../components/common/ReportingFilterIntro";
+import ReportingPeriodBar from "../components/common/ReportingPeriodBar";
 import SearchButton from "../components/common/SearchButton";
+import SectionTabs from "../components/common/SectionTabs";
 import StatusPill from "../components/common/StatusPill";
+import YearRangeSemesterActionRow from "../components/common/YearRangeSemesterActionRow";
 import WorkHoursBadge from "../components/common/WorkHoursBadge";
 
 type AcademicItem = {
@@ -112,56 +127,73 @@ function parseDateTime(value: string) {
   return new Date(value.replace(" ", "T"));
 }
 
-function breakdownById(id: number): BreakdownData {
-  const patterns: BreakdownData[] = [
-    {
-      Teaching: [
-        { name: "CITS2401", hours: 15 },
-        { name: "CITS2200", hours: 5 },
-      ],
-      "Assigned Roles": [
-        { name: "Program Chair", hours: 20 },
-        { name: "Outreach Chair", hours: 10 },
-        { name: "Accreditation", hours: 20 },
-      ],
-      HDR: [
-        { name: "Student A", hours: 2 },
-        { name: "Student B", hours: 2 },
-      ],
-      Service: [
-        { name: "Committee support", hours: 6 },
-        { name: "Peer review", hours: 4 },
-      ],
-    },
-    {
-      Teaching: [
-        { name: "CITS1401", hours: 8 },
-        { name: "CITS1001", hours: 4 },
-      ],
-      "Assigned Roles": [{ name: "Course Coordinator", hours: 8 }],
-      HDR: [{ name: "Student C", hours: 3 }],
-      Service: [
-        { name: "School events", hours: 3 },
-        { name: "Exam board", hours: 2 },
-      ],
-    },
-    {
-      Teaching: [{ name: "CITS3002", hours: 15 }],
-      "Assigned Roles": [
-        { name: "Industry liaison", hours: 6 },
-        { name: "Advisory board", hours: 4 },
-      ],
-      HDR: [
-        { name: "Student D", hours: 3 },
-        { name: "Student E", hours: 2 },
-      ],
-      Service: [
-        { name: "Peer review", hours: 2 },
-        { name: "Workshop", hours: 2 },
-      ],
-    },
-  ];
-  return patterns[id % patterns.length];
+function yearSemesterById(id: number) {
+  const dt = parseDateTime(pushedTimeById(id));
+  if (Number.isNaN(dt.getTime())) return { year: NaN, semester: "" as "" | "S1" | "S2" };
+  return { year: dt.getFullYear(), semester: dt.getMonth() < 6 ? ("S1" as const) : ("S2" as const) };
+}
+
+type SemesterSlot = { key: string; label: string };
+
+function buildSemesterSlots(yearFrom: number, yearTo: number, semesterFilter: "All" | "S1" | "S2") {
+  const slots: SemesterSlot[] = [];
+  for (let year = yearFrom; year <= yearTo; year += 1) {
+    if (semesterFilter === "All" || semesterFilter === "S1") slots.push({ key: `${year}-S1`, label: `${year} S1` });
+    if (semesterFilter === "All" || semesterFilter === "S2") slots.push({ key: `${year}-S2`, label: `${year} S2` });
+  }
+  return slots;
+}
+
+function computeYAxisDomain(values: Array<number | null>) {
+  const nums = values.filter((v): v is number => typeof v === "number" && Number.isFinite(v));
+  if (!nums.length) return [0, 10] as [number, number];
+  const min = Math.min(...nums);
+  const max = Math.max(...nums);
+  if (min === max) return [Math.max(0, min - 2), max + 2] as [number, number];
+  const span = max - min;
+  const pad = Math.max(1, Math.ceil(span * 0.15));
+  return [Math.max(0, min - pad), max + pad] as [number, number];
+}
+
+function breakdownById(id: number, totalHours: number): BreakdownData {
+  const safeTotal = Math.max(0, Math.round(totalHours));
+  const teaching1 = Math.max(0, Math.floor(safeTotal * 0.3));
+  const teaching2 = Math.max(0, Math.floor(safeTotal * 0.15));
+  const role1 = Math.max(0, Math.floor(safeTotal * 0.2));
+  const role2 = Math.max(0, Math.floor(safeTotal * 0.1));
+  const hdr1 = Math.max(0, Math.floor(safeTotal * 0.1));
+  const hdr2 = Math.max(0, Math.floor(safeTotal * 0.05));
+  const used = teaching1 + teaching2 + role1 + role2 + hdr1 + hdr2;
+  const service = Math.max(0, safeTotal - used);
+
+  const teachingUnits = [
+    ["CITS2401", "CITS2200"],
+    ["CITS3002", "CITS1401"],
+    ["CITS1001", "CITS2005"],
+  ] as const;
+  const hdrStudents = [
+    ["Student A", "Student B"],
+    ["Student C", "Student D"],
+    ["Student E", "Student F"],
+  ] as const;
+  const [unitA, unitB] = teachingUnits[id % teachingUnits.length];
+  const [studentA, studentB] = hdrStudents[id % hdrStudents.length];
+
+  return {
+    Teaching: [
+      { name: unitA, hours: teaching1 },
+      { name: unitB, hours: teaching2 },
+    ],
+    "Assigned Roles": [
+      { name: "Program Chair", hours: role1 },
+      { name: "Outreach Chair", hours: role2 },
+    ],
+    HDR: [
+      { name: studentA, hours: hdr1 },
+      { name: studentB, hours: hdr2 },
+    ],
+    Service: [{ name: "Committee support", hours: service }],
+  };
 }
 
 function statusLabel(status: AcademicItem["status"]) {
@@ -208,7 +240,7 @@ function AcademicDetailModal({
   const tabs: BreakdownCategory[] = ["Teaching", "Assigned Roles", "HDR", "Service"];
   const [activeTab, setActiveTab] = useState<BreakdownCategory>("Teaching");
   const [descriptionExpanded, setDescriptionExpanded] = useState(true);
-  const breakdown = breakdownById(item.id);
+  const breakdown = breakdownById(item.id, item.hours);
   const tabRows = breakdown[activeTab];
   const tabTotal = tabRows.reduce((sum, row) => sum + row.hours, 0);
   const overallTotal = (["Teaching", "Assigned Roles", "HDR", "Service"] as BreakdownCategory[]).reduce(
@@ -234,7 +266,7 @@ function AcademicDetailModal({
           <div className="grid grid-cols-2 gap-4">
             <InfoField label="Name" value={item.name} />
             <InfoField label="Employee ID" value={item.employeeId} />
-            <InfoField label="Total Work Hours" value={String(overallTotal)} />
+            <InfoField label="Total Work Hours" value={String(item.hours)} />
             <InfoField label="Status" value={statusLabel(item.status) || "-"} />
           </div>
           <div>
@@ -588,6 +620,14 @@ export default function Academic() {
     [chatHistory, selectedChatDate]
   );
   const currentYear = useMemo(() => new Date().getFullYear(), []);
+  const currentSemester = useMemo<"S1" | "S2">(() => {
+    const month = new Date().getMonth() + 1;
+    return month <= 6 ? "S1" : "S2";
+  }, []);
+  const currentSemesterKey = useMemo(
+    () => `${currentYear}-${currentSemester}`,
+    [currentYear, currentSemester]
+  );
   const [searchYearInput, setSearchYearInput] = useState("");
   const [searchSemesterInput, setSearchSemesterInput] = useState<"" | "S1" | "S2">("");
   const [searchFilters, setSearchFilters] = useState<{
@@ -601,6 +641,25 @@ export default function Academic() {
     year: "",
     semester: "",
   });
+  const sectionTabs = [
+    { key: "approval", label: "Workload Approval" },
+    { key: "visualization", label: "Visualization" },
+    { key: "export", label: "Export Excel" },
+  ] as const;
+  const [activeSection, setActiveSection] = useState<(typeof sectionTabs)[number]["key"]>("approval");
+  const [visualYearFromInput, setVisualYearFromInput] = useState("");
+  const [visualYearToInput, setVisualYearToInput] = useState("");
+  const [visualSemesterInput, setVisualSemesterInput] = useState<"All" | "S1" | "S2">("All");
+  const [visualError, setVisualError] = useState("");
+  const [appliedVisualFilters, setAppliedVisualFilters] = useState({
+    yearFrom: "",
+    yearTo: "",
+    semester: "All" as "All" | "S1" | "S2",
+  });
+  const [exportYearFromInput, setExportYearFromInput] = useState("");
+  const [exportYearToInput, setExportYearToInput] = useState("");
+  const [exportSemesterInput, setExportSemesterInput] = useState<"All" | "S1" | "S2">("All");
+  const [exportMessage, setExportMessage] = useState("");
   const selectedYear = Number(searchYearInput) || currentYear;
   const yearOptions = useMemo(
     () => Array.from({ length: 11 }, (_, i) => String(selectedYear - 5 + i)),
@@ -645,6 +704,96 @@ export default function Academic() {
   }, [filteredItems, page]);
 
   const detailItem = useMemo(() => items.find((x) => x.id === detailId) || null, [items, detailId]);
+  const filteredVisualizationItems = useMemo(() => {
+    return items.filter((item) => {
+      const { year, semester } = yearSemesterById(item.id);
+      if (appliedVisualFilters.semester !== "All" && semester !== appliedVisualFilters.semester) return false;
+      if (appliedVisualFilters.yearFrom && Number.isFinite(year) && year < Number(appliedVisualFilters.yearFrom)) {
+        return false;
+      }
+      if (appliedVisualFilters.yearTo && Number.isFinite(year) && year > Number(appliedVisualFilters.yearTo)) {
+        return false;
+      }
+      return true;
+    });
+  }, [items, appliedVisualFilters]);
+  const visualizationSemesterSlots = useMemo(() => {
+    const years = filteredVisualizationItems
+      .map((item) => yearSemesterById(item.id).year)
+      .filter((year) => Number.isFinite(year));
+    const maxYear = years.length ? Math.max(...years) : currentYear;
+    const from = appliedVisualFilters.yearFrom ? Number(appliedVisualFilters.yearFrom) : maxYear - 2;
+    const to = appliedVisualFilters.yearTo ? Number(appliedVisualFilters.yearTo) : maxYear;
+    return buildSemesterSlots(Math.min(from, to), Math.max(from, to), appliedVisualFilters.semester);
+  }, [filteredVisualizationItems, appliedVisualFilters, currentYear]);
+  const myVsDepartmentTrendData = useMemo(() => {
+    // Mock comparative trend data by semester for clearer personal-vs-department insights.
+    const mockBySemester: Record<string, { myHours: number; departmentAverage: number }> = {
+      "2024-S1": { myHours: 12.2, departmentAverage: 11.4 },
+      "2024-S2": { myHours: 12.8, departmentAverage: 11.7 },
+      "2025-S1": { myHours: 13.9, departmentAverage: 12.1 },
+      "2025-S2": { myHours: 12.4, departmentAverage: 11.8 },
+      "2026-S1": { myHours: 14.3, departmentAverage: 12.6 },
+      "2026-S2": { myHours: 13.6, departmentAverage: 12.4 },
+    };
+    return visualizationSemesterSlots.map((slot) => {
+      const mock = mockBySemester[slot.key];
+      const [slotYearRaw, slotSemester] = slot.key.split("-");
+      const slotYear = Number(slotYearRaw);
+      const isFutureSemester =
+        Number.isFinite(slotYear) &&
+        (slotYear > currentYear || (slotYear === currentYear && currentSemester === "S1" && slotSemester === "S2"));
+      return {
+        semester: slot.label,
+        myHours: isFutureSemester ? null : (mock?.myHours ?? null),
+        departmentAverage: isFutureSemester ? null : (mock?.departmentAverage ?? null),
+      };
+    });
+  }, [visualizationSemesterSlots, currentYear, currentSemester]);
+  const trendChartData = useMemo(() => {
+    const mockTotalBySemester: Record<string, number> = {
+      "2024-S1": 260,
+      "2024-S2": 275,
+      "2025-S1": 289,
+      "2025-S2": 255,
+      "2026-S1": 291,
+      "2026-S2": 284,
+    };
+    return visualizationSemesterSlots.map((slot) => ({
+      semester: slot.label,
+      totalHours: (() => {
+        const [slotYearRaw, slotSemester] = slot.key.split("-");
+        const slotYear = Number(slotYearRaw);
+        const isFutureSemester =
+          Number.isFinite(slotYear) &&
+          (slotYear > currentYear || (slotYear === currentYear && currentSemester === "S1" && slotSemester === "S2"));
+        return isFutureSemester ? null : (mockTotalBySemester[slot.key] ?? null);
+      })(),
+    }));
+  }, [visualizationSemesterSlots, currentYear, currentSemester]);
+  const compareTrendDomain = useMemo(
+    () =>
+      computeYAxisDomain(
+        myVsDepartmentTrendData.flatMap((item) => [item.myHours, item.departmentAverage])
+      ),
+    [myVsDepartmentTrendData]
+  );
+  const totalHoursDomain = useMemo(
+    () => computeYAxisDomain(trendChartData.map((item) => item.totalHours)),
+    [trendChartData]
+  );
+  const reportingPeriodLabel = useMemo(() => {
+    if (!visualizationSemesterSlots.length) return "N/A";
+    const firstYear = Number(visualizationSemesterSlots[0].key.split("-")[0]);
+    const lastYear = Number(visualizationSemesterSlots[visualizationSemesterSlots.length - 1].key.split("-")[0]);
+    if (!Number.isFinite(firstYear) || !Number.isFinite(lastYear)) return "N/A";
+    if (firstYear === lastYear) {
+      return `${firstYear} ${appliedVisualFilters.semester === "All" ? "All Semesters" : appliedVisualFilters.semester}`;
+    }
+    return `${firstYear}-${lastYear} ${
+      appliedVisualFilters.semester === "All" ? "All Semesters" : appliedVisualFilters.semester
+    }`;
+  }, [visualizationSemesterSlots, appliedVisualFilters.semester]);
 
   useEffect(() => {
     function syncFromSupervisor() {
@@ -784,6 +933,54 @@ export default function Academic() {
     setPage(1);
   }
 
+  function handleApplyVisualizationFilter() {
+    setVisualError("");
+    const fromYear = Number(visualYearFromInput);
+    const toYear = Number(visualYearToInput);
+    if (!Number.isFinite(fromYear) || !Number.isFinite(toYear)) {
+      setVisualError("Please enter valid year values.");
+      return;
+    }
+    const startYear = Math.min(fromYear, toYear);
+    const endYear = Math.max(fromYear, toYear);
+    if (endYear - startYear > 2) {
+      setVisualError("Maximum range is 3 years.");
+      return;
+    }
+    setAppliedVisualFilters({
+      yearFrom: String(startYear),
+      yearTo: String(endYear),
+      semester: visualSemesterInput,
+    });
+  }
+
+  function handleExportExcel() {
+    setExportMessage("");
+    const rows = items
+      .filter((item) => {
+        const { year, semester } = yearSemesterById(item.id);
+        if (exportSemesterInput !== "All" && semester !== exportSemesterInput) return false;
+        if (exportYearFromInput && Number.isFinite(year) && year < Number(exportYearFromInput)) return false;
+        if (exportYearToInput && Number.isFinite(year) && year > Number(exportYearToInput)) return false;
+        return true;
+      })
+      .map((item) => ({
+        Name: item.name,
+        EmployeeID: item.employeeId,
+        Title: titleById(item.id),
+        Description: item.description,
+        Status: statusLabel(item.status) || "-",
+        Confirmation: confirmationLabel(item.confirmation),
+        TotalHours: item.hours,
+        PushedTime: pushedTimeById(item.id),
+      }));
+    const sheet = XLSX.utils.json_to_sheet(rows);
+    const workbook = XLSX.utils.book_new();
+    XLSX.utils.book_append_sheet(workbook, sheet, "Academic Workload");
+    XLSX.writeFile(workbook, "Academic_Workload.xlsx");
+    setExportMessage(`Exported ${rows.length} records to Academic_Workload.xlsx.`);
+  }
+
   return (
     <div className="min-h-screen bg-[#f3f4f6] font-serif">
       <div className="mx-auto max-w-7xl px-4 pb-10 pt-8">
@@ -868,6 +1065,12 @@ export default function Academic() {
         />
 
         <div className="mt-6 rounded-md bg-white p-8 shadow-sm">
+          <SectionTabs
+            tabs={[...sectionTabs]}
+            activeKey={activeSection}
+            onChange={(key) => setActiveSection(key as (typeof sectionTabs)[number]["key"])}
+          />
+          <div className={activeSection === "approval" ? "" : "hidden"}>
           <div className="mt-2 grid grid-cols-3 gap-6">
             <div className="flex flex-col gap-1">
               <div className="w-fit rounded bg-[#2f4d9c] px-3 py-1 text-xs font-bold text-white">Status</div>
@@ -1014,6 +1217,160 @@ export default function Academic() {
             </button>
           </div>
           {requestInfo && <div className="mt-3 text-center text-sm font-semibold text-[#2f4d9c]">{requestInfo}</div>}
+          </div>
+
+          {activeSection === "visualization" && (
+            <div className="space-y-5">
+              <div>
+                <div className="text-2xl font-semibold text-slate-800">Visualization</div>
+                <div className="text-sm text-slate-500">Use filters to view workload status and work-hour trends.</div>
+              </div>
+              <div className="rounded-md bg-[#f4f7ff] p-4">
+                <ReportingFilterIntro
+                  title="Reporting Filter"
+                  description="Select year and semester to update the reporting window for all charts."
+                />
+                <YearRangeSemesterActionRow
+                  yearFrom={visualYearFromInput}
+                  yearTo={visualYearToInput}
+                  semester={visualSemesterInput}
+                  onYearFromChange={setVisualYearFromInput}
+                  onYearToChange={setVisualYearToInput}
+                  onSemesterChange={setVisualSemesterInput}
+                  actionLabel="Search"
+                  onActionClick={handleApplyVisualizationFilter}
+                  yearFromPlaceholder="e.g. 2024"
+                  yearToPlaceholder="e.g. 2026"
+                />
+                {visualError && <div className="mt-3 text-sm font-semibold text-[#dc2626]">{visualError}</div>}
+                <div className="mt-2 text-sm font-semibold text-[#2f4d9c]">
+                  For readability, Visualization supports up to 3 years. Export more data in Export Excel.
+                </div>
+              </div>
+              <ReportingPeriodBar periodLabel={reportingPeriodLabel} />
+              <div className="grid grid-cols-1 gap-4 lg:grid-cols-2">
+                <div className="rounded-md border border-slate-200 bg-white p-4">
+                  <div className="mb-2 text-base font-semibold text-slate-700">Total Work Hours Trend</div>
+                  <div className="h-72">
+                    <ResponsiveContainer width="100%" height="100%">
+                      <LineChart data={trendChartData}>
+                        <CartesianGrid strokeDasharray="3 3" />
+                        <XAxis dataKey="semester" />
+                        <YAxis allowDecimals={false} domain={totalHoursDomain} />
+                        <Tooltip />
+                        <Legend />
+                        <Line
+                          type="monotone"
+                          dataKey="totalHours"
+                          stroke="#2f4d9c"
+                          name="Total Hours"
+                          dot={(props: any) => {
+                            const isCurrent = props?.payload?.semester === currentSemesterKey.replace("-", " ");
+                            return (
+                              <circle
+                                cx={props.cx}
+                                cy={props.cy}
+                                r={isCurrent ? 5 : 3}
+                                fill={isCurrent ? "#2f4d9c" : "#ffffff"}
+                                stroke="#2f4d9c"
+                                strokeWidth={isCurrent ? 2 : 1.5}
+                              />
+                            );
+                          }}
+                          activeDot={{ r: 6 }}
+                        />
+                      </LineChart>
+                    </ResponsiveContainer>
+                  </div>
+                </div>
+                <div className="rounded-md border border-slate-200 bg-white p-4">
+                  <div className="mb-2 text-base font-semibold text-slate-700">
+                    My Hours vs Department Average Trend
+                  </div>
+                  <div className="h-72">
+                    <ResponsiveContainer width="100%" height="100%">
+                      <LineChart data={myVsDepartmentTrendData}>
+                        <CartesianGrid strokeDasharray="3 3" />
+                        <XAxis dataKey="semester" />
+                        <YAxis allowDecimals={false} domain={compareTrendDomain} />
+                        <Tooltip />
+                        <Legend />
+                        <Line
+                          type="monotone"
+                          dataKey="myHours"
+                          stroke="#2f4d9c"
+                          name="My Work Hours"
+                          dot={(props: any) => {
+                            const isCurrent = props?.payload?.semester === currentSemesterKey.replace("-", " ");
+                            return (
+                              <circle
+                                cx={props.cx}
+                                cy={props.cy}
+                                r={isCurrent ? 5 : 3}
+                                fill={isCurrent ? "#1e3a8a" : "#ffffff"}
+                                stroke="#2f4d9c"
+                                strokeWidth={isCurrent ? 2 : 1.5}
+                              />
+                            );
+                          }}
+                          activeDot={{ r: 6 }}
+                        />
+                        <Line
+                          type="monotone"
+                          dataKey="departmentAverage"
+                          stroke="#4f75cf"
+                          name="Department Average"
+                          dot={(props: any) => {
+                            const isCurrent = props?.payload?.semester === currentSemesterKey.replace("-", " ");
+                            return (
+                              <circle
+                                cx={props.cx}
+                                cy={props.cy}
+                                r={isCurrent ? 5 : 3}
+                                fill={isCurrent ? "#93c5fd" : "#ffffff"}
+                                stroke="#4f75cf"
+                                strokeWidth={isCurrent ? 2 : 1.5}
+                              />
+                            );
+                          }}
+                          activeDot={{ r: 6 }}
+                        />
+                      </LineChart>
+                    </ResponsiveContainer>
+                  </div>
+                </div>
+              </div>
+            </div>
+          )}
+
+          {activeSection === "export" && (
+            <div className="space-y-5">
+              <div>
+                <div className="text-2xl font-semibold text-slate-800">Export Excel</div>
+                <div className="text-sm text-slate-500">
+                  Configure optional filters and export academic workload data.
+                </div>
+              </div>
+              <div className="rounded-md bg-[#f4f7ff] p-4">
+                <YearRangeSemesterActionRow
+                  yearFrom={exportYearFromInput}
+                  yearTo={exportYearToInput}
+                  semester={exportSemesterInput}
+                  onYearFromChange={setExportYearFromInput}
+                  onYearToChange={setExportYearToInput}
+                  onSemesterChange={setExportSemesterInput}
+                  actionLabel="Export Excel"
+                  onActionClick={handleExportExcel}
+                  yearFromPlaceholder="Optional"
+                  yearToPlaceholder="Optional"
+                />
+                {exportMessage && <div className="mt-3 text-sm font-semibold text-[#2f4d9c]">{exportMessage}</div>}
+                <div className="mt-2 text-sm text-slate-600">
+                  If years are blank, export all years. If only one side is blank, export from/to the available range.
+                </div>
+              </div>
+            </div>
+          )}
         </div>
       </div>
 
