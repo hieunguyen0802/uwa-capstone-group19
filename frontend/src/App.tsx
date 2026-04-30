@@ -1,5 +1,7 @@
 import { BrowserRouter, Routes, Route } from "react-router-dom";
 import Login from "./pages/Login";
+import Register from "./pages/Register";
+import ForgotPassword from "./pages/ForgotPassword";
 import Role from "./pages/Role";
 import Academic from "./pages/Academic";
 import Supervisor from "./pages/Supervisor";
@@ -10,6 +12,9 @@ function App() {
     <BrowserRouter>
       <Routes>
         <Route path="/" element={<Login />} />
+        <Route path="/login" element={<Login />} />
+        <Route path="/register" element={<Register />} />
+        <Route path="/forgot-password" element={<ForgotPassword />} />
         <Route path="/role" element={<Role />} />
         <Route path="/academic" element={<Academic />} />
         <Route path="/supervisor" element={<Supervisor />} />
