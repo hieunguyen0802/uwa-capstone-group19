@@ -3,6 +3,7 @@ from decimal import Decimal
 from typing import Optional
 
 import openpyxl
+from django.db import transaction
 
 from api.importers.dto import WorkloadRowDTO
 from api.models import AuditLog, Department, Staff, WorkloadItem, WorkloadReport
@@ -203,43 +204,46 @@ def import_workload_excel(file_obj, uploaded_by) -> dict:
 
         if existing:
             if existing.status == 'PENDING':
-                # Supersede the old PENDING record
-                new_report = _create_report(
-                    staff, department, dto, batch_id, is_anomaly
-                )
-                existing.is_current = False
-                existing.superseded_by = new_report
-                existing.save()
-                AuditLog.objects.create(
-                    report=new_report,
-                    action_by=uploaded_by,
-                    action_type='MODIFIED_BY_REIMPORT',
-                    comment=f"Superseded report {existing.report_id}",
-                )
-                _create_items(new_report, dto)
+                with transaction.atomic():
+                    # Supersede the old PENDING record; atomic so partial writes roll back
+                    new_report = _create_report(
+                        staff, department, dto, batch_id, is_anomaly
+                    )
+                    existing.is_current = False
+                    existing.superseded_by = new_report
+                    existing.save()
+                    AuditLog.objects.create(
+                        report=new_report,
+                        action_by=uploaded_by,
+                        action_type='MODIFIED_BY_REIMPORT',
+                        comment=f"Superseded report {existing.report_id}",
+                    )
+                    _create_items(new_report, dto)
                 updated += 1
             else:
-                # Terminal state — create a correction version, flag for OPS review
-                new_report = _create_report(
-                    staff, department, dto, batch_id, is_anomaly
-                )
+                with transaction.atomic():
+                    # Terminal state — create a correction version, flag for OPS review
+                    new_report = _create_report(
+                        staff, department, dto, batch_id, is_anomaly
+                    )
+                    AuditLog.objects.create(
+                        report=new_report,
+                        action_by=uploaded_by,
+                        action_type='MODIFIED_BY_REIMPORT',
+                        comment=f"Correction of terminal record {existing.report_id} — requires OPS review.",
+                    )
+                    _create_items(new_report, dto)
+                updated += 1
+        else:
+            with transaction.atomic():
+                new_report = _create_report(staff, department, dto, batch_id, is_anomaly)
                 AuditLog.objects.create(
                     report=new_report,
                     action_by=uploaded_by,
-                    action_type='MODIFIED_BY_REIMPORT',
-                    comment=f"Correction of terminal record {existing.report_id} — requires OPS review.",
+                    action_type='IMPORTED',
+                    comment=None,
                 )
                 _create_items(new_report, dto)
-                updated += 1
-        else:
-            new_report = _create_report(staff, department, dto, batch_id, is_anomaly)
-            AuditLog.objects.create(
-                report=new_report,
-                action_by=uploaded_by,
-                action_type='IMPORTED',
-                comment=None,
-            )
-            _create_items(new_report, dto)
             created += 1
 
     return {
@@ -286,7 +290,7 @@ def _create_items(report: WorkloadReport, dto: WorkloadRowDTO):
         ))
     if dto.assigned_roles_total_pts > 0:
         # Assigned roles are stored as points × 17.25 to convert back to hours
-        role_hrs = float(dto.assigned_roles_total_pts) * float(WL_HOURS_PER_POINT)
+        role_hrs = Decimal(str(dto.assigned_roles_total_pts)) * WL_HOURS_PER_POINT
         items.append(WorkloadItem(
             report=report,
             category='ASSIGNED_ROLE',

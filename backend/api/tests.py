@@ -642,3 +642,64 @@ class TestExcelImport(BaseTestCase):
         self.assertEqual(res.status_code, 400)
         self.assertEqual(res.data['code'], 'VALIDATION_ERROR')
         self.assertIn('Missing required header fields', res.data['message'])
+
+    def test_import_skips_unknown_staff_and_reports_error(self):
+        client = self._auth_client(self.ops)
+        excel = self._make_excel_bytes(staff_number='UNKNOWN999')
+        excel.name = 'workload_import.xlsx'
+
+        res = client.post('/api/ops/import/', {'file': excel}, format='multipart')
+        self.assertEqual(res.status_code, 201)
+        self.assertEqual(res.data['created'], 0)
+        self.assertEqual(res.data['skipped'], 1)
+        self.assertTrue(len(res.data['errors']) > 0)
+        self.assertIn('UNKNOWN999', res.data['errors'][0])
+
+    def test_import_skips_casual_staff(self):
+        client = self._auth_client(self.ops)
+        excel = self._make_excel_bytes(staff_type='Paid casual staff')
+        excel.name = 'workload_import.xlsx'
+
+        res = client.post('/api/ops/import/', {'file': excel}, format='multipart')
+        self.assertEqual(res.status_code, 201)
+        self.assertEqual(res.data['created'], 0)
+        self.assertEqual(res.data['skipped'], 1)
+
+    def test_reimport_supersedes_pending_report(self):
+        from api.models import WorkloadReport, AuditLog
+
+        client = self._auth_client(self.ops)
+        # First import — creates a PENDING report
+        excel = self._make_excel_bytes(semester='S1', academic_year=2025)
+        excel.name = 'workload_import.xlsx'
+        res = client.post('/api/ops/import/', {'file': excel}, format='multipart')
+        self.assertEqual(res.status_code, 201)
+        self.assertEqual(res.data['created'], 1)
+
+        # Second import of same staff/semester/year — should supersede
+        excel2 = self._make_excel_bytes(semester='S1', academic_year=2025)
+        excel2.name = 'workload_import.xlsx'
+        res2 = client.post('/api/ops/import/', {'file': excel2}, format='multipart')
+        self.assertEqual(res2.status_code, 201)
+        self.assertEqual(res2.data['updated'], 1)
+
+        # Old report must be marked non-current
+        old = WorkloadReport.objects.filter(
+            staff=self.academic, semester='S1', academic_year=2025, is_current=False
+        )
+        self.assertTrue(old.exists())
+        # New report must be current
+        new = WorkloadReport.objects.get(
+            staff=self.academic, semester='S1', academic_year=2025, is_current=True
+        )
+        self.assertTrue(
+            AuditLog.objects.filter(report=new, action_type='MODIFIED_BY_REIMPORT').exists()
+        )
+
+    def test_import_rejects_non_xlsx_file(self):
+        client = self._auth_client(self.ops)
+        fake_csv = io.BytesIO(b'col1,col2\nval1,val2')
+        fake_csv.name = 'workload.csv'
+
+        res = client.post('/api/ops/import/', {'file': fake_csv}, format='multipart')
+        self.assertIn(res.status_code, [400, 422])

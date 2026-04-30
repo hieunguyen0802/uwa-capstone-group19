@@ -2,7 +2,7 @@ from dataclasses import dataclass, field
 from typing import Optional
 
 
-@dataclass
+@dataclass(frozen=True)
 class WorkloadRowDTO:
     """
     Parsed representation of one row in the import template.
