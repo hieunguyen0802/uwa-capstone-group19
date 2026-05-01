@@ -265,3 +265,92 @@ class TestAcademicWorkloadAndQuery(BaseTestCase):
             format='json'
         )
         self.assertEqual(res.status_code, 404)
+
+
+class TestAcademicContractEndpoints(BaseTestCase):
+    def test_academic_workloads_contract_shape(self):
+        client = self._auth_client(self.academic)
+        res = client.get('/api/academic/workloads/?status=all&page=1&page_size=10')
+        self.assertEqual(res.status_code, 200)
+        self.assertTrue(res.data['success'])
+        self.assertIn('data', res.data)
+        self.assertIn('items', res.data['data'])
+
+    def test_academic_workload_detail_contract_shape(self):
+        client = self._auth_client(self.academic)
+        res = client.get(f'/api/academic/workloads/{self.report.report_id}/')
+        self.assertEqual(res.status_code, 200)
+        self.assertTrue(res.data['success'])
+        self.assertIn('breakdown', res.data['data'])
+        self.assertIn('supervisor_note', res.data['data'])
+
+    def test_confirm_workload_blocked_by_anomaly(self):
+        client = self._auth_client(self.academic)
+        res = client.post(
+            f'/api/academic/workloads/{self.report.report_id}/confirm/',
+            data={'confirmation': 'confirmed'},
+            format='json'
+        )
+        self.assertEqual(res.status_code, 409)
+        self.assertIn('anomaly', res.data['errors'])
+
+    def test_confirm_workload_invalid_value(self):
+        client = self._auth_client(self.academic)
+        res = client.post(
+            f'/api/academic/workloads/{self.report.report_id}/confirm/',
+            data={'confirmation': 'unconfirmed'},
+            format='json'
+        )
+        self.assertEqual(res.status_code, 400)
+
+    def test_submit_workload_request_success(self):
+        client = self._auth_client(self.academic)
+        res = client.post(
+            '/api/academic/workload-requests/',
+            data={
+                'workload_ids': [str(self.report.report_id)],
+                'request_reason': 'Please review my updated workload.',
+            },
+            format='json'
+        )
+        self.assertEqual(res.status_code, 201)
+        self.assertTrue(res.data['success'])
+        self.assertEqual(res.data['data']['status'], 'pending')
+
+    def test_submit_workload_request_duplicate_conflict(self):
+        client = self._auth_client(self.academic)
+        payload = {
+            'workload_ids': [str(self.report.report_id)],
+            'request_reason': 'Please review my updated workload.',
+        }
+        first = client.post('/api/academic/workload-requests/', data=payload, format='json')
+        self.assertEqual(first.status_code, 201)
+
+        second = client.post('/api/academic/workload-requests/', data=payload, format='json')
+        self.assertEqual(second.status_code, 409)
+
+    def test_submit_workload_request_reason_required(self):
+        client = self._auth_client(self.academic)
+        res = client.post(
+            '/api/academic/workload-requests/',
+            data={'workload_ids': [str(self.report.report_id)], 'request_reason': ''},
+            format='json'
+        )
+        self.assertEqual(res.status_code, 400)
+
+    def test_submit_workload_request_reason_length(self):
+        client = self._auth_client(self.academic)
+        res = client.post(
+            '/api/academic/workload-requests/',
+            data={
+                'workload_ids': [str(self.report.report_id)],
+                'request_reason': 'a' * 241,
+            },
+            format='json'
+        )
+        self.assertEqual(res.status_code, 400)
+
+    def test_hod_forbidden_on_academic_contract_endpoints(self):
+        client = self._auth_client(self.hod_csse)
+        res = client.get('/api/academic/workloads/')
+        self.assertEqual(res.status_code, 403)
