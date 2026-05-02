@@ -4,6 +4,7 @@ from decimal import Decimal
 
 from django.core.paginator import Paginator
 from django.db import transaction
+from django.db.models import Exists, OuterRef, Q
 from django.http import HttpResponse
 from django.shortcuts import get_object_or_404
 from rest_framework import status as http_status
@@ -124,6 +125,30 @@ def _parse_breakdown_data(breakdown_data):
     return result
 
 
+def _hod_visible_qs(staff):
+    """
+    Returns the queryset of reports visible to HOD.
+
+    Visibility rules:
+      - PENDING / APPROVED / REJECTED: always visible
+      - INITIAL + academic has confirmed: visible (read-only, HOD cannot act)
+      - INITIAL + not yet confirmed: NOT visible
+    """
+    confirmed_subq = AuditLog.objects.filter(
+        report=OuterRef('pk'),
+        changes__kind='CONFIRMATION',
+        changes__confirmation='confirmed',
+    )
+    return (
+        get_workload_queryset(staff)
+        .annotate(is_confirmed=Exists(confirmed_subq))
+        .filter(
+            Q(status__in=['PENDING', 'APPROVED', 'REJECTED']) |
+            Q(status='INITIAL', is_confirmed=True)
+        )
+    )
+
+
 # ─── 8.3 GET /supervisor/workload-requests/ ───────────────────────────────────
 
 @api_view(['GET'])
@@ -131,11 +156,15 @@ def _parse_breakdown_data(breakdown_data):
 @require_role('HOD', 'SCHOOL_OPS', 'HOS')
 def supervisor_workload_requests(request):
     """GET /api/supervisor/workload-requests/"""
-    base_qs = get_workload_queryset(request.staff).exclude(status='INITIAL')
+    # base_qs: all reports HOD is allowed to see (confirmed INITIAL + submitted)
+    base_qs = _hod_visible_qs(request.staff)
     qs = base_qs.prefetch_related('items').select_related('staff__user', 'snapshot_department')
 
     status_filter = (request.GET.get('status') or 'all').lower()
-    if status_filter != 'all':
+    if status_filter == 'initial':
+        # Only show INITIAL+confirmed (visible but not yet submitted to HOD)
+        qs = qs.filter(status='INITIAL')
+    elif status_filter != 'all':
         qs = qs.filter(status=status_filter.upper())
 
     employee_id = request.GET.get('employee_id', '').strip()
@@ -160,6 +189,7 @@ def supervisor_workload_requests(request):
 
     qs = qs.order_by('-updated_at')
 
+    # Summary only counts actionable states (INITIAL is read-only for HOD)
     summary = {
         'pending': base_qs.filter(status='PENDING').count(),
         'approved': base_qs.filter(status='APPROVED').count(),
@@ -199,7 +229,7 @@ def supervisor_workload_requests(request):
 @require_role('HOD', 'SCHOOL_OPS', 'HOS')
 def supervisor_workload_request_detail(request, id):
     """GET /api/supervisor/workload-requests/{id}/"""
-    qs = get_workload_queryset(request.staff).prefetch_related('items').select_related(
+    qs = _hod_visible_qs(request.staff).prefetch_related('items').select_related(
         'staff__user', 'snapshot_department'
     )
     report = get_object_or_404(qs, report_id=id)
