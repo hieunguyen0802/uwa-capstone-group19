@@ -10,6 +10,7 @@ For the full list of settings and their values, see
 https://docs.djangoproject.com/en/5.2/ref/settings/
 """
 
+import os
 from pathlib import Path
 
 # Build paths inside the project like this: BASE_DIR / 'subdir'.
@@ -20,12 +21,16 @@ BASE_DIR = Path(__file__).resolve().parent.parent
 # See https://docs.djangoproject.com/en/5.2/howto/deployment/checklist/
 
 # SECURITY WARNING: keep the secret key used in production secret!
-SECRET_KEY = 'django-insecure-=5tbp)sjz35o+mii0bkz_1^ypw#hdjfc-e!1iq$h@-4h%!uj)-'
+# In production, set the SECRET_KEY environment variable — never commit a real key.
+SECRET_KEY = os.environ.get(
+    'DJANGO_SECRET_KEY',
+    'django-insecure-=5tbp)sjz35o+mii0bkz_1^ypw#hdjfc-e!1iq$h@-4h%!uj)-',  # dev fallback only
+)
 
 # SECURITY WARNING: don't run with debug turned on in production!
-DEBUG = True
+DEBUG = os.environ.get('DJANGO_DEBUG', 'true').lower() == 'true'
 
-ALLOWED_HOSTS = []
+ALLOWED_HOSTS = os.environ.get('DJANGO_ALLOWED_HOSTS', '').split(',') if os.environ.get('DJANGO_ALLOWED_HOSTS') else ['*']
 
 
 # Application definition
@@ -79,11 +84,11 @@ WSGI_APPLICATION = 'config.wsgi.application'
 DATABASES = {
     'default': {
         'ENGINE': 'django.db.backends.postgresql',
-        'NAME': 'workload_db',
-        'USER': 'admin',
-        'PASSWORD': 'password',
-        'HOST': 'db',
-        'PORT': 5432,
+        'NAME': os.environ.get('DB_NAME', 'workload_db'),
+        'USER': os.environ.get('DB_USER', 'admin'),
+        'PASSWORD': os.environ.get('DB_PASSWORD', 'password'),
+        'HOST': os.environ.get('DB_HOST', 'db'),
+        'PORT': int(os.environ.get('DB_PORT', 5432)),
     }
 }
 
@@ -97,6 +102,7 @@ AUTH_PASSWORD_VALIDATORS = [
     },
     {
         'NAME': 'django.contrib.auth.password_validation.MinimumLengthValidator',
+        'OPTIONS': {'min_length': 12},
     },
     {
         'NAME': 'django.contrib.auth.password_validation.CommonPasswordValidator',
@@ -129,7 +135,14 @@ STATIC_URL = 'static/'
 
 DEFAULT_AUTO_FIELD = 'django.db.models.BigAutoField'
 
-CORS_ALLOW_ALL_ORIGINS = True
+# CORS: restrict to known frontend origins in production.
+# In development, allow all origins for convenience.
+# In production, set DJANGO_CORS_ORIGINS=https://your-frontend.com
+_cors_origins = os.environ.get('DJANGO_CORS_ORIGINS', '')
+if _cors_origins:
+    CORS_ALLOWED_ORIGINS = [o.strip() for o in _cors_origins.split(',')]
+else:
+    CORS_ALLOW_ALL_ORIGINS = DEBUG  # only allow all origins in dev mode
 
 #AUTH_USER_MODEL = 'yourapp.User'
 
@@ -139,6 +152,10 @@ REST_FRAMEWORK = {
     'DEFAULT_AUTHENTICATION_CLASSES': (
         'rest_framework_simplejwt.authentication.JWTAuthentication',
     ),
+    'DEFAULT_THROTTLE_RATES': {
+        # Login endpoint: 5 attempts per minute per IP (brute-force protection)
+        'login': '5/minute',
+    },
 }
 
 from datetime import timedelta

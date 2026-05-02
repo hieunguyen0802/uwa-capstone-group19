@@ -309,6 +309,16 @@ def academic_submit_workload_requests(request):
             status=status.HTTP_400_BAD_REQUEST,
         )
 
+    if len(workload_ids) > 10:
+        return Response(
+            {
+                'success': False,
+                'message': 'Validation failed',
+                'errors': {'workload_ids': ['Cannot submit more than 10 workloads at once']},
+            },
+            status=status.HTTP_400_BAD_REQUEST,
+        )
+
     if not request_reason:
         return Response(
             {

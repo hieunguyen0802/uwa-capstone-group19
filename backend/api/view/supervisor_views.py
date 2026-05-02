@@ -112,11 +112,16 @@ def _parse_breakdown_data(breakdown_data):
         category = LABEL_TO_CATEGORY.get(label)
         if not category:
             continue
+        if not isinstance(rows, list):
+            continue
         for row in rows:
-            name = str(row.get('name', ''))
+            name = str(row.get('name', ''))[:100]  # cap at model field limit
             try:
                 hours = Decimal(str(row.get('hours', 0)))
             except Exception:
+                hours = Decimal('0.00')
+            # Reject negative or implausibly large values
+            if hours < Decimal('0') or hours > Decimal('10000'):
                 hours = Decimal('0.00')
             if category == 'TEACHING':
                 result.append({'category': category, 'unit_code': name, 'description': None, 'allocated_hours': hours})
@@ -277,6 +282,13 @@ def supervisor_batch_decision(request):
             status=http_status.HTTP_400_BAD_REQUEST,
         )
 
+    if len(request_ids) > 100:
+        return Response(
+            {'success': False, 'message': 'Validation failed',
+             'errors': {'request_ids': ['Cannot process more than 100 ids at once']}},
+            status=http_status.HTTP_400_BAD_REQUEST,
+        )
+
     if decision not in ('approved', 'rejected'):
         return Response(
             {'success': False, 'message': 'Validation failed',
@@ -284,7 +296,7 @@ def supervisor_batch_decision(request):
             status=http_status.HTTP_400_BAD_REQUEST,
         )
 
-    qs = get_workload_queryset(request.staff)
+    qs = _hod_visible_qs(request.staff)
     reports = list(qs.filter(report_id__in=request_ids))
 
     if len(reports) != len(request_ids):
@@ -348,7 +360,7 @@ def supervisor_single_decision(request, id):
             status=http_status.HTTP_400_BAD_REQUEST,
         )
 
-    qs = get_workload_queryset(request.staff)
+    qs = _hod_visible_qs(request.staff)
     report = get_object_or_404(qs, report_id=id)
 
     if report.status != 'PENDING':
