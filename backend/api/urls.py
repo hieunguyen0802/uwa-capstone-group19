@@ -12,6 +12,8 @@ from api.view.academic_views import (
     academic_workload_detail,
     academic_confirm_workload,
     academic_submit_workload_requests,
+    academic_visualization,
+    academic_export,
     get_my_workloads,
     submit_query,
 )
@@ -32,6 +34,8 @@ urlpatterns = [
     path('academic/workloads/<str:id>/', academic_workload_detail),
     path('academic/workloads/<str:id>/confirm/', academic_confirm_workload),
     path('academic/workload-requests/', academic_submit_workload_requests),
+    path('academic/visualization/', academic_visualization),
+    path('academic/export/', academic_export),
 
     # Academic APIs (legacy compatibility)
     path('workloads/my/', get_my_workloads),

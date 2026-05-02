@@ -2,6 +2,8 @@ from decimal import Decimal, ROUND_HALF_UP
 
 from api.models import WorkloadReport
 
+POINT_TO_HOURS = Decimal('17.25')
+
 
 def get_workload_queryset(staff):
     """
@@ -57,7 +59,8 @@ def evaluate_mvp_anomaly(report, department_conflict=False):
     assigned_roles_pts = Decimal('0.00')
 
     for item in items:
-        pts = item.allocated_hours or Decimal('0.00')
+        hours = item.allocated_hours or Decimal('0.00')
+        pts = hours / POINT_TO_HOURS
         if item.category == 'TEACHING':
             teaching_pts += pts
         elif item.category == 'HDR_SUPERVISION':
@@ -84,10 +87,15 @@ def evaluate_mvp_anomaly(report, department_conflict=False):
     if teaching_pts < Decimal('0'):
         reasons.append('teaching_total_mismatch')
 
-    # Rule 2 / Rule 5 prerequisites missing in current schema.
-    # We intentionally flag anomaly until Target Teaching% and Target Band are persisted.
-    reasons.append('missing_target_teaching_pct')
-    reasons.append('missing_target_band')
+    target_teaching_pct = getattr(report, 'target_teaching_pct', None)
+    target_band = getattr(report, 'target_band', None)
+
+    if target_teaching_pct is not None:
+        target_teaching_pts = _quantize_2(
+            (Decimal(target_teaching_pct) / Decimal('100')) * Decimal('100') * (report.snapshot_fte or Decimal('0.00'))
+        )
+        if abs(teaching_pts - target_teaching_pts) > Decimal('0.01'):
+            reasons.append('teaching_mismatch')
 
     # Rule 3 (tr_denominator_invalid)
     if denominator <= Decimal('0'):
@@ -101,8 +109,10 @@ def evaluate_mvp_anomaly(report, department_conflict=False):
     if calc_tr < Decimal('0') or calc_tr > Decimal('1'):
         reasons.append('tr_out_of_range')
 
-    # Rule 5 (tr_discrepancy): requires target_band which current schema lacks.
+    # Rule 5 (tr_discrepancy): compare with target band only when available.
     calculated_band = _teaching_band(calc_tr)
+    if target_band is not None and target_band != calculated_band:
+        reasons.append('tr_discrepancy')
 
     if department_conflict:
         reasons.append('department_conflict')

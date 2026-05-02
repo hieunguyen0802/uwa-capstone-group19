@@ -1,7 +1,11 @@
+import io
+from datetime import date
 from decimal import Decimal
 
 from django.core.paginator import Paginator
 from django.db import transaction
+from django.db.models import Sum
+from django.http import HttpResponse
 from django.shortcuts import get_object_or_404
 from rest_framework import status
 from rest_framework.decorators import api_view, permission_classes
@@ -9,7 +13,7 @@ from rest_framework.permissions import IsAuthenticated
 from rest_framework.response import Response
 
 from api.decorators import require_role
-from api.models import AuditLog
+from api.models import AuditLog, WorkloadItem, WorkloadReport
 from api.services.workload_service import (
     evaluate_mvp_anomaly,
     get_workload_queryset,
@@ -430,3 +434,184 @@ def submit_query(request):
         {'report_id': str(report.report_id), 'status': report.status},
         status=status.HTTP_201_CREATED,
     )
+
+
+def _build_semester_label(year: int, semester: str) -> str:
+    return f"{year} {semester}"
+
+
+def _parse_year_range(request):
+    """Parse year_from / year_to from query params. Returns (year_from, year_to) as ints or None."""
+    try:
+        year_from = int(request.GET['year_from']) if request.GET.get('year_from') else None
+        year_to = int(request.GET['year_to']) if request.GET.get('year_to') else None
+    except (ValueError, TypeError):
+        year_from = year_to = None
+    return year_from, year_to
+
+
+def _filter_reports_by_range(qs, year_from, year_to, semester_filter):
+    if year_from:
+        qs = qs.filter(academic_year__gte=year_from)
+    if year_to:
+        qs = qs.filter(academic_year__lte=year_to)
+    if semester_filter and semester_filter.upper() != 'ALL':
+        qs = qs.filter(semester=semester_filter.upper())
+    return qs
+
+
+def _reporting_period_label(year_from, year_to, semester_filter) -> str:
+    year_part = f"{year_from or '?'}-{year_to or '?'}"
+    sem_part = 'All Semesters' if not semester_filter or semester_filter.upper() == 'ALL' else semester_filter.upper()
+    return f"{year_part} {sem_part}"
+
+
+@api_view(['GET'])
+@permission_classes([IsAuthenticated])
+@require_role('ACADEMIC')
+def academic_visualization(request):
+    """GET /api/academic/visualization/"""
+    year_from, year_to = _parse_year_range(request)
+    semester_filter = request.GET.get('semester', 'All')
+
+    qs = get_workload_queryset(request.staff).prefetch_related('items')
+    qs = _filter_reports_by_range(qs, year_from, year_to, semester_filter)
+
+    # Build ordered list of (year, semester) buckets present in the data.
+    SEM_ORDER = {'S1': 0, 'S2': 1, 'FULL_YEAR': 2}
+    reports = list(qs.order_by('academic_year', 'semester'))
+
+    # Collect unique (year, semester) keys in display order.
+    seen = {}
+    for r in reports:
+        key = (r.academic_year, r.semester)
+        seen[key] = True
+    ordered_keys = sorted(seen.keys(), key=lambda k: (k[0], SEM_ORDER.get(k[1], 9)))
+
+    # Aggregate my hours per bucket.
+    my_hours_map = {}
+    for r in reports:
+        key = (r.academic_year, r.semester)
+        total = sum(item.allocated_hours for item in r.items.all())
+        my_hours_map[key] = my_hours_map.get(key, Decimal('0.00')) + total
+
+    # Aggregate department average per bucket (all staff in same department).
+    dept_id = request.staff.department_id
+    dept_qs = WorkloadReport.objects.filter(
+        is_current=True,
+        snapshot_department_id=dept_id,
+    ).prefetch_related('items')
+    dept_qs = _filter_reports_by_range(dept_qs, year_from, year_to, semester_filter)
+
+    dept_hours_map = {}   # key -> list of per-staff totals
+    for r in dept_qs.order_by('academic_year', 'semester'):
+        key = (r.academic_year, r.semester)
+        total = sum(item.allocated_hours for item in r.items.all())
+        dept_hours_map.setdefault(key, []).append(total)
+
+    my_vs_dept = []
+    total_trend = []
+    for key in ordered_keys:
+        label = _build_semester_label(*key)
+        my_h = float(round(my_hours_map.get(key, Decimal('0.00')), 2))
+        dept_list = dept_hours_map.get(key, [])
+        dept_avg = float(round(sum(dept_list) / len(dept_list), 2)) if dept_list else 0.0
+        dept_total = float(round(sum(dept_list), 2))
+
+        my_vs_dept.append({
+            'semester': label,
+            'my_hours': my_h,
+            'department_average': dept_avg,
+        })
+        total_trend.append({
+            'semester': label,
+            'total_hours': dept_total,
+        })
+
+    return Response({
+        'success': True,
+        'message': 'Visualization loaded',
+        'data': {
+            'reporting_period_label': _reporting_period_label(year_from, year_to, semester_filter),
+            'my_vs_department_trend': my_vs_dept,
+            'total_hours_trend': total_trend,
+        },
+    })
+
+
+@api_view(['GET'])
+@permission_classes([IsAuthenticated])
+@require_role('ACADEMIC')
+def academic_export(request):
+    """GET /api/academic/export/
+
+    Returns an Excel file containing the current academic's workload records
+    for the requested year/semester range. Only APPROVED records are included
+    (in-progress records are excluded to avoid exporting unconfirmed data).
+    The file name includes today's date so repeated exports are distinguishable.
+    """
+    try:
+        import openpyxl
+    except ImportError:
+        return Response(
+            {'success': False, 'message': 'Export unavailable: openpyxl not installed'},
+            status=status.HTTP_503_SERVICE_UNAVAILABLE,
+        )
+
+    year_from, year_to = _parse_year_range(request)
+    semester_filter = request.GET.get('semester', 'All')
+
+    qs = get_workload_queryset(request.staff).prefetch_related('items').order_by('academic_year', 'semester')
+    qs = _filter_reports_by_range(qs, year_from, year_to, semester_filter)
+
+    # Only export records that have been approved; pending/rejected are excluded.
+    # Rationale: exporting unconfirmed data could mislead downstream consumers.
+    qs = qs.filter(status='APPROVED')
+
+    wb = openpyxl.Workbook()
+    ws = wb.active
+    ws.title = 'Workload Export'
+
+    headers = [
+        'Staff Number', 'Name', 'Academic Year', 'Semester',
+        'Category', 'Unit Code', 'Description', 'Hours',
+        'Status', 'Confirmation', 'Export Date',
+    ]
+    ws.append(headers)
+
+    export_date = date.today().isoformat()
+
+    for report in qs:
+        staff_user = report.staff.user
+        name = staff_user.get_full_name().strip() or staff_user.username
+        confirmation = _get_report_confirmation(report)
+
+        items = list(report.items.all())
+        if not items:
+            ws.append([
+                report.staff.staff_number, name,
+                report.academic_year, report.semester,
+                '', '', '', 0,
+                report.status.lower(), confirmation, export_date,
+            ])
+        else:
+            for item in items:
+                ws.append([
+                    report.staff.staff_number, name,
+                    report.academic_year, report.semester,
+                    item.category, item.unit_code or '', item.description or '',
+                    float(item.allocated_hours),
+                    report.status.lower(), confirmation, export_date,
+                ])
+
+    file_name = f"Academic_Workload_{export_date}.xlsx"
+    buffer = io.BytesIO()
+    wb.save(buffer)
+    buffer.seek(0)
+
+    response = HttpResponse(
+        buffer.getvalue(),
+        content_type='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+    )
+    response['Content-Disposition'] = f'attachment; filename="{file_name}"'
+    return response
