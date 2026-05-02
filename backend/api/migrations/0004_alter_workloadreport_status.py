@@ -13,6 +13,6 @@ class Migration(migrations.Migration):
         migrations.AlterField(
             model_name='workloadreport',
             name='status',
-            field=models.CharField(choices=[('INITIAL', 'Initial'), ('PENDING', 'Pending Review'), ('APPROVED', 'Approved'), ('REJECTED', 'Rejected'), ('ACTIONED', 'Actioned')], default='INITIAL', max_length=20),
+            field=models.CharField(choices=[('INITIAL', 'Initial'), ('PENDING', 'Pending Review'), ('APPROVED', 'Approved'), ('REJECTED', 'Rejected')], default='INITIAL', max_length=20),
         ),
     ]
