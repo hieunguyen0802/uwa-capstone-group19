@@ -130,8 +130,8 @@ def evaluate_mvp_anomaly(report, department_conflict=False):
     }
 
 
-def persist_report_anomaly(report):
-    result = evaluate_mvp_anomaly(report)
+def persist_report_anomaly(report, department_conflict=False):
+    result = evaluate_mvp_anomaly(report, department_conflict=department_conflict)
     if report.is_anomaly != result['is_anomaly']:
         report.is_anomaly = result['is_anomaly']
         report.save(update_fields=['is_anomaly', 'updated_at'])

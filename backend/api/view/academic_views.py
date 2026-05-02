@@ -68,6 +68,22 @@ def _build_department_conflict_keys(reports):
     return {key for key, dept_ids in key_dept_map.items() if len(dept_ids) > 1}
 
 
+def _is_department_conflict(report):
+    """Return True if this staff member has reports in multiple departments for the same period."""
+    dept_count = (
+        WorkloadReport.objects.filter(
+            staff=report.staff,
+            academic_year=report.academic_year,
+            semester=report.semester,
+            is_current=True,
+        )
+        .values('snapshot_department')
+        .distinct()
+        .count()
+    )
+    return dept_count > 1
+
+
 def _get_supervisor_note(report):
     note_log = AuditLog.objects.filter(
         report=report,
@@ -161,8 +177,14 @@ def academic_workloads(request):
             continue
         items.append(_serialize_workload_row(report, confirmation, anomaly_result, report_items))
 
-    page = int(request.GET.get('page', 1))
-    page_size = int(request.GET.get('page_size', 10))
+    try:
+        page = max(1, int(request.GET.get('page', 1)))
+        page_size = max(1, min(100, int(request.GET.get('page_size', 10))))
+    except (ValueError, TypeError):
+        return Response(
+            {'success': False, 'message': 'page and page_size must be positive integers'},
+            status=status.HTTP_400_BAD_REQUEST,
+        )
     paginator = Paginator(items, page_size)
     current_page = paginator.get_page(page)
 
@@ -187,7 +209,7 @@ def academic_workload_detail(request, id):
     report = get_object_or_404(qs, report_id=id)
 
     report_items = list(report.items.all())
-    anomaly_result = evaluate_mvp_anomaly(report)
+    anomaly_result = evaluate_mvp_anomaly(report, department_conflict=_is_department_conflict(report))
     confirmation = _get_report_confirmation(report)
     row = _serialize_workload_row(report, confirmation, anomaly_result, report_items)
 
@@ -226,7 +248,7 @@ def academic_confirm_workload(request, id):
         )
 
     report = get_object_or_404(get_workload_queryset(request.staff), report_id=id)
-    anomaly_result = persist_report_anomaly(report)
+    anomaly_result = persist_report_anomaly(report, department_conflict=_is_department_conflict(report))
     if anomaly_result['is_anomaly']:
         return Response(
             {
@@ -316,16 +338,20 @@ def academic_submit_workload_requests(request):
         )
 
     report_id_strs = [str(report.report_id) for report in reports]
+
+    # Only block re-submission when the report is still PENDING (not yet acted on by HOD).
+    # After a REJECT the academic must be able to re-submit, so we exclude non-PENDING reports.
     pending_ids = set(
         str(rid)
         for rid in AuditLog.objects.filter(
             report_id__in=report_id_strs,
             changes__kind='WORKLOAD_REQUEST',
             changes__status='pending',
+            report__status='PENDING',
         ).values_list('report_id', flat=True)
     )
 
-    created_ids = []
+    # Validate all IDs for duplicates before creating anything (prevents partial commits).
     for report in reports:
         if str(report.report_id) in pending_ids:
             return Response(
@@ -337,6 +363,8 @@ def academic_submit_workload_requests(request):
                 status=status.HTTP_409_CONFLICT,
             )
 
+    created_ids = []
+    for report in reports:
         log = AuditLog.objects.create(
             report=report,
             action_by=request.staff,

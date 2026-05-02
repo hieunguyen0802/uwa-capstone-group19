@@ -822,3 +822,119 @@ class TestAcademicContractFieldAlignment(BaseTestCase):
         id_p1 = self._item_ids(p1)[0]
         id_p2 = self._item_ids(p2)[0]
         self.assertNotEqual(id_p1, id_p2)
+
+
+# ─── Test: Codex findings fixes ───────────────────────────────────────────────
+
+class TestCodexFixes(BaseTestCase):
+    """
+    Regression tests for the 4 confirmed Codex findings fixed in this branch.
+
+    F2: Partial commit — submit_workload_requests must be all-or-nothing.
+    F3: Re-submit blocked — academic must be able to re-submit after HOD rejects.
+    F4: department_conflict gap — detail/confirm must use the same anomaly logic as list.
+    F5: Pagination 500 — invalid page/page_size must return 400, not 500.
+    """
+
+    def test_f5_invalid_page_returns_400(self):
+        # ?page=foo must return 400, not 500
+        client = self._auth_client(self.academic)
+        res = client.get('/api/academic/workloads/?page=foo')
+        self.assertEqual(res.status_code, 400)
+
+    def test_f5_invalid_page_size_returns_400(self):
+        client = self._auth_client(self.academic)
+        res = client.get('/api/academic/workloads/?page_size=notanumber')
+        self.assertEqual(res.status_code, 400)
+
+    def test_f5_page_size_zero_clamped_not_500(self):
+        # page_size=0 is clamped to 1 (min), must not crash
+        client = self._auth_client(self.academic)
+        res = client.get('/api/academic/workloads/?page_size=0')
+        self.assertEqual(res.status_code, 200)
+
+    def test_f3_academic_can_resubmit_after_hod_rejects(self):
+        # After HOD rejects, the WORKLOAD_REQUEST log still has status='pending' in JSON,
+        # but report.status is now REJECTED. The duplicate check must allow re-submission.
+        client_academic = self._auth_client(self.academic)
+        client_hod = self._auth_client(self.hod_csse)
+
+        # Academic submits first request
+        first = client_academic.post(
+            '/api/academic/workload-requests/',
+            data={'workload_ids': [str(self.report.report_id)], 'request_reason': 'Please review.'},
+            format='json',
+        )
+        self.assertEqual(first.status_code, 201)
+
+        # HOD rejects
+        client_hod.post(
+            f'/api/supervisor/reject/{self.report.report_id}/',
+            data={'comment': 'Hours look wrong.'},
+            format='json',
+        )
+        self.report.refresh_from_db()
+        self.assertEqual(self.report.status, 'REJECTED')
+
+        # Academic must be able to re-submit after rejection
+        second = client_academic.post(
+            '/api/academic/workload-requests/',
+            data={'workload_ids': [str(self.report.report_id)], 'request_reason': 'Revised and resubmitting.'},
+            format='json',
+        )
+        self.assertEqual(second.status_code, 201)
+
+    def test_f2_duplicate_check_before_any_creation(self):
+        # Submit two reports in one call where the second is a duplicate.
+        # The first must NOT be created (all-or-nothing).
+        clean = self._make_clean_report(self.academic, year=2024, semester='S1')
+        client = self._auth_client(self.academic)
+
+        # Pre-create a pending request for self.report only
+        client.post(
+            '/api/academic/workload-requests/',
+            data={'workload_ids': [str(self.report.report_id)], 'request_reason': 'First.'},
+            format='json',
+        )
+
+        before_count = AuditLog.objects.filter(
+            changes__kind='WORKLOAD_REQUEST',
+        ).count()
+
+        # Now submit [clean, self.report] — self.report is a duplicate
+        res = client.post(
+            '/api/academic/workload-requests/',
+            data={
+                'workload_ids': [str(clean.report_id), str(self.report.report_id)],
+                'request_reason': 'Batch attempt.',
+            },
+            format='json',
+        )
+        self.assertEqual(res.status_code, 409)
+
+        after_count = AuditLog.objects.filter(
+            changes__kind='WORKLOAD_REQUEST',
+        ).count()
+        # No new entries must have been created (clean's entry must not exist)
+        self.assertEqual(before_count, after_count)
+
+    def test_f4_department_conflict_blocks_confirm(self):
+        # Create a second report for the same staff/year/semester in a different department.
+        # This triggers department_conflict. The confirm endpoint must also detect it.
+        WorkloadReport.objects.create(
+            staff=self.academic,
+            academic_year=self.report.academic_year,
+            semester=self.report.semester,
+            snapshot_fte=Decimal('1.00'),
+            snapshot_department=self.dept_physics,  # different dept → conflict
+            status='PENDING',
+        )
+        client = self._auth_client(self.academic)
+        res = client.post(
+            f'/api/academic/workloads/{self.report.report_id}/confirm/',
+            data={'confirmation': 'confirmed'},
+            format='json',
+        )
+        self.assertEqual(res.status_code, 409)
+        self.assertIn('anomaly', res.data['errors'])
+        self.assertIn('department_conflict', res.data['errors']['anomaly'])
