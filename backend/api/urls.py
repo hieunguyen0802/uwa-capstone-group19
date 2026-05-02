@@ -1,5 +1,7 @@
 from django.urls import path
 from api.view.auth_views import login_view
+from api.view.otp_views import otp_request_view, otp_verify_view
+from api.view.import_views import import_workload_view
 from api.view.supervisor_views import (
     supervisor_requests,
     approve_request,
@@ -19,8 +21,15 @@ from api.view.academic_views import (
 )
 
 urlpatterns = [
-    # Auth
+    # Auth — password-based (legacy, kept for admin/superuser use)
     path('login/', login_view),
+
+    # Auth — OTP passwordless login
+    path('login/request-otp/', otp_request_view),
+    path('login/verify-otp/', otp_verify_view),
+
+    # Import (SCHOOL_OPS only)
+    path('import/workload/', import_workload_view),
 
     # Supervisor / Manager APIs
     path('supervisor/requests/', supervisor_requests),
