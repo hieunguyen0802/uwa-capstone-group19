@@ -170,15 +170,18 @@ class WorkloadReport(models.Model):
         related_name='historical_reports'
     )
 
-    # Approval status lifecycle: PENDING → APPROVED or REJECTED → ACTIONED
-    # ACTIONED means SCHOOL_OPS has processed the outcome (e.g. updated records).
+    # Approval status lifecycle: INITIAL → PENDING → APPROVED or REJECTED → ACTIONED
+    # INITIAL:  Daniela imported; academic can see but HOD cannot act yet.
+    # PENDING:  Academic submitted to HOD; HOD can now approve or reject.
+    # ACTIONED: SCHOOL_OPS has processed the outcome (e.g. updated records).
     STATUS_CHOICES = [
+        ('INITIAL', 'Initial'),
         ('PENDING', 'Pending Review'),
         ('APPROVED', 'Approved'),
         ('REJECTED', 'Rejected'),
         ('ACTIONED', 'Actioned'),
     ]
-    status = models.CharField(max_length=20, choices=STATUS_CHOICES, default='PENDING')
+    status = models.CharField(max_length=20, choices=STATUS_CHOICES, default='INITIAL')
 
     # Set to True at import time if the staff member's T:R ratio does not match
     # their contract type (e.g. contract says T&R 50/50 but actual teaching is 90%).

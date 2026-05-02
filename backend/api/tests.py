@@ -29,14 +29,14 @@ class BaseTestCase(APITestCase):
         self.ops       = self._make_staff('ops1',       'SCHOOL_OPS', self.dept_csse)
         self.hos       = self._make_staff('hos1',       'HOS',      self.dept_csse)
 
-        # One PENDING report belonging to the CSSE academic
+        # One INITIAL report belonging to the CSSE academic (Daniela just imported it)
         self.report = WorkloadReport.objects.create(
             staff=self.academic,
             academic_year=2025,
             semester='S1',
             snapshot_fte=self.academic.fte,
             snapshot_department=self.dept_csse,
-            status='PENDING',
+            status='INITIAL',
         )
 
     def _make_staff(self, username, role, department):
@@ -59,7 +59,7 @@ class BaseTestCase(APITestCase):
             semester=semester,
             snapshot_fte=Decimal('0.00'),  # denominator = 0 → always anomaly
             snapshot_department=staff.department,
-            status='PENDING',
+            status='INITIAL',
         )
 
     def _make_clean_report(self, staff, year=2025, semester='S1'):
@@ -70,7 +70,7 @@ class BaseTestCase(APITestCase):
             semester=semester,
             snapshot_fte=Decimal('1.00'),
             snapshot_department=staff.department,
-            status='PENDING',
+            status='INITIAL',
         )
 
     def _auth_client(self, staff):
@@ -94,6 +94,8 @@ class BaseTestCase(APITestCase):
             comment='Submitting for review.',
             changes={'kind': 'WORKLOAD_REQUEST', 'status': 'pending'},
         )
+        report.status = 'PENDING'
+        report.save(update_fields=['status', 'updated_at'])
 
 
 # ─── Test: require_role decorator ────────────────────────────────────────────
@@ -172,11 +174,11 @@ class TestHODDataIsolation(BaseTestCase):
         self.assertEqual(res.status_code, 404)
 
     def test_hod_cannot_approve_before_academic_submits(self):
-        # Gate: HOD gets 409 NOT_SUBMITTED if academic has not submitted the report yet
+        # Gate: HOD gets 409 CONFLICT if report is still INITIAL (academic has not submitted)
         client = self._auth_client(self.hod_csse)
         res = client.post(f'/api/supervisor/approve/{self.report.report_id}/')
         self.assertEqual(res.status_code, 409)
-        self.assertEqual(res.data['code'], 'NOT_SUBMITTED')
+        self.assertEqual(res.data['code'], 'CONFLICT')
 
     def test_hod_cannot_reject_before_academic_submits(self):
         client = self._auth_client(self.hod_csse)
@@ -186,7 +188,7 @@ class TestHODDataIsolation(BaseTestCase):
             format='json',
         )
         self.assertEqual(res.status_code, 409)
-        self.assertEqual(res.data['code'], 'NOT_SUBMITTED')
+        self.assertEqual(res.data['code'], 'CONFLICT')
 
     def test_hod_csse_can_approve_csse_report(self):
         self._submit_report(self.report)

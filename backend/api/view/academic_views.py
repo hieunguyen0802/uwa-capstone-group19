@@ -337,31 +337,19 @@ def academic_submit_workload_requests(request):
             status=status.HTTP_400_BAD_REQUEST,
         )
 
-    report_id_strs = [str(report.report_id) for report in reports]
-
-    # Only block re-submission when the report is still PENDING (not yet acted on by HOD).
-    # After a REJECT the academic must be able to re-submit, so we exclude non-PENDING reports.
-    pending_ids = set(
-        str(rid)
-        for rid in AuditLog.objects.filter(
-            report_id__in=report_id_strs,
-            changes__kind='WORKLOAD_REQUEST',
-            changes__status='pending',
-            report__status='PENDING',
-        ).values_list('report_id', flat=True)
-    )
-
-    # Validate all IDs for duplicates before creating anything (prevents partial commits).
-    for report in reports:
-        if str(report.report_id) in pending_ids:
-            return Response(
-                {
-                    'success': False,
-                    'message': 'A pending request already exists for this workload',
-                    'errors': {'workload_ids': [str(report.report_id)]},
-                },
-                status=status.HTTP_409_CONFLICT,
-            )
+    # Only INITIAL or REJECTED reports can be submitted.
+    # PENDING = already submitted and awaiting HOD decision.
+    # APPROVED = terminal, no re-submission needed.
+    non_submittable = [r for r in reports if r.status not in ('INITIAL', 'REJECTED')]
+    if non_submittable:
+        return Response(
+            {
+                'success': False,
+                'message': 'One or more reports cannot be submitted (already pending or approved)',
+                'errors': {'workload_ids': [str(r.report_id) for r in non_submittable]},
+            },
+            status=status.HTTP_409_CONFLICT,
+        )
 
     created_ids = []
     for report in reports:
@@ -372,6 +360,8 @@ def academic_submit_workload_requests(request):
             comment=request_reason,
             changes={'kind': 'WORKLOAD_REQUEST', 'status': 'pending'},
         )
+        report.status = 'PENDING'
+        report.save(update_fields=['status', 'updated_at'])
         created_ids.append(str(log.log_id))
 
     return Response(

@@ -27,17 +27,13 @@ def supervisor_requests(request):
     """Return workload reports grouped by status, scoped to the caller's role."""
     qs = get_workload_queryset(request.staff).order_by('-created_at')
 
-    # Only surface PENDING reports that the academic has explicitly submitted.
-    # Reports that are still PENDING but have no WORKLOAD_REQUEST log are not
-    # yet visible to HOD — the academic hasn't acted on them yet.
-    submitted_ids = AuditLog.objects.filter(
-        changes__kind='WORKLOAD_REQUEST',
-    ).values_list('report_id', flat=True).distinct()
-
     return Response({
-        "pending": [_serialize_report(r) for r in qs.filter(status='PENDING', report_id__in=submitted_ids)],
+        # INITIAL: academic has not submitted yet — HOD can see but cannot act.
+        # PENDING: academic submitted — HOD can approve or reject.
+        "initial": [_serialize_report(r) for r in qs.filter(status='INITIAL')],
+        "pending": [_serialize_report(r) for r in qs.filter(status='PENDING')],
         "approved": [_serialize_report(r) for r in qs.filter(status='APPROVED')],
-        "history": [_serialize_report(r) for r in qs.exclude(status='PENDING')],
+        "history": [_serialize_report(r) for r in qs.exclude(status__in=['INITIAL', 'PENDING'])],
     })
 
 
@@ -52,14 +48,7 @@ def approve_request(request, id):
 
     if report.status != 'PENDING':
         return Response(
-            {"code": "CONFLICT", "message": f"Report is already '{report.status}'."},
-            status=409
-        )
-
-    # Gate: academic must have submitted this report before HOD can act on it.
-    if not AuditLog.objects.filter(report=report, changes__kind='WORKLOAD_REQUEST').exists():
-        return Response(
-            {"code": "NOT_SUBMITTED", "message": "Academic has not submitted this report for review."},
+            {"code": "CONFLICT", "message": f"Report status is '{report.status}', must be PENDING to approve."},
             status=409
         )
 
@@ -87,14 +76,7 @@ def reject_request(request, id):
 
     if report.status != 'PENDING':
         return Response(
-            {"code": "CONFLICT", "message": f"Report is already '{report.status}'."},
-            status=409
-        )
-
-    # Gate: academic must have submitted this report before HOD can act on it.
-    if not AuditLog.objects.filter(report=report, changes__kind='WORKLOAD_REQUEST').exists():
-        return Response(
-            {"code": "NOT_SUBMITTED", "message": "Academic has not submitted this report for review."},
+            {"code": "CONFLICT", "message": f"Report status is '{report.status}', must be PENDING to reject."},
             status=409
         )
 
