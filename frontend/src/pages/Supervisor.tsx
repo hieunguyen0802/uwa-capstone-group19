@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useState, type ChangeEvent } from "react";
 import * as XLSX from "xlsx";
 import DashboardHeader from "../components/common/DashboardHeader";
+import { MOCK_DASHBOARD_USER } from "../data/mockDashboardUser";
 import LineMetricChartCard from "../components/common/LineMetricChartCard";
 import PaginationControls from "../components/common/PaginationControls";
 import ProfileModal from "../components/common/ProfileModal";
@@ -206,14 +207,7 @@ export default function Supervisor() {
     date: string;
   };
 
-  const user = {
-    surname: "Sam",
-    firstName: "Yaka",
-    employeeId: "2345678",
-    title: "Professor",
-    department: "Computer Science",
-    email: "yaka.sam@uwa.edu.au",
-  };
+  const user = MOCK_DASHBOARD_USER;
 
   const [hasNewMessage, setHasNewMessage] = useState(true);
   const [messagePanelOpen, setMessagePanelOpen] = useState(false);
@@ -1138,22 +1132,22 @@ export default function Supervisor() {
           <div className="grid grid-cols-3 gap-6">
             <div className="flex flex-col gap-1">
               <div className="w-fit rounded bg-[#2f4d9c] px-3 py-1 text-xs font-bold text-white">
-                First name
+                Last name
               </div>
               <input
-                value={searchFirstNameInput}
-                onChange={(e) => setSearchFirstNameInput(e.target.value)}
+                value={searchLastNameInput}
+                onChange={(e) => setSearchLastNameInput(e.target.value)}
                 onKeyDown={handleSearchKeyDown}
                 className="rounded border border-slate-300 px-3 py-2 text-sm"
               />
             </div>
             <div className="flex flex-col gap-1">
               <div className="w-fit rounded bg-[#2f4d9c] px-3 py-1 text-xs font-bold text-white">
-                Last name
+                First name
               </div>
               <input
-                value={searchLastNameInput}
-                onChange={(e) => setSearchLastNameInput(e.target.value)}
+                value={searchFirstNameInput}
+                onChange={(e) => setSearchFirstNameInput(e.target.value)}
                 onKeyDown={handleSearchKeyDown}
                 className="rounded border border-slate-300 px-3 py-2 text-sm"
               />

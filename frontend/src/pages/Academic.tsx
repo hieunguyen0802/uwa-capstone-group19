@@ -18,6 +18,7 @@ import ReportingFilterIntro from "../components/common/ReportingFilterIntro";
 import ReportingPeriodBar from "../components/common/ReportingPeriodBar";
 import SearchButton from "../components/common/SearchButton";
 import SectionTabs from "../components/common/SectionTabs";
+import { MOCK_DASHBOARD_USER } from "../data/mockDashboardUser";
 import StatusPill from "../components/common/StatusPill";
 import YearRangeSemesterActionRow from "../components/common/YearRangeSemesterActionRow";
 import ThemedNoticeModal, { SUPERSEDED_RECORD_MESSAGE } from "../components/common/ThemedNoticeModal";
@@ -458,14 +459,7 @@ function AcademicDetailModal({
 }
 
 export default function Academic() {
-  const user = {
-    surname: "Sam",
-    firstName: "Yaka",
-    employeeId: "2345678",
-    title: "Professor",
-    department: "Computer Science",
-    email: "yaka.sam@uwa.edu.au",
-  };
+  const user = MOCK_DASHBOARD_USER;
 
   const [items, setItems] = useState<AcademicItem[]>(() => {
     const base: AcademicItem[] = [

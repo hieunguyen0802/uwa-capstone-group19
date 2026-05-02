@@ -22,6 +22,7 @@ import InfoField from "../components/common/InfoField";
 import PaginationControls from "../components/common/PaginationControls";
 import ProfileModal from "../components/common/ProfileModal";
 import SearchButton from "../components/common/SearchButton";
+import { MOCK_DASHBOARD_USER } from "../data/mockDashboardUser";
 import SectionTabs from "../components/common/SectionTabs";
 import SectionTitleBlock from "../components/common/SectionTitleBlock";
 import StaffProfileModal, { type StaffProfileDraft } from "../components/common/StaffProfileModal";
@@ -197,6 +198,8 @@ export default function Admin() {
     title: string;
     currentDepartment: string;
     isActive: boolean;
+    isNewEmployee: boolean;
+    notes: string;
   };
   type RoleAssignment = {
     id: number;
@@ -209,14 +212,7 @@ export default function Admin() {
     status: "active" | "disabled";
   };
 
-  const user = {
-    surname: "Sam",
-    firstName: "Yaka",
-    employeeId: "2345678",
-    title: "Head of School",
-    department: "School of Physics, Mathematics and Computing",
-    email: "yaka.sam@uwa.edu.au",
-  };
+  const user = MOCK_DASHBOARD_USER;
 
   const [hasNewMessage, setHasNewMessage] = useState(true);
   const [messagePanelOpen, setMessagePanelOpen] = useState(false);
@@ -399,7 +395,6 @@ export default function Admin() {
   const [searchEmployeeIdInput, setSearchEmployeeIdInput] = useState("");
   const [searchLastNameInput, setSearchLastNameInput] = useState("");
   const [searchFirstNameInput, setSearchFirstNameInput] = useState("");
-  const [searchTitleInput, setSearchTitleInput] = useState("");
   const [searchDepartmentInput, setSearchDepartmentInput] = useState("");
   const [searchYearInput, setSearchYearInput] = useState("");
   const [searchSemesterInput, setSearchSemesterInput] = useState<"" | "S1" | "S2">("");
@@ -407,7 +402,6 @@ export default function Admin() {
     employeeId: "",
     lastName: "",
     firstName: "",
-    title: "",
     department: "",
     year: "",
     semester: "",
@@ -477,6 +471,8 @@ export default function Admin() {
       title: "Professor",
       currentDepartment: "Physics",
       isActive: true,
+      isNewEmployee: false,
+      notes: "",
     },
     {
       id: 2,
@@ -487,6 +483,8 @@ export default function Admin() {
       title: "Associate Professor",
       currentDepartment: "Mathematics & Statistics",
       isActive: true,
+      isNewEmployee: false,
+      notes: "",
     },
     {
       id: 3,
@@ -497,6 +495,8 @@ export default function Admin() {
       title: "Professor",
       currentDepartment: "Computer Science & Software Engineering",
       isActive: true,
+      isNewEmployee: false,
+      notes: "",
     },
     {
       id: 4,
@@ -507,6 +507,8 @@ export default function Admin() {
       title: "",
       currentDepartment: "",
       isActive: true,
+      isNewEmployee: false,
+      notes: "",
     },
     {
       id: 5,
@@ -517,6 +519,8 @@ export default function Admin() {
       title: "Lecturer",
       currentDepartment: "Computer Science & Software Engineering",
       isActive: true,
+      isNewEmployee: false,
+      notes: "",
     },
     {
       id: 6,
@@ -527,6 +531,8 @@ export default function Admin() {
       title: "Senior Lecturer",
       currentDepartment: "Physics",
       isActive: true,
+      isNewEmployee: false,
+      notes: "",
     },
     {
       id: 7,
@@ -537,6 +543,8 @@ export default function Admin() {
       title: "Lecturer",
       currentDepartment: "Mathematics & Statistics",
       isActive: true,
+      isNewEmployee: false,
+      notes: "",
     },
     {
       id: 8,
@@ -547,6 +555,8 @@ export default function Admin() {
       title: "Professor",
       currentDepartment: "Physics",
       isActive: true,
+      isNewEmployee: false,
+      notes: "",
     },
     {
       id: 9,
@@ -557,6 +567,8 @@ export default function Admin() {
       title: "Professor",
       currentDepartment: "Computer Science & Software Engineering",
       isActive: true,
+      isNewEmployee: false,
+      notes: "",
     },
     {
       id: 10,
@@ -567,6 +579,8 @@ export default function Admin() {
       title: "Lecturer",
       currentDepartment: "Physics",
       isActive: false,
+      isNewEmployee: false,
+      notes: "",
     },
     {
       id: 11,
@@ -577,6 +591,8 @@ export default function Admin() {
       title: "Senior Lecturer",
       currentDepartment: "Mathematics & Statistics",
       isActive: true,
+      isNewEmployee: false,
+      notes: "",
     },
   ];
   const [assignablePeople, setAssignablePeople] = useState<AssignablePerson[]>(initialAssignablePeople);
@@ -619,10 +635,6 @@ export default function Admin() {
       }
 
       if (searchFilters.lastName && !lastName.includes(searchFilters.lastName)) {
-        return false;
-      }
-
-      if (searchFilters.title && !it.title.toLowerCase().includes(searchFilters.title)) {
         return false;
       }
 
@@ -1033,7 +1045,6 @@ export default function Admin() {
       employeeId: searchEmployeeIdInput.trim().toLowerCase(),
       lastName: searchLastNameInput.trim().toLowerCase(),
       firstName: searchFirstNameInput.trim().toLowerCase(),
-      title: searchTitleInput.trim().toLowerCase(),
       department: searchDepartmentInput.trim().toLowerCase(),
       year: searchYearInput.trim().toLowerCase(),
       semester: searchSemesterInput.trim().toLowerCase(),
@@ -1110,6 +1121,8 @@ export default function Admin() {
       title: person.title,
       department: person.currentDepartment,
       isActive: person.isActive ? "Active" : "Inactive",
+      isNewEmployee: person.isNewEmployee,
+      notes: person.notes,
     });
     setStaffModalError("");
     setStaffModalOpen(true);
@@ -1160,6 +1173,8 @@ export default function Admin() {
       title: staffDraft.title.trim(),
       currentDepartment: staffDraft.department.trim(),
       isActive: staffDraft.isActive === "Active",
+      isNewEmployee: staffDraft.isNewEmployee,
+      notes: staffDraft.notes.trim(),
     };
 
     setAssignablePeople((prev) => prev.map((person) => (person.id === updatedPerson.id ? updatedPerson : person)));
@@ -1185,6 +1200,8 @@ export default function Admin() {
       { header: "title", key: "title", width: 18 },
       { header: "department", key: "department", width: 40 },
       { header: "active_status", key: "active_status", width: 16 },
+      { header: "is_new_employee", key: "is_new_employee", width: 18 },
+      { header: "notes", key: "notes", width: 52 },
     ];
 
     const headerRow = worksheet.getRow(1);
@@ -1211,6 +1228,8 @@ export default function Admin() {
       title: "Lecturer",
       department: "Physics",
       active_status: "Active",
+      is_new_employee: "false",
+      notes: "",
     });
 
     // Apply data validation to a practical import range.
@@ -1261,10 +1280,18 @@ export default function Admin() {
       worksheet.getCell(`G${row}`).dataValidation = {
         type: "list",
         allowBlank: false,
-        formulae: ['"Yes,No"'],
+        formulae: ['"Active,Inactive"'],
         showErrorMessage: true,
         errorTitle: "Invalid Active Status",
         error: "Active Status must be Active or Inactive.",
+      };
+      worksheet.getCell(`H${row}`).dataValidation = {
+        type: "list",
+        allowBlank: true,
+        formulae: ['"true,false"'],
+        showErrorMessage: true,
+        errorTitle: "Invalid is_new_employee",
+        error: "Use true or false — leave blank for false.",
       };
     }
 
@@ -1337,6 +1364,13 @@ export default function Admin() {
     return null;
   }
 
+  function parseIsNewEmployee(value: unknown): boolean {
+    const raw = String(value ?? "").trim().toLowerCase();
+    if (!raw) return false;
+    if (raw === "false" || raw === "no" || raw === "n" || raw === "0") return false;
+    return raw === "true" || raw === "yes" || raw === "y" || raw === "1";
+  }
+
   function handleImportTemplate(event: ChangeEvent<HTMLInputElement>) {
     const file = event.target.files?.[0];
     if (!file) return;
@@ -1371,6 +1405,8 @@ export default function Admin() {
           const department = String(row.department ?? "").trim();
           const isActiveRaw = String(row.active_status ?? row.is_active ?? "").trim();
           const isActive = parseActiveStatus(isActiveRaw);
+          const isNewEmployee = parseIsNewEmployee(row.is_new_employee ?? row.new_employee);
+          const notes = String(row.notes ?? "").trim();
           const rowNumber = i + 2;
 
           if (!/^\d{8}$/.test(staffId)) {
@@ -1407,6 +1443,8 @@ export default function Admin() {
             title,
             currentDepartment: department,
             isActive,
+            isNewEmployee,
+            notes,
           });
         }
 
@@ -1565,7 +1603,7 @@ export default function Admin() {
     <div className="min-h-screen bg-[#f3f4f6] font-serif">
       <div className="mx-auto max-w-7xl px-3 pb-10 pt-8">
         <DashboardHeader
-          title="Admin Dashboard"
+          title="School Operations Dashboard"
           hasNewMessage={hasNewMessage}
           onMessageClick={openMessagePanel}
           onAvatarClick={() => setProfileOpen(true)}
@@ -1720,10 +1758,6 @@ export default function Admin() {
           avatarSrc={avatarSrc}
           onAvatarUpload={handleAvatarUpload}
           user={user}
-          departmentLabel="School"
-          titleLabel="Role"
-          titleBeforeDepartment
-          departmentFullWidth
         />
 
         <div className="mt-6 rounded-md bg-white p-4 shadow-sm">
@@ -1789,21 +1823,21 @@ export default function Admin() {
               )}
 
               <div className="mt-4 rounded-md bg-[#f4f7ff] p-4">
-                <div className="grid grid-cols-3 gap-6">
-                  <div className="flex flex-col gap-1">
-                    <div className="w-fit rounded bg-[#2f4d9c] px-3 py-1 text-xs font-bold text-white">First name</div>
-                    <input
-                      value={searchFirstNameInput}
-                      onChange={(e) => setSearchFirstNameInput(e.target.value)}
-                      onKeyDown={handleSearchKeyDown}
-                      className="rounded border border-slate-300 px-3 py-2 text-sm"
-                    />
-                  </div>
+                <div className="grid grid-cols-1 gap-6 md:grid-cols-3">
                   <div className="flex flex-col gap-1">
                     <div className="w-fit rounded bg-[#2f4d9c] px-3 py-1 text-xs font-bold text-white">Last name</div>
                     <input
                       value={searchLastNameInput}
                       onChange={(e) => setSearchLastNameInput(e.target.value)}
+                      onKeyDown={handleSearchKeyDown}
+                      className="rounded border border-slate-300 px-3 py-2 text-sm"
+                    />
+                  </div>
+                  <div className="flex flex-col gap-1">
+                    <div className="w-fit rounded bg-[#2f4d9c] px-3 py-1 text-xs font-bold text-white">First name</div>
+                    <input
+                      value={searchFirstNameInput}
+                      onChange={(e) => setSearchFirstNameInput(e.target.value)}
                       onKeyDown={handleSearchKeyDown}
                       className="rounded border border-slate-300 px-3 py-2 text-sm"
                     />
@@ -1817,19 +1851,10 @@ export default function Admin() {
                       className="rounded border border-slate-300 px-3 py-2 text-sm tabular-nums font-sans"
                     />
                   </div>
+                </div>
+                <div className="mt-4 grid grid-cols-1 items-end gap-6 md:grid-cols-[minmax(0,1.2fr)_minmax(0,1fr)_auto]">
                   <div className="flex flex-col gap-1">
-                    <div className="w-fit rounded bg-[#2f4d9c] px-3 py-1 text-xs font-bold text-white">Title</div>
-                    <input
-                      value={searchTitleInput}
-                      onChange={(e) => setSearchTitleInput(e.target.value)}
-                      onKeyDown={handleSearchKeyDown}
-                      className="rounded border border-slate-300 px-3 py-2 text-sm"
-                    />
-                  </div>
-                  <div className="flex flex-col gap-1">
-                    <div className="w-fit rounded bg-[#2f4d9c] px-3 py-1 text-xs font-bold text-white">
-                      Department / School
-                    </div>
+                    <div className="w-fit rounded bg-[#2f4d9c] px-3 py-1 text-xs font-bold text-white">Department</div>
                     <input
                       value={searchDepartmentInput}
                       onChange={(e) => setSearchDepartmentInput(e.target.value)}
@@ -1866,9 +1891,9 @@ export default function Admin() {
                       </select>
                     </div>
                   </div>
-                </div>
-                <div className="mt-4 flex justify-center">
-                  <SearchButton onClick={handleSearch} />
+                  <div className="flex justify-end md:justify-end">
+                    <SearchButton onClick={handleSearch} />
+                  </div>
                 </div>
               </div>
 
@@ -2269,12 +2294,12 @@ export default function Admin() {
                 <FilterFormRow
                   fields={[
                     {
-                      key: "firstName",
-                      label: "First name",
+                      key: "lastName",
+                      label: "Last name",
                       input: (
                         <input
-                          value={adminSearchFirstNameInput}
-                          onChange={(e) => setAdminSearchFirstNameInput(e.target.value)}
+                          value={adminSearchLastNameInput}
+                          onChange={(e) => setAdminSearchLastNameInput(e.target.value)}
                           className="rounded border border-slate-300 bg-white px-3 py-2 text-sm"
                           onKeyDown={(e) => {
                             if (e.key === "Enter") {
@@ -2286,12 +2311,12 @@ export default function Admin() {
                       ),
                     },
                     {
-                      key: "lastName",
-                      label: "Last name",
+                      key: "firstName",
+                      label: "First name",
                       input: (
                         <input
-                          value={adminSearchLastNameInput}
-                          onChange={(e) => setAdminSearchLastNameInput(e.target.value)}
+                          value={adminSearchFirstNameInput}
+                          onChange={(e) => setAdminSearchFirstNameInput(e.target.value)}
                           className="rounded border border-slate-300 bg-white px-3 py-2 text-sm"
                           onKeyDown={(e) => {
                             if (e.key === "Enter") {

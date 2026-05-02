@@ -1,25 +1,14 @@
 import type { ChangeEvent } from "react";
-import InfoField from "./InfoField";
+import ProfileModalFieldGrid, { type ProfileModalUser } from "./ProfileModalFieldGrid";
 
-type ProfileUser = {
-  employeeId: string;
-  firstName: string;
-  surname: string;
-  department: string;
-  title: string;
-  email?: string;
-};
+export type { ProfileModalUser };
 
 type ProfileModalProps = {
   open: boolean;
   onClose: () => void;
   avatarSrc: string | null;
   onAvatarUpload: (event: ChangeEvent<HTMLInputElement>) => void;
-  user: ProfileUser;
-  departmentLabel?: string;
-  titleLabel?: string;
-  titleBeforeDepartment?: boolean;
-  departmentFullWidth?: boolean;
+  user: ProfileModalUser;
 };
 
 export default function ProfileModal({
@@ -28,10 +17,6 @@ export default function ProfileModal({
   avatarSrc,
   onAvatarUpload,
   user,
-  departmentLabel = "Department",
-  titleLabel = "Title",
-  titleBeforeDepartment = false,
-  departmentFullWidth = false,
 }: ProfileModalProps) {
   if (!open) return null;
 
@@ -64,39 +49,7 @@ export default function ProfileModal({
           </label>
         </div>
 
-        <div className="grid grid-cols-2 gap-4">
-          <InfoField label="Staff ID" value={user.employeeId} />
-          {titleBeforeDepartment ? (
-            <InfoField label="First name" value={user.firstName} />
-          ) : (
-            <InfoField
-              label={departmentLabel}
-              value={user.department}
-              className={departmentFullWidth ? "col-span-2" : ""}
-            />
-          )}
-          <InfoField label="Last name" value={user.surname} />
-          {titleBeforeDepartment ? (
-            <InfoField label={titleLabel} value={user.title} />
-          ) : (
-            <InfoField label="First name" value={user.firstName} />
-          )}
-          {titleBeforeDepartment ? (
-            <>
-              <InfoField
-                label={departmentLabel}
-                value={user.department}
-                className={departmentFullWidth ? "col-span-2" : ""}
-              />
-              <InfoField label="Email" value={user.email ?? ""} className="col-span-2" />
-            </>
-          ) : (
-            <>
-              <InfoField label={titleLabel} value={user.title} />
-              <InfoField label="Email" value={user.email ?? ""} />
-            </>
-          )}
-        </div>
+        <ProfileModalFieldGrid user={user} />
       </div>
     </div>
   );

@@ -7,6 +7,8 @@ export type StaffProfileDraft = {
   title: string;
   department: string;
   isActive: "Active" | "Inactive";
+  isNewEmployee: boolean;
+  notes: string;
 };
 
 type StaffProfileModalProps = {
@@ -15,9 +17,15 @@ type StaffProfileModalProps = {
   departments: string[];
   error: string;
   onClose: () => void;
-  onFieldChange: (field: keyof StaffProfileDraft, value: string) => void;
+  onFieldChange: (
+    field: keyof StaffProfileDraft,
+    value: string | boolean
+  ) => void;
   onUpdate: () => void;
 };
+
+const NOTES_PLACEHOLDER =
+  "This employee is new. Please ask your Head of Department to update and approve their workload in your system.";
 
 export default function StaffProfileModal({
   open,
@@ -110,6 +118,27 @@ export default function StaffProfileModal({
                 <option value="Active">Active</option>
                 <option value="Inactive">Inactive</option>
               </select>
+            </div>
+            <div>
+              <div className="mb-1 text-xs font-semibold uppercase text-slate-500">Is new employee</div>
+              <select
+                value={draft.isNewEmployee ? "true" : "false"}
+                onChange={(e) => onFieldChange("isNewEmployee", e.target.value === "true")}
+                className="w-full rounded border border-slate-300 px-3 py-2 text-sm"
+              >
+                <option value="true">true</option>
+                <option value="false">false</option>
+              </select>
+            </div>
+            <div className="md:col-span-2 flex flex-col gap-1">
+              <div className="text-xs font-semibold uppercase text-slate-500">notes</div>
+              <textarea
+                value={draft.notes}
+                onChange={(e) => onFieldChange("notes", e.target.value)}
+                placeholder={NOTES_PLACEHOLDER}
+                rows={4}
+                className="w-full resize-y rounded border border-slate-300 px-3 py-2 text-sm outline-none placeholder:text-slate-400 focus:border-[#2f4d9c]"
+              />
             </div>
           </div>
           {error ? <div className="text-sm font-semibold text-[#dc2626]">{error}</div> : null}
