@@ -48,6 +48,7 @@ Column layout (0-indexed after inserting 5 new columns at the front):
 """
 
 import uuid
+import logging
 from decimal import Decimal, InvalidOperation
 from itertools import groupby
 
@@ -55,7 +56,9 @@ from django.contrib.auth.models import User
 from django.db import transaction
 from django.utils import timezone
 
-from api.models import AuditLog, Department, OTPToken, Staff, WorkloadItem, WorkloadReport
+from api.models import AuditLog, Department, Staff, WorkloadItem, WorkloadReport
+
+logger = logging.getLogger(__name__)
 
 POINT_TO_HOURS = Decimal('17.25')
 
@@ -145,7 +148,6 @@ def _upsert_staff(row, importing_staff: Staff) -> Staff:
     try:
         staff = Staff.objects.select_related('user').get(staff_number=staff_number)
         user = staff.user
-        # Update mutable fields; email change only if not confirmed-locked
         user.first_name = first_name
         user.last_name = last_name
         if email:
@@ -153,7 +155,8 @@ def _upsert_staff(row, importing_staff: Staff) -> Staff:
             user.username = email
         user.save()
         staff.fte = fte
-        staff.role = role
+        # Role is NOT updated on re-import: role changes must go through HoS Permission Assignment.
+        # Allowing Excel to overwrite role would let SCHOOL_OPS escalate to HOS.
         staff.department = dept
         staff.save()
     except Staff.DoesNotExist:
@@ -318,7 +321,9 @@ def import_workload_excel(workbook, importing_staff: Staff) -> dict:
             dept_name = _str(first_row[COL_DEPARTMENT])
             summary["errors"].append({"row": first_row_num, "message": f"Department '{dept_name}' not found in database."})
         except Exception as exc:
-            summary["errors"].append({"row": first_row_num, "message": str(exc)})
+            # Log full exception internally; return a safe message to the caller.
+            logger.exception("Import error at row %d", first_row_num)
+            summary["errors"].append({"row": first_row_num, "message": "Unexpected error processing this row. Check server logs."})
 
     return summary
 

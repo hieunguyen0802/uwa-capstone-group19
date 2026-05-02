@@ -1,3 +1,5 @@
+import logging
+
 import openpyxl
 from rest_framework.decorators import api_view
 from rest_framework.response import Response
@@ -5,6 +7,8 @@ from rest_framework.response import Response
 from api.decorators import require_role
 from api.models import Staff
 from api.services.importer_service import import_workload_excel
+
+logger = logging.getLogger(__name__)
 
 
 @api_view(['POST'])
@@ -39,8 +43,9 @@ def import_workload_view(request):
 
     try:
         wb = openpyxl.load_workbook(uploaded, read_only=True, data_only=True)
-    except Exception as exc:
-        return Response({"error": f"Cannot read file: {exc}"}, status=400)
+    except Exception:
+        logger.exception("Failed to open uploaded workbook: %s", uploaded.name)
+        return Response({"error": "Cannot read file. Ensure it is a valid .xlsx file."}, status=400)
 
     importing_staff = Staff.objects.get(user=request.user)
     summary = import_workload_excel(wb, importing_staff)

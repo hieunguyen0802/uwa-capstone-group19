@@ -466,8 +466,12 @@ class OTPToken(models.Model):
     # must be looked up before we know which User it belongs to.
     email = models.EmailField()
 
-    # SHA-256 hash of the 6-digit code. Never store the raw code.
+    # SHA-256 hash of salt:code. Never store the raw code.
+    # Salt is stored separately so verify can recompute the hash.
     code_hash = models.CharField(max_length=64)
+    # Per-token random salt (hex, 32 chars = 16 bytes). Prevents rainbow table
+    # attacks against the small 6-digit OTP space.
+    salt = models.CharField(max_length=32, default='')
 
     created_at = models.DateTimeField(auto_now_add=True)
     expires_at = models.DateTimeField()

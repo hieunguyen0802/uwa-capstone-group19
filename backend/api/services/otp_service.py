@@ -9,10 +9,17 @@ from django.utils import timezone
 from api.models import OTPToken, Staff
 
 OTP_EXPIRY_MINUTES = 5
+_SALT_BYTES = 16
 
 
-def _hash_code(code: str) -> str:
-    return hashlib.sha256(code.encode()).hexdigest()
+def _hash_code(code: str, salt: str) -> str:
+    # HMAC-style: SHA-256(salt + code). Salt prevents rainbow table attacks
+    # against the small 6-digit OTP space.
+    return hashlib.sha256(f"{salt}:{code}".encode()).hexdigest()
+
+
+def _new_salt() -> str:
+    return secrets.token_hex(_SALT_BYTES)
 
 
 def request_otp(email: str) -> dict:
@@ -32,10 +39,11 @@ def request_otp(email: str) -> dict:
         return {"sent": True}
 
     code = str(secrets.randbelow(900000) + 100000)  # 6-digit, never starts with 0 issue avoided
-    code_hash = _hash_code(code)
+    salt = _new_salt()
+    code_hash = _hash_code(code, salt)
     expires_at = timezone.now() + timedelta(minutes=OTP_EXPIRY_MINUTES)
 
-    OTPToken.objects.create(email=email, code_hash=code_hash, expires_at=expires_at)
+    OTPToken.objects.create(email=email, code_hash=code_hash, salt=salt, expires_at=expires_at)
 
     send_mail(
         subject="Your UWA Workload System login code",
@@ -58,15 +66,22 @@ def verify_otp(email: str, code: str) -> dict:
     from rest_framework_simplejwt.tokens import RefreshToken
 
     email = email.strip().lower()
-    code_hash = _hash_code(code.strip())
+    code = code.strip()
     now = timezone.now()
 
-    token = (
+    # Fetch all unexpired, unused tokens for this email (typically 0-2 rows).
+    # We cannot filter by hash directly because each token has a unique salt.
+    candidates = (
         OTPToken.objects
-        .filter(email=email, code_hash=code_hash, expires_at__gt=now, used_at__isnull=True)
+        .filter(email=email, expires_at__gt=now, used_at__isnull=True)
         .order_by('-created_at')
-        .first()
     )
+
+    token = None
+    for candidate in candidates:
+        if secrets.compare_digest(candidate.code_hash, _hash_code(code, candidate.salt)):
+            token = candidate
+            break
 
     if token is None:
         raise ValueError("Invalid or expired code.")
