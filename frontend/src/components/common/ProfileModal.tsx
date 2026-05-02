@@ -7,6 +7,7 @@ type ProfileUser = {
   surname: string;
   department: string;
   title: string;
+  email?: string;
 };
 
 type ProfileModalProps = {
@@ -65,25 +66,34 @@ export default function ProfileModal({
 
         <div className="grid grid-cols-2 gap-4">
           <InfoField label="Staff ID" value={user.employeeId} />
-          <InfoField label="First name" value={user.firstName} />
+          {titleBeforeDepartment ? (
+            <InfoField label="First name" value={user.firstName} />
+          ) : (
+            <InfoField
+              label={departmentLabel}
+              value={user.department}
+              className={departmentFullWidth ? "col-span-2" : ""}
+            />
+          )}
           <InfoField label="Last name" value={user.surname} />
           {titleBeforeDepartment ? (
+            <InfoField label={titleLabel} value={user.title} />
+          ) : (
+            <InfoField label="First name" value={user.firstName} />
+          )}
+          {titleBeforeDepartment ? (
             <>
-              <InfoField label={titleLabel} value={user.title} />
               <InfoField
                 label={departmentLabel}
                 value={user.department}
                 className={departmentFullWidth ? "col-span-2" : ""}
               />
+              <InfoField label="Email" value={user.email ?? ""} className="col-span-2" />
             </>
           ) : (
             <>
-              <InfoField
-                label={departmentLabel}
-                value={user.department}
-                className={departmentFullWidth ? "col-span-2" : ""}
-              />
               <InfoField label={titleLabel} value={user.title} />
+              <InfoField label="Email" value={user.email ?? ""} />
             </>
           )}
         </div>

@@ -27,6 +27,7 @@ import SectionTitleBlock from "../components/common/SectionTitleBlock";
 import StaffProfileModal, { type StaffProfileDraft } from "../components/common/StaffProfileModal";
 import StatusPill from "../components/common/StatusPill";
 import TemplateImportExportActions from "../components/common/TemplateImportExportActions";
+import ThemedNoticeModal, { SUPERSEDED_RECORD_MESSAGE } from "../components/common/ThemedNoticeModal";
 import WorkHoursBadge from "../components/common/WorkHoursBadge";
 
 type MockRequest = {
@@ -44,6 +45,8 @@ type MockRequest = {
   status: "pending" | "approved" | "rejected";
   hours: number;
   supervisorNote?: string;
+  /** When true (from API), row is read-only and detail is blocked — superseded by a newer version. */
+  cancelled?: boolean;
 };
 
 type BreakdownCategory = "Teaching" | "Assigned Roles" | "HDR" | "Service";
@@ -212,6 +215,7 @@ export default function Admin() {
     employeeId: "2345678",
     title: "Head of School",
     department: "School of Physics, Mathematics and Computing",
+    email: "yaka.sam@uwa.edu.au",
   };
 
   const [hasNewMessage, setHasNewMessage] = useState(true);
@@ -260,8 +264,7 @@ export default function Admin() {
         periodLabel: "2025-1",
         name: "Ann Culhane",
         unit: "CITS 2206",
-        description:
-          "Lorem ipsum dolor sit amet, consectetur adipiscing elit. Nulla...",
+        description: "Sample pending request.",
         title: "Professor",
         department: "Computer Science",
         rate: 70,
@@ -275,13 +278,13 @@ export default function Admin() {
         periodLabel: "2025-1",
         name: "Ahmed Adhyyasar",
         unit: "CITS 1201",
-        description:
-          "Lorem ipsum dolor sit amet, consectetur adipiscing elit. Nulla...",
+        description: "Older submission — replaced by a newer version.",
         title: "Professor",
         department: "Computer Science",
         rate: 70,
-        status: "pending",
+        status: "approved",
         hours: 20,
+        cancelled: true,
       },
       {
         id: 3,
@@ -290,8 +293,7 @@ export default function Admin() {
         periodLabel: "2025-1",
         name: "Mary Smith",
         unit: "CITS 1302",
-        description:
-          "Lorem ipsum dolor sit amet, consectetur adipiscing elit. Nulla...",
+        description: "Sample rejected request.",
         title: "Professor",
         department: "Computer Science",
         rate: 70,
@@ -305,148 +307,12 @@ export default function Admin() {
         periodLabel: "2025-1",
         name: "John Doe",
         unit: "CITS 2103",
-        description:
-          "Lorem ipsum dolor sit amet, consectetur adipiscing elit. Nulla...",
+        description: "Sample approved request.",
         title: "Professor",
         department: "Computer Science",
         rate: 70,
         status: "approved",
         hours: 15,
-      },
-      {
-        id: 5,
-        studentId: "2345682",
-        semesterLabel: "Sem1",
-        periodLabel: "2025-1",
-        name: "Lisa Brown",
-        unit: "CITS 2304",
-        description:
-          "Lorem ipsum dolor sit amet, consectetur adipiscing elit. Nulla...",
-        title: "Professor",
-        department: "Computer Science",
-        rate: 70,
-        status: "pending",
-        hours: 8,
-      },
-      {
-        id: 6,
-        studentId: "2345683",
-        semesterLabel: "Sem1",
-        periodLabel: "2025-1",
-        name: "Chris Martin",
-        unit: "CITS 3401",
-        description:
-          "Lorem ipsum dolor sit amet, consectetur adipiscing elit. Nulla...",
-        title: "Professor",
-        department: "Computer Science",
-        rate: 70,
-        status: "pending",
-        hours: 12,
-      },
-      {
-        id: 7,
-        studentId: "2345684",
-        semesterLabel: "Sem1",
-        periodLabel: "2025-1",
-        name: "Emma Wilson",
-        unit: "CITS 3100",
-        description:
-          "Lorem ipsum dolor sit amet, consectetur adipiscing elit. Nulla...",
-        title: "Professor",
-        department: "Computer Science",
-        rate: 70,
-        status: "pending",
-        hours: 6,
-      },
-      {
-        id: 8,
-        studentId: "2345685",
-        semesterLabel: "Sem1",
-        periodLabel: "2025-1",
-        name: "Oliver Stone",
-        unit: "CITS 4202",
-        description:
-          "Lorem ipsum dolor sit amet, consectetur adipiscing elit. Nulla...",
-        title: "Professor",
-        department: "Computer Science",
-        rate: 70,
-        status: "pending",
-        hours: 18,
-      },
-      {
-        id: 9,
-        studentId: "2345686",
-        semesterLabel: "Sem1",
-        periodLabel: "2025-1",
-        name: "Sophia Lee",
-        unit: "CITS 2008",
-        description:
-          "Lorem ipsum dolor sit amet, consectetur adipiscing elit. Nulla...",
-        title: "Professor",
-        department: "Computer Science",
-        rate: 70,
-        status: "pending",
-        hours: 9,
-      },
-      {
-        id: 10,
-        studentId: "2345687",
-        semesterLabel: "Sem1",
-        periodLabel: "2025-1",
-        name: "Daniel Smith",
-        unit: "CITS 2601",
-        description:
-          "Lorem ipsum dolor sit amet, consectetur adipiscing elit. Nulla...",
-        title: "Professor",
-        department: "Computer Science",
-        rate: 70,
-        status: "pending",
-        hours: 11,
-      },
-      {
-        id: 11,
-        studentId: "2345688",
-        semesterLabel: "Sem1",
-        periodLabel: "2025-1",
-        name: "Grace Taylor",
-        unit: "CITS 2803",
-        description:
-          "Lorem ipsum dolor sit amet, consectetur adipiscing elit. Nulla...",
-        title: "Professor",
-        department: "Computer Science",
-        rate: 70,
-        status: "pending",
-        hours: 7,
-      },
-      {
-        id: 12,
-        studentId: "2345689",
-        semesterLabel: "Sem1",
-        periodLabel: "2025-1",
-        name: "Henry Clark",
-        unit: "CITS 1500",
-        description:
-          "Lorem ipsum dolor sit amet, consectetur adipiscing elit. Nulla...",
-        title: "Professor",
-        department: "Computer Science",
-        rate: 70,
-        status: "rejected",
-        hours: 14,
-      },
-      {
-        id: 13,
-        studentId: "2345690",
-        semesterLabel: "Sem1",
-        periodLabel: "2025-1",
-        name: "Ava Robinson",
-        unit: "CITS 4101",
-        description:
-          "Lorem ipsum dolor sit amet, consectetur adipiscing elit. Nulla...",
-        title: "Professor",
-        department: "Computer Science",
-        rate: 70,
-        status: "approved",
-        hours: 8,
       },
     ];
     const drafts = consumeAcademicDrafts();
@@ -515,6 +381,7 @@ export default function Admin() {
   });
 
   const [detailsOpen, setDetailsOpen] = useState(false);
+  const [supersededNoticeOpen, setSupersededNoticeOpen] = useState(false);
   const [detailsItem, setDetailsItem] = useState<MockRequest | null>(null);
   const [detailsBreakdown, setDetailsBreakdown] = useState<BreakdownData | null>(null);
   const [detailsTab, setDetailsTab] = useState<BreakdownCategory>("Teaching");
@@ -1605,6 +1472,10 @@ export default function Admin() {
   }
 
   function openDetails(item: MockRequest) {
+    if (item.cancelled) {
+      setSupersededNoticeOpen(true);
+      return;
+    }
     setDetailsItem(item);
     setDetailsBreakdown(breakdownById(item.id));
     setDetailsOpen(true);
@@ -2060,12 +1931,17 @@ export default function Admin() {
                       {!loading &&
                         pageItems.map((item, idx) => {
                           const isSelected = selectedIds.has(item.id);
+                          const rowCancelled = Boolean(item.cancelled);
                           const rowIndex = (page - 1) * pageSize + idx + 1;
                           return (
                             <tr
                               key={item.id}
-                              className={`cursor-pointer text-sm hover:bg-slate-50 ${
-                                isSelected ? "border-l-4 border-[#2f4d9c] bg-[#e9f2ff]" : ""
+                              className={`text-sm ${
+                                rowCancelled
+                                  ? "cursor-not-allowed bg-slate-100 text-slate-400 opacity-80"
+                                  : `cursor-pointer hover:bg-slate-50 ${
+                                      isSelected ? "border-l-4 border-[#2f4d9c] bg-[#e9f2ff]" : ""
+                                    }`
                               }`}
                               onClick={() => openDetails(item)}
                             >
@@ -3030,6 +2906,12 @@ export default function Admin() {
           )}
         </div>
       </div>
+
+      <ThemedNoticeModal
+        open={supersededNoticeOpen}
+        onClose={() => setSupersededNoticeOpen(false)}
+        message={SUPERSEDED_RECORD_MESSAGE}
+      />
     </div>
   );
 }
