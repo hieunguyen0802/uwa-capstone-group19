@@ -84,6 +84,17 @@ class BaseTestCase(APITestCase):
         """Extract report id list from a paginated workload list response."""
         return [item['id'] for item in res.data['data']['items']]
 
+    def _submit_report(self, report, staff=None):
+        """Academic submits a WORKLOAD_REQUEST so HOD can act on the report."""
+        actor = staff or self.academic
+        AuditLog.objects.create(
+            report=report,
+            action_by=actor,
+            action_type='COMMENT',
+            comment='Submitting for review.',
+            changes={'kind': 'WORKLOAD_REQUEST', 'status': 'pending'},
+        )
+
 
 # ─── Test: require_role decorator ────────────────────────────────────────────
 
@@ -130,6 +141,8 @@ class TestHODDataIsolation(BaseTestCase):
     """
 
     def test_hod_csse_sees_csse_report_in_list(self):
+        # Academic must submit first; only then does the report appear in HOD's pending list.
+        self._submit_report(self.report)
         client = self._auth_client(self.hod_csse)
         res = client.get('/api/supervisor/requests/')
         self.assertEqual(res.status_code, 200)
@@ -158,7 +171,25 @@ class TestHODDataIsolation(BaseTestCase):
         res = client.post(f'/api/supervisor/approve/{self.report.report_id}/')
         self.assertEqual(res.status_code, 404)
 
+    def test_hod_cannot_approve_before_academic_submits(self):
+        # Gate: HOD gets 409 NOT_SUBMITTED if academic has not submitted the report yet
+        client = self._auth_client(self.hod_csse)
+        res = client.post(f'/api/supervisor/approve/{self.report.report_id}/')
+        self.assertEqual(res.status_code, 409)
+        self.assertEqual(res.data['code'], 'NOT_SUBMITTED')
+
+    def test_hod_cannot_reject_before_academic_submits(self):
+        client = self._auth_client(self.hod_csse)
+        res = client.post(
+            f'/api/supervisor/reject/{self.report.report_id}/',
+            data={'comment': 'Trying to reject without submission.'},
+            format='json',
+        )
+        self.assertEqual(res.status_code, 409)
+        self.assertEqual(res.data['code'], 'NOT_SUBMITTED')
+
     def test_hod_csse_can_approve_csse_report(self):
+        self._submit_report(self.report)
         client = self._auth_client(self.hod_csse)
         res = client.post(f'/api/supervisor/approve/{self.report.report_id}/')
         self.assertEqual(res.status_code, 200)
@@ -174,7 +205,8 @@ class TestApprovalStateMachine(BaseTestCase):
     """
 
     def test_cannot_approve_already_approved_report(self):
-        # Approve once — should succeed
+        # Academic submits first, then HOD approves twice
+        self._submit_report(self.report)
         client = self._auth_client(self.hod_csse)
         client.post(f'/api/supervisor/approve/{self.report.report_id}/')
 
@@ -183,6 +215,7 @@ class TestApprovalStateMachine(BaseTestCase):
         self.assertEqual(res.status_code, 409)
 
     def test_reject_requires_comment(self):
+        self._submit_report(self.report)
         client = self._auth_client(self.hod_csse)
         res = client.post(
             f'/api/supervisor/reject/{self.report.report_id}/',
@@ -192,6 +225,7 @@ class TestApprovalStateMachine(BaseTestCase):
         self.assertEqual(res.status_code, 422)
 
     def test_reject_with_comment_succeeds(self):
+        self._submit_report(self.report)
         client = self._auth_client(self.hod_csse)
         res = client.post(
             f'/api/supervisor/reject/{self.report.report_id}/',
@@ -789,7 +823,8 @@ class TestAcademicContractFieldAlignment(BaseTestCase):
         self.assertEqual(res.data['data']['supervisor_note'], '')
 
     def test_detail_supervisor_note_populated_after_reject(self):
-        # After HOD rejects with a comment, supervisor_note must appear in academic detail
+        # Academic submits first, then HOD rejects with a comment
+        self._submit_report(self.report)
         hod_client = self._auth_client(self.hod_csse)
         hod_client.post(
             f'/api/supervisor/reject/{self.report.report_id}/',
