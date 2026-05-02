@@ -18,6 +18,10 @@ from api.services.workload_service import (
     evaluate_mvp_anomaly,
     get_workload_queryset,
     persist_report_anomaly,
+    _parse_year_range,
+    _filter_reports_by_range,
+    _build_semester_label,
+    _reporting_period_label,
 )
 
 CATEGORY_LABELS = {
@@ -452,36 +456,6 @@ def submit_query(request):
         {'report_id': str(report.report_id), 'status': report.status},
         status=status.HTTP_201_CREATED,
     )
-
-
-def _build_semester_label(year: int, semester: str) -> str:
-    return f"{year} {semester}"
-
-
-def _parse_year_range(request):
-    """Parse year_from / year_to from query params. Returns (year_from, year_to) as ints or None."""
-    try:
-        year_from = int(request.GET['year_from']) if request.GET.get('year_from') else None
-        year_to = int(request.GET['year_to']) if request.GET.get('year_to') else None
-    except (ValueError, TypeError):
-        year_from = year_to = None
-    return year_from, year_to
-
-
-def _filter_reports_by_range(qs, year_from, year_to, semester_filter):
-    if year_from:
-        qs = qs.filter(academic_year__gte=year_from)
-    if year_to:
-        qs = qs.filter(academic_year__lte=year_to)
-    if semester_filter and semester_filter.upper() != 'ALL':
-        qs = qs.filter(semester=semester_filter.upper())
-    return qs
-
-
-def _reporting_period_label(year_from, year_to, semester_filter) -> str:
-    year_part = f"{year_from or '?'}-{year_to or '?'}"
-    sem_part = 'All Semesters' if not semester_filter or semester_filter.upper() == 'ALL' else semester_filter.upper()
-    return f"{year_part} {sem_part}"
 
 
 @api_view(['GET'])
