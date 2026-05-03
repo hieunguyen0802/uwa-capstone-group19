@@ -6,7 +6,7 @@ from django.utils import timezone
 from rest_framework.test import APITestCase, APIClient
 from rest_framework_simplejwt.tokens import RefreshToken
 
-from .models import AuditLog, Department, Staff, WorkloadItem, WorkloadReport
+from .models import AuditLog, Department, Staff, WorkloadItem, WorkloadReport, WorkloadDistributionJob
 
 
 # ─── Shared test fixture ──────────────────────────────────────────────────────
@@ -1138,3 +1138,61 @@ class TestHODV2CaiFindings(BaseTestCase):
         row = next(item for item in listing.data['data']['items'] if item['id'] == str(self.report.report_id))
         self.assertEqual(row['request_reason'], 'second reason')
         self.assertIn(timezone.now().strftime('%Y-%m-%d'), row['submitted_time'])
+
+
+class TestAdminOpsContract(BaseTestCase):
+    """
+    Smoke tests for IntegrationLog/frontend_api_contract_cn.md §10 /admin routes.
+
+    These verify RBAC + critical response shapes so Daniela/ops screens do not silently 404.
+    """
+
+    def test_ops_can_list_admin_workloads(self):
+        client = self._auth_client(self.ops)
+        res = client.get('/api/admin/workload-requests/')
+        self.assertEqual(res.status_code, 200)
+        self.assertTrue(res.data['success'])
+        self.assertIn('items', res.data['data'])
+
+    def test_academic_blocked_from_admin_scope(self):
+        client = self._auth_client(self.academic)
+        res = client.get('/api/admin/workload-requests/')
+        self.assertEqual(res.status_code, 403)
+
+    def test_distribute_creates_job_record(self):
+        client = self._auth_client(self.ops)
+        before = WorkloadDistributionJob.objects.count()
+        res = client.post('/api/admin/workloads/distribute/', {'year': 2026, 'semester': 'S1'}, format='json')
+        self.assertEqual(res.status_code, 201)
+        self.assertEqual(WorkloadDistributionJob.objects.count(), before + 1)
+        self.assertTrue(res.data['success'])
+
+    def test_role_assignment_crud_shapes(self):
+        client = self._auth_client(self.ops)
+        create = client.post('/api/admin/role-assignments/', {
+            'staff_id': self.hod_csse.staff_number,
+            'role': 'HoD',
+            'department': self.dept_csse.name,
+            'permissions': ['View Workload'],
+        }, format='json')
+        self.assertEqual(create.status_code, 201)
+        assignment_id = create.data['data']['id']
+
+        listing = client.get('/api/admin/role-assignments/')
+        self.assertEqual(listing.status_code, 200)
+        ids = {row['id'] for row in listing.data['data']['items']}
+        self.assertIn(assignment_id, ids)
+
+        disabled = client.post(f'/api/admin/role-assignments/{assignment_id}/disable/', {}, format='json')
+        self.assertEqual(disabled.status_code, 200)
+        self.assertEqual(disabled.data['data']['status'], 'disabled')
+
+    def test_admin_export_manifest_and_download_roundtrip(self):
+        client = self._auth_client(self.ops)
+        manifest = client.get('/api/admin/export/')
+        self.assertEqual(manifest.status_code, 200)
+        download_url = manifest.data['data']['download_url']
+        token = download_url.split('token=')[-1]
+        download = client.get(f'/api/admin/export/download/?token={token}')
+        self.assertEqual(download.status_code, 200)
+        self.assertIn('spreadsheetml', download['Content-Type'])
