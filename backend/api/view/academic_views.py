@@ -365,6 +365,37 @@ def academic_submit_workload_requests(request):
             status=status.HTTP_409_CONFLICT,
         )
 
+    # Academic must confirm before submit. This closes the bypass path where
+    # users could directly submit unconfirmed records.
+    confirmation_map = _get_confirmation_map([str(r.report_id) for r in reports])
+    unconfirmed = [str(r.report_id) for r in reports if confirmation_map.get(str(r.report_id), 'unconfirmed') != 'confirmed']
+    if unconfirmed:
+        return Response(
+            {
+                'success': False,
+                'message': 'One or more reports must be confirmed before submit',
+                'errors': {'workload_ids': unconfirmed},
+            },
+            status=status.HTTP_409_CONFLICT,
+        )
+
+    # Re-evaluate anomaly on submit to prevent bypassing the confirm endpoint.
+    anomaly_map = {}
+    for report in reports:
+        anomaly_result = persist_report_anomaly(report, department_conflict=_is_department_conflict(report))
+        if anomaly_result['is_anomaly']:
+            anomaly_map[str(report.report_id)] = anomaly_result['reasons']
+
+    if anomaly_map:
+        return Response(
+            {
+                'success': False,
+                'message': 'One or more reports have anomalies and cannot be submitted',
+                'errors': {'anomaly': anomaly_map},
+            },
+            status=status.HTTP_409_CONFLICT,
+        )
+
     created_ids = []
     for report in reports:
         log = AuditLog.objects.create(
