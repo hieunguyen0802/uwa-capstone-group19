@@ -20,17 +20,31 @@ import SearchButton from "../components/common/SearchButton";
 import SectionTabs from "../components/common/SectionTabs";
 import StatusPill from "../components/common/StatusPill";
 import YearRangeSemesterActionRow from "../components/common/YearRangeSemesterActionRow";
+import ThemedNoticeModal, { SUPERSEDED_RECORD_MESSAGE } from "../components/common/ThemedNoticeModal";
 import WorkHoursBadge from "../components/common/WorkHoursBadge";
+import { submitContactSchoolOfOperations } from "../api/contactSchoolOfOperations";
 
 type AcademicItem = {
   id: number;
   name: string;
   employeeId: string;
+  /** Job title (shown in detail modal; optional — falls back to generated title by id). */
+  title?: string;
   description: string;
   hours: number;
+  /** Expected teaching hours; if the teaching subtotal in the breakdown is lower, self-confirm is blocked as abnormal. */
+  teachingTargetHours?: number;
+  /** Target teaching share of total workload (0–100), e.g. staff sheet "Target Teaching %". */
+  targetTeachingRatio?: number;
   status: "pending" | "approved" | "rejected" | "";
   confirmation: "confirmed" | "unconfirmed";
+  /** When confirmation is confirmed, time the workload was confirmed (empty in list when unconfirmed). */
+  confirmationTime?: string;
   supervisorNote?: string;
+  /** Admin (or delegate) who assigned this workload task to the staff member. */
+  assignedBy?: string;
+  /** When true (from API), row is read-only and detail is blocked — superseded by a newer version. */
+  cancelled?: boolean;
 };
 
 type BreakdownEntry = {
@@ -41,6 +55,41 @@ type BreakdownEntry = {
 type BreakdownCategory = "Teaching" | "Assigned Roles" | "HDR" | "Service";
 
 type BreakdownData = Record<BreakdownCategory, BreakdownEntry[]>;
+
+const BREAKDOWN_TABS: BreakdownCategory[] = ["Teaching", "Assigned Roles", "HDR", "Service"];
+
+function totalBreakdownHours(breakdown: BreakdownData): number {
+  return BREAKDOWN_TABS.reduce(
+    (sum, tab) => sum + breakdown[tab].reduce((s, row) => s + row.hours, 0),
+    0
+  );
+}
+
+function teachingHoursFromBreakdown(breakdown: BreakdownData): number {
+  return breakdown.Teaching.reduce((s, row) => s + row.hours, 0);
+}
+
+function actualTeachingRatioPercent(breakdown: BreakdownData): number {
+  const totalH = totalBreakdownHours(breakdown);
+  if (totalH <= 0) return 0;
+  const teachingH = teachingHoursFromBreakdown(breakdown);
+  return Math.round((teachingH / totalH) * 1000) / 10;
+}
+
+function isDetailHoursAbnormal(item: AcademicItem, breakdown: BreakdownData): boolean {
+  const actualRatioPct = actualTeachingRatioPercent(breakdown);
+  const targetRatio = item.targetTeachingRatio;
+  if (targetRatio != null) {
+    if (actualRatioPct + 0.05 < targetRatio) return true;
+  }
+  const teachingTarget = item.teachingTargetHours;
+  if (teachingTarget != null) {
+    const teachingActual = teachingHoursFromBreakdown(breakdown);
+    if (teachingActual + 0.001 < teachingTarget) return true;
+  }
+  return false;
+}
+
 type SupervisorDraftRequest = {
   id: number;
   studentId: string;
@@ -118,9 +167,31 @@ function pushedTimeById(id: number) {
   return `2026-03-${String(day).padStart(2, "0")} ${String(hour).padStart(2, "0")}:30`;
 }
 
+function formatLocalDateTime(d: Date) {
+  const y = d.getFullYear();
+  const m = String(d.getMonth() + 1).padStart(2, "0");
+  const day = String(d.getDate()).padStart(2, "0");
+  const hh = String(d.getHours()).padStart(2, "0");
+  const mm = String(d.getMinutes()).padStart(2, "0");
+  return `${y}-${m}-${day} ${hh}:${mm}`;
+}
+
 function titleById(id: number) {
   const titles = ["Professor", "Associate Professor", "Senior Lecturer", "Lecturer"];
   return titles[id % titles.length];
+}
+
+function academicItemTitle(item: AcademicItem) {
+  return item.title ?? titleById(item.id);
+}
+
+function academicConfirmationTimeCell(item: AcademicItem): string {
+  if (item.confirmation !== "confirmed") return "";
+  return item.confirmationTime ?? pushedTimeById(item.id);
+}
+
+function academicAssignedBy(item: AcademicItem) {
+  return item.assignedBy ?? "—";
 }
 
 function parseDateTime(value: string) {
@@ -237,16 +308,16 @@ function AcademicDetailModal({
   onClose: () => void;
   onConfirm: () => void;
 }) {
-  const tabs: BreakdownCategory[] = ["Teaching", "Assigned Roles", "HDR", "Service"];
   const [activeTab, setActiveTab] = useState<BreakdownCategory>("Teaching");
   const [descriptionExpanded, setDescriptionExpanded] = useState(true);
-  const breakdown = breakdownById(item.id, item.hours);
+  const breakdown = useMemo(() => breakdownById(item.id, item.hours), [item.id, item.hours]);
+  const hoursAbnormal = useMemo(() => isDetailHoursAbnormal(item, breakdown), [item, breakdown]);
+  const displayTargetTeachingRatio =
+    item.targetTeachingRatio != null ? `${item.targetTeachingRatio}%` : "—";
+  const displayActualTeachingRatio = `${actualTeachingRatioPercent(breakdown)}%`;
   const tabRows = breakdown[activeTab];
   const tabTotal = tabRows.reduce((sum, row) => sum + row.hours, 0);
-  const overallTotal = (["Teaching", "Assigned Roles", "HDR", "Service"] as BreakdownCategory[]).reduce(
-    (sum, tab) => sum + breakdown[tab].reduce((tabSum, row) => tabSum + row.hours, 0),
-    0
-  );
+  const confirmDisabled = hoursAbnormal && item.confirmation !== "confirmed";
 
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 p-4" onClick={onClose}>
@@ -266,14 +337,34 @@ function AcademicDetailModal({
           <div className="grid grid-cols-2 gap-4">
             <InfoField label="Name" value={item.name} />
             <InfoField label="Employee ID" value={item.employeeId} />
-            <InfoField label="Total Work Hours" value={String(item.hours)} />
-            <InfoField label="Status" value={statusLabel(item.status) || "-"} />
           </div>
+          <div className="grid grid-cols-2 gap-4">
+            <InfoField label="Target teaching ratio" value={displayTargetTeachingRatio} />
+            <InfoField label="Total work hours" value={String(item.hours)} />
+            <InfoField label="Actual teaching ratio" value={displayActualTeachingRatio} />
+            <div className="flex flex-col gap-1">
+              <div className="w-fit rounded bg-[#2f4d9c] px-3 py-1 text-xs font-bold text-white">Validation</div>
+              <div
+                className={`flex min-h-[38px] items-center rounded border px-3 py-2 text-sm font-bold ${
+                  hoursAbnormal
+                    ? "border-red-400 bg-red-50 text-red-700"
+                    : "border-emerald-300 bg-emerald-50 text-emerald-800"
+                }`}
+              >
+                {hoursAbnormal ? "Abnormal" : "Normal"}
+              </div>
+            </div>
+          </div>
+          {hoursAbnormal && (
+            <p className="text-sm font-medium leading-relaxed text-red-700">
+              After calculating hours by workload category, the gap from your teaching targets is too large.
+            </p>
+          )}
           <div>
             <div className="text-xs font-semibold uppercase text-slate-500">Workload Breakdown</div>
             <div className="mt-1 overflow-hidden rounded border border-slate-300">
               <div className="flex flex-wrap gap-2 border-b border-slate-200 bg-slate-50 px-3 py-2">
-                {tabs.map((tab) => (
+                {BREAKDOWN_TABS.map((tab) => (
                   <button
                     key={tab}
                     type="button"
@@ -314,9 +405,9 @@ function AcademicDetailModal({
             <button
               type="button"
               onClick={() => setDescriptionExpanded((v) => !v)}
-              className="flex w-full items-center justify-between rounded border border-slate-300 bg-slate-50 px-3 py-2 text-left text-xs font-semibold uppercase text-slate-500"
+              className="flex w-full items-center justify-between rounded border border-slate-300 bg-slate-50 px-3 py-2 text-left text-xs font-semibold text-slate-500"
             >
-              <span>Description</span>
+              <span>School of Operations notes</span>
               <span className="text-base leading-none">{descriptionExpanded ? "−" : "+"}</span>
             </button>
             {descriptionExpanded && (
@@ -327,26 +418,38 @@ function AcademicDetailModal({
               />
             )}
           </div>
-          <div>
-            <div className="text-xs font-semibold uppercase text-slate-500">Supervisor Notes</div>
-            <textarea
-              readOnly
-              value={item.supervisorNote || "- no notes yet -"}
-              className="mt-1 h-20 w-full resize-none rounded border border-slate-300 px-3 py-2 text-sm"
-            />
-          </div>
-          <div className="flex items-center justify-center pt-1">
+          {item.status ? (
+            <div>
+              <div className="text-xs font-semibold text-slate-500">Head of Department notes</div>
+              <textarea
+                readOnly
+                value={item.supervisorNote || "- no notes yet -"}
+                className="mt-1 h-20 w-full resize-none rounded border border-slate-300 px-3 py-2 text-sm"
+              />
+            </div>
+          ) : null}
+          <div className="flex flex-col items-center gap-2 pt-1">
             <button
               type="button"
-              onClick={onConfirm}
+              onClick={() => {
+                if (!hoursAbnormal) onConfirm();
+              }}
+              disabled={confirmDisabled}
               className={`rounded-md px-6 py-2 text-sm font-semibold ${
                 item.confirmation === "confirmed"
                   ? "bg-[#16a34a] text-white"
-                  : "bg-[#2f4d9c] text-white hover:bg-[#29458c]"
+                  : hoursAbnormal
+                    ? "cursor-not-allowed bg-slate-400 text-white"
+                    : "bg-[#2f4d9c] text-white hover:bg-[#29458c]"
               }`}
             >
               Confirmed
             </button>
+            {hoursAbnormal && (
+              <p className="max-w-md text-center text-xs font-bold leading-relaxed text-red-700">
+                Please submit to your Head of Department for adjustment review.
+              </p>
+            )}
           </div>
         </div>
       </div>
@@ -355,239 +458,66 @@ function AcademicDetailModal({
 }
 
 export default function Academic() {
-  type ChatMessage = {
-    sender: "Sam" | "Admin";
-    message: string;
-    time: string;
-    date: string;
-  };
-
   const user = {
     surname: "Sam",
     firstName: "Yaka",
     employeeId: "2345678",
     title: "Professor",
     department: "Computer Science",
+    email: "yaka.sam@uwa.edu.au",
   };
 
   const [items, setItems] = useState<AcademicItem[]>(() => {
     const base: AcademicItem[] = [
-    {
-      id: 1,
-      name: "Ann Culhane",
-      employeeId: "5684236526",
-      description: "Lorem ipsum dolor sit amet, consectetur adipiscing elit. Nulla...",
-      hours: 10,
-      status: "pending",
-      confirmation: "unconfirmed",
-    },
-    {
-      id: 2,
-      name: "Ahmad Rosser",
-      employeeId: "5684236527",
-      description: "Lorem ipsum dolor sit amet, consectetur adipiscing elit. Nulla...",
-      hours: 20,
-      status: "approved",
-      confirmation: "confirmed",
-    },
-    {
-      id: 3,
-      name: "Mary Smith",
-      employeeId: "5684236528",
-      description: "Lorem ipsum dolor sit amet, consectetur adipiscing elit. Nulla...",
-      hours: 5,
-      status: "rejected",
-      confirmation: "unconfirmed",
-    },
-    {
-      id: 4,
-      name: "John Doe",
-      employeeId: "5684236529",
-      description: "Lorem ipsum dolor sit amet, consectetur adipiscing elit. Nulla...",
-      hours: 15,
-      status: "pending",
-      confirmation: "confirmed",
-    },
-    {
-      id: 5,
-      name: "Lisa Brown",
-      employeeId: "5684236530",
-      description: "Lorem ipsum dolor sit amet, consectetur adipiscing elit. Nulla...",
-      hours: 8,
-      status: "",
-      confirmation: "unconfirmed",
-    },
-    {
-      id: 6,
-      name: "Chris Martin",
-      employeeId: "5684236531",
-      description: "Lorem ipsum dolor sit amet, consectetur adipiscing elit. Nulla...",
-      hours: 12,
-      status: "pending",
-      confirmation: "unconfirmed",
-    },
-    {
-      id: 7,
-      name: "Emma Wilson",
-      employeeId: "5684236532",
-      description: "Lorem ipsum dolor sit amet, consectetur adipiscing elit. Nulla...",
-      hours: 6,
-      status: "approved",
-      confirmation: "confirmed",
-    },
-    {
-      id: 8,
-      name: "Oliver Stone",
-      employeeId: "5684236533",
-      description: "Lorem ipsum dolor sit amet, consectetur adipiscing elit. Nulla...",
-      hours: 18,
-      status: "",
-      confirmation: "unconfirmed",
-    },
-    {
-      id: 9,
-      name: "Sophia Lee",
-      employeeId: "5684236534",
-      description: "Lorem ipsum dolor sit amet, consectetur adipiscing elit. Nulla...",
-      hours: 9,
-      status: "rejected",
-      confirmation: "unconfirmed",
-    },
-    {
-      id: 10,
-      name: "David Hall",
-      employeeId: "5684236535",
-      description: "Lorem ipsum dolor sit amet, consectetur adipiscing elit. Nulla...",
-      hours: 14,
-      status: "",
-      confirmation: "unconfirmed",
-    },
-    {
-      id: 11,
-      name: "Mia White",
-      employeeId: "5684236536",
-      description: "Lorem ipsum dolor sit amet, consectetur adipiscing elit. Nulla...",
-      hours: 7,
-      status: "pending",
-      confirmation: "unconfirmed",
-    },
-    {
-      id: 12,
-      name: "Noah Green",
-      employeeId: "5684236537",
-      description: "Lorem ipsum dolor sit amet, consectetur adipiscing elit. Nulla...",
-      hours: 11,
-      status: "",
-      confirmation: "unconfirmed",
-    },
-    {
-      id: 13,
-      name: "Ivy Turner",
-      employeeId: "5684236538",
-      description: "Lorem ipsum dolor sit amet, consectetur adipiscing elit. Nulla...",
-      hours: 13,
-      status: "",
-      confirmation: "unconfirmed",
-    },
-    {
-      id: 14,
-      name: "Lucas King",
-      employeeId: "5684236539",
-      description: "Lorem ipsum dolor sit amet, consectetur adipiscing elit. Nulla...",
-      hours: 16,
-      status: "",
-      confirmation: "unconfirmed",
-    },
-    {
-      id: 15,
-      name: "Chloe Scott",
-      employeeId: "5684236540",
-      description: "Lorem ipsum dolor sit amet, consectetur adipiscing elit. Nulla...",
-      hours: 4,
-      status: "",
-      confirmation: "unconfirmed",
-    },
-    {
-      id: 16,
-      name: "Ethan Brooks",
-      employeeId: "5684236541",
-      description: "Lorem ipsum dolor sit amet, consectetur adipiscing elit. Nulla...",
-      hours: 19,
-      status: "",
-      confirmation: "unconfirmed",
-    },
-    {
-      id: 17,
-      name: "Aiden Cooper",
-      employeeId: "5684236542",
-      description: "Lorem ipsum dolor sit amet, consectetur adipiscing elit. Nulla...",
-      hours: 17,
-      status: "",
-      confirmation: "unconfirmed",
-    },
-    {
-      id: 18,
-      name: "Zoe Ward",
-      employeeId: "5684236543",
-      description: "Lorem ipsum dolor sit amet, consectetur adipiscing elit. Nulla...",
-      hours: 6,
-      status: "",
-      confirmation: "unconfirmed",
-    },
-    {
-      id: 19,
-      name: "Ryan Foster",
-      employeeId: "5684236544",
-      description: "Lorem ipsum dolor sit amet, consectetur adipiscing elit. Nulla...",
-      hours: 21,
-      status: "",
-      confirmation: "unconfirmed",
-    },
-    {
-      id: 20,
-      name: "Lily Price",
-      employeeId: "5684236545",
-      description: "Lorem ipsum dolor sit amet, consectetur adipiscing elit. Nulla...",
-      hours: 9,
-      status: "",
-      confirmation: "unconfirmed",
-    },
-    {
-      id: 21,
-      name: "Nina Adams",
-      employeeId: "5684236546",
-      description: "Lorem ipsum dolor sit amet, consectetur adipiscing elit. Nulla...",
-      hours: 22,
-      status: "",
-      confirmation: "unconfirmed",
-    },
-    {
-      id: 22,
-      name: "Leo Murphy",
-      employeeId: "5684236547",
-      description: "Lorem ipsum dolor sit amet, consectetur adipiscing elit. Nulla...",
-      hours: 3,
-      status: "",
-      confirmation: "unconfirmed",
-    },
-    {
-      id: 23,
-      name: "Grace Howard",
-      employeeId: "5684236548",
-      description: "Lorem ipsum dolor sit amet, consectetur adipiscing elit. Nulla...",
-      hours: 14,
-      status: "",
-      confirmation: "unconfirmed",
-    },
-    {
-      id: 24,
-      name: "Owen Bailey",
-      employeeId: "5684236549",
-      description: "Lorem ipsum dolor sit amet, consectetur adipiscing elit. Nulla...",
-      hours: 10,
-      status: "",
-      confirmation: "unconfirmed",
-    },
+      {
+        id: 1,
+        name: "Ann Culhane",
+        employeeId: "5684236526",
+        title: "Associate Professor",
+        description: "Sample workload row for testing.",
+        hours: 10,
+        status: "pending",
+        confirmation: "unconfirmed",
+        assignedBy: "D ideal",
+        targetTeachingRatio: 50,
+      },
+      {
+        id: 2,
+        name: "Ahmad Rosser",
+        employeeId: "5684236527",
+        title: "Senior Lecturer",
+        description: "Older submission — replaced by a newer version.",
+        hours: 20,
+        status: "approved",
+        confirmation: "confirmed",
+        confirmationTime: "2026-03-02 11:30",
+        assignedBy: "bronte",
+        cancelled: true,
+      },
+      {
+        id: 3,
+        name: "Mary Smith",
+        employeeId: "5684236528",
+        title: "Lecturer",
+        description: "Sample workload row for testing.",
+        hours: 5,
+        status: "rejected",
+        confirmation: "unconfirmed",
+        assignedBy: "D ideal",
+      },
+      {
+        id: 4,
+        name: "John Doe",
+        employeeId: "5684236529",
+        title: "Professor",
+        description: "Sample workload row for testing.",
+        hours: 15,
+        status: "pending",
+        confirmation: "confirmed",
+        confirmationTime: "2026-03-04 14:30",
+        assignedBy: "bronte",
+        targetTeachingRatio: 40,
+      },
     ];
     const synced = readAcademicStatusSync();
     const syncedNotes = readAcademicNotesSync();
@@ -599,6 +529,7 @@ export default function Academic() {
   const pageSize = 10;
   const [filter, setFilter] = useState<"all" | "pending" | "approved" | "rejected">("all");
   const [detailId, setDetailId] = useState<number | null>(null);
+  const [supersededNoticeOpen, setSupersededNoticeOpen] = useState(false);
   const [requestModalOpen, setRequestModalOpen] = useState(false);
   const [requestReason, setRequestReason] = useState("");
   const [requestReasonError, setRequestReasonError] = useState("");
@@ -609,16 +540,8 @@ export default function Academic() {
   const [hasNewMessage, setHasNewMessage] = useState(true);
   const [messagePanelOpen, setMessagePanelOpen] = useState(false);
   const [chatInput, setChatInput] = useState("");
-  const [chatHistory, setChatHistory] = useState<ChatMessage[]>([
-    { sender: "Sam", message: "Could you review my latest workload draft?", time: "10:03", date: "2026-04-22" },
-    { sender: "Admin", message: "Sure, please ensure all teaching units are listed.", time: "10:11", date: "2026-04-22" },
-    { sender: "Sam", message: "Got it, I will update now.", time: "10:15", date: "2026-04-23" },
-  ]);
-  const [selectedChatDate, setSelectedChatDate] = useState("2026-04-23");
-  const visibleChatHistory = useMemo(
-    () => chatHistory.filter((entry) => entry.date === selectedChatDate),
-    [chatHistory, selectedChatDate]
-  );
+  const [contactSendError, setContactSendError] = useState("");
+  const [contactSending, setContactSending] = useState(false);
   const currentYear = useMemo(() => new Date().getFullYear(), []);
   const currentSemester = useMemo<"S1" | "S2">(() => {
     const month = new Date().getMonth() + 1;
@@ -894,12 +817,14 @@ export default function Academic() {
   }
 
   function handleConfirmFromDetail(id: number) {
+    const now = formatLocalDateTime(new Date());
     setItems((prev) =>
       prev.map((item) =>
         item.id === id
           ? {
               ...item,
               confirmation: "confirmed",
+              confirmationTime: item.confirmationTime ?? now,
             }
           : item
       )
@@ -909,18 +834,31 @@ export default function Academic() {
   function openMessagePanel() {
     setMessagePanelOpen(true);
     setHasNewMessage(false);
+    setContactSendError("");
   }
 
-  function handleSendMessage() {
+  async function handleSendMessage() {
     const trimmed = chatInput.trim();
-    if (!trimmed) return;
-    const now = new Date();
-    const hh = String(now.getHours()).padStart(2, "0");
-    const mm = String(now.getMinutes()).padStart(2, "0");
-    const today = now.toISOString().slice(0, 10);
-    setChatHistory((prev) => [...prev, { sender: "Sam", message: trimmed, time: `${hh}:${mm}`, date: today }]);
-    setSelectedChatDate(today);
-    setChatInput("");
+    if (!trimmed || contactSending) return;
+    setContactSendError("");
+    setContactSending(true);
+    try {
+      await submitContactSchoolOfOperations({
+        messageBody: trimmed,
+        sender: {
+          employeeId: user.employeeId,
+          surname: user.surname,
+          firstName: user.firstName,
+          email: user.email,
+        },
+      });
+      setChatInput("");
+    } catch (e) {
+      const msg = e instanceof Error ? e.message : "Could not send message. Please try again.";
+      setContactSendError(msg);
+    } finally {
+      setContactSending(false);
+    }
   }
 
   function handleSearch() {
@@ -967,12 +905,14 @@ export default function Academic() {
       .map((item) => ({
         Name: item.name,
         EmployeeID: item.employeeId,
-        Title: titleById(item.id),
+        Title: academicItemTitle(item),
         Description: item.description,
         Status: statusLabel(item.status) || "-",
         Confirmation: confirmationLabel(item.confirmation),
+        ConfirmationTime: academicConfirmationTimeCell(item) || "-",
         TotalHours: item.hours,
-        PushedTime: pushedTimeById(item.id),
+        PushTime: pushedTimeById(item.id),
+        AssignedBy: academicAssignedBy(item),
       }));
     const sheet = XLSX.utils.json_to_sheet(rows);
     const workbook = XLSX.utils.book_new();
@@ -1002,7 +942,7 @@ export default function Academic() {
               onClick={(e) => e.stopPropagation()}
             >
               <div className="mb-4 flex items-center justify-between">
-                <div className="text-3xl font-semibold text-slate-800">Contact Admin</div>
+                <div className="text-3xl font-semibold text-slate-800">Contact School of Operations</div>
                 <button
                   type="button"
                   aria-label="Close"
@@ -1013,43 +953,26 @@ export default function Academic() {
                 </button>
               </div>
 
-              <div className="mb-4 rounded-lg border border-slate-200 bg-white p-4">
-                <div className="mb-3 flex items-center gap-3">
-                  <div className="text-sm font-semibold text-slate-700">Chat Record Date</div>
-                  <input
-                    type="date"
-                    value={selectedChatDate}
-                    onChange={(e) => setSelectedChatDate(e.target.value)}
-                    className="rounded border border-slate-300 px-2 py-1 text-sm text-slate-800"
-                  />
+              {contactSendError ? (
+                <div className="mb-3 rounded-md border border-red-200 bg-red-50 px-3 py-2 text-sm text-red-800">
+                  {contactSendError}
                 </div>
-                <div className="max-h-72 space-y-2 overflow-y-auto pr-1 font-mono text-[15px] leading-6 text-slate-800">
-                  {visibleChatHistory.length > 0 ? (
-                    visibleChatHistory.map((entry, idx) => (
-                      <div key={idx}>
-                        <span className="text-slate-500">[{entry.time}]</span>{" "}
-                        <span className="font-semibold">{entry.sender}:</span> {entry.message}
-                      </div>
-                    ))
-                  ) : (
-                    <div className="text-sm text-slate-500">No chat records for this date.</div>
-                  )}
-                </div>
-              </div>
+              ) : null}
 
               <div className="flex items-end gap-3">
                 <textarea
                   value={chatInput}
                   onChange={(e) => setChatInput(e.target.value)}
                   placeholder="Write your message..."
-                  className="h-16 flex-1 resize-none rounded-lg border border-slate-300 bg-white px-3 py-2 text-base text-slate-800 outline-none focus:border-[#2f4d9c]"
+                  className="h-24 flex-1 resize-none rounded-lg border border-slate-300 bg-white px-3 py-2 text-base text-slate-800 outline-none focus:border-[#2f4d9c]"
                 />
                 <button
                   type="button"
-                  onClick={handleSendMessage}
-                  className="rounded-lg bg-[#2f4d9c] px-5 py-2 text-sm font-semibold text-white hover:bg-[#264183]"
+                  onClick={() => void handleSendMessage()}
+                  disabled={contactSending}
+                  className="rounded-lg bg-[#2f4d9c] px-5 py-2 text-sm font-semibold text-white hover:bg-[#264183] disabled:cursor-not-allowed disabled:opacity-60"
                 >
-                  Send
+                  {contactSending ? "Sending…" : "Send"}
                 </button>
               </div>
             </div>
@@ -1139,54 +1062,96 @@ export default function Academic() {
                     <th className="w-10 px-2 py-2"></th>
                     <th className="w-10 px-2 py-2">#</th>
                     <th className="px-3 py-2">Name</th>
-                    <th className="px-3 py-2 whitespace-nowrap">Title</th>
-                    <th className="px-3 py-2">Description</th>
                     <th className="px-3 py-2 text-center">Status</th>
                     <th className="px-3 py-2 text-center whitespace-nowrap min-w-[170px]">Total Work Hours</th>
-                    <th className="px-3 py-2">Confirmation</th>
-                    <th className="px-3 py-2 text-right whitespace-nowrap min-w-[170px]">Pushed Time</th>
+                    <th className="px-3 py-2 whitespace-nowrap">Confirmation</th>
+                    <th className="px-3 py-2 whitespace-nowrap text-right">Confirmation time</th>
+                    <th className="px-3 py-2 whitespace-nowrap">Assigned by</th>
+                    <th className="px-3 py-2 whitespace-nowrap text-right">Push time</th>
                   </tr>
                 </thead>
                 <tbody className="divide-y divide-slate-200 bg-white">
                   {pageItems.map((item, idx) => {
                     const selected = selectedIds.has(item.id);
+                    const rowCancelled = Boolean(item.cancelled);
+                    const confirmationTimeCell = academicConfirmationTimeCell(item);
                     return (
                       <tr
                         key={item.id}
-                        onClick={() => setDetailId(item.id)}
-                        className={`cursor-pointer text-sm ${selected ? "border-l-4 border-[#2f4d9c] bg-[#eef2ff]" : ""}`}
+                        onClick={() => {
+                          if (rowCancelled) {
+                            setSupersededNoticeOpen(true);
+                            return;
+                          }
+                          setDetailId(item.id);
+                        }}
+                        className={`text-sm ${
+                          rowCancelled
+                            ? "cursor-not-allowed border-y border-slate-300/80 bg-slate-200 text-slate-500"
+                            : `cursor-pointer ${selected ? "border-l-4 border-[#2f4d9c] bg-[#eef2ff]" : ""}`
+                        }`}
                       >
                         <td className="px-2 py-3" onClick={(e) => e.stopPropagation()}>
                           <input
                             type="checkbox"
                             checked={selected}
                             onChange={() => toggleRow(item.id)}
-                            className="h-4 w-4 accent-[#2f4d9c]"
+                            className={`h-4 w-4 accent-[#2f4d9c] ${rowCancelled ? "opacity-50" : ""}`}
                           />
                         </td>
-                        <td className="px-2 py-3 text-center tabular-nums font-sans text-slate-600">
+                        <td
+                          className={`px-2 py-3 text-center tabular-nums font-sans ${
+                            rowCancelled ? "text-slate-500" : "text-slate-600"
+                          }`}
+                        >
                           {(page - 1) * pageSize + idx + 1}
                         </td>
-                        <td className="px-3 py-3 font-medium text-slate-700">
+                        <td
+                          className={`px-3 py-3 font-medium ${
+                            rowCancelled ? "text-slate-500" : "text-slate-700"
+                          }`}
+                        >
                           <div>{item.name}</div>
                           <div className="text-xs text-slate-400">{item.employeeId}</div>
                         </td>
-                        <td className="px-3 py-3 text-slate-600 whitespace-nowrap">{titleById(item.id)}</td>
-                        <td className="px-3 py-3 text-slate-600">{item.description}</td>
                         <td className="px-3 py-3 text-center">
                           {item.status ? (
-                            <StatusPill status={item.status} variant="academic" />
+                            <span
+                              className={`inline-flex justify-center ${rowCancelled ? "grayscale opacity-70" : ""}`}
+                            >
+                              <StatusPill status={item.status} variant="academic" />
+                            </span>
                           ) : (
                             <span className="text-sm font-semibold text-slate-500">-</span>
                           )}
                         </td>
                         <td className="px-3 py-3 text-center">
-                          <WorkHoursBadge hours={item.hours} />
+                          <span className={`inline-flex justify-center ${rowCancelled ? "grayscale opacity-70" : ""}`}>
+                            <WorkHoursBadge hours={item.hours} />
+                          </span>
                         </td>
                         <td className="px-3 py-3">
-                          <ConfirmationIndicator confirmation={item.confirmation} />
+                          <span className={`inline-flex ${rowCancelled ? "grayscale opacity-70" : ""}`}>
+                            <ConfirmationIndicator confirmation={item.confirmation} />
+                          </span>
                         </td>
-                        <td className="px-3 py-3 text-right tabular-nums font-sans font-semibold text-slate-800">
+                        <td
+                          className={`px-3 py-3 text-right text-sm font-sans ${
+                            rowCancelled ? "text-slate-500" : "text-slate-800"
+                          }`}
+                        >
+                          {confirmationTimeCell ? (
+                            <span className="font-semibold tabular-nums">{confirmationTimeCell}</span>
+                          ) : null}
+                        </td>
+                        <td className={`px-3 py-3 ${rowCancelled ? "text-slate-500" : "text-slate-700"}`}>
+                          {academicAssignedBy(item)}
+                        </td>
+                        <td
+                          className={`px-3 py-3 text-right text-sm tabular-nums font-sans font-semibold ${
+                            rowCancelled ? "text-slate-500" : "text-slate-800"
+                          }`}
+                        >
                           {pushedTimeById(item.id)}
                         </td>
                       </tr>
@@ -1206,7 +1171,7 @@ export default function Academic() {
             />
           </div>
 
-          <div className="mt-8 flex items-center justify-center">
+          <div className="mt-8 flex flex-col items-center gap-3">
             <button
               type="button"
               onClick={openRequestModal}
@@ -1215,6 +1180,11 @@ export default function Academic() {
               <span className="text-base">✓</span>
               Submit Request
             </button>
+            <p className="max-w-2xl px-4 text-center text-xs leading-relaxed text-slate-500">
+              You can self-confirm workload from the row detail view. Use <span className="font-semibold text-slate-600">Submit Request</span>{" "}
+              only when you or the system still have doubts and cannot self-confirm—the request is sent to your Head of Department for
+              review.
+            </p>
           </div>
           {requestInfo && <div className="mt-3 text-center text-sm font-semibold text-[#2f4d9c]">{requestInfo}</div>}
           </div>
@@ -1373,6 +1343,12 @@ export default function Academic() {
           )}
         </div>
       </div>
+
+      <ThemedNoticeModal
+        open={supersededNoticeOpen}
+        onClose={() => setSupersededNoticeOpen(false)}
+        message={SUPERSEDED_RECORD_MESSAGE}
+      />
 
       {detailItem && (
         <AcademicDetailModal
