@@ -141,6 +141,33 @@ class Staff(models.Model):
         return f"{self.staff_number} - {self.user.get_full_name()} ({self.role})"
 
 
+class OTPToken(models.Model):
+    """
+    Stores one-time password login codes in hashed form.
+
+    Only the hash + salt are stored. The raw 6-digit code is emailed to the
+    user and never written to the database.
+    """
+
+    token_id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    email = models.EmailField(max_length=254)
+    code_hash = models.CharField(max_length=64)
+    salt = models.CharField(max_length=32)
+    expires_at = models.DateTimeField()
+    used_at = models.DateTimeField(null=True, blank=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        db_table = 'otp_tokens'
+        indexes = [
+            models.Index(fields=['email', 'created_at']),
+            models.Index(fields=['expires_at']),
+        ]
+
+    def __str__(self):
+        return f"OTP for {self.email} expiring at {self.expires_at}"
+
+
 class WorkloadReport(models.Model):
     """
     One workload report per staff member per semester. This is the core object
