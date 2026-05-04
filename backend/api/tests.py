@@ -1,7 +1,19 @@
+import tempfile
+from pathlib import Path
+
 from django.contrib.auth.models import User
+from django.core.files.uploadedfile import SimpleUploadedFile
+from django.test import override_settings
 from rest_framework.test import APITestCase, APIClient
 from rest_framework_simplejwt.tokens import RefreshToken
+
 from .models import Department, Staff, WorkloadReport
+
+# 1×1 transparent PNG (valid binary for Pillow / ImageField).
+_MINI_PNG = (
+    b'\x89PNG\r\n\x1a\n\x00\x00\x00\rIHDR\x00\x00\x00\x01\x00\x00\x00\x01\x08\x06\x00\x00\x00'
+    b'\x1f\x15\xc4\x89\x00\x00\x00\nIDATx\x9cc\x00\x01\x00\x00\x05\x00\x01\r\n-\xb4\x00\x00\x00\x00IEND\xaeB`\x82'
+)
 
 
 # ─── Shared test fixture ──────────────────────────────────────────────────────
@@ -265,3 +277,99 @@ class TestAcademicWorkloadAndQuery(BaseTestCase):
             format='json'
         )
         self.assertEqual(res.status_code, 404)
+
+
+# ─── Shared pageinfo APIs (contract §11) ─────────────────────────────────────
+
+@override_settings(MEDIA_ROOT=Path(tempfile.mkdtemp()))
+class TestPageinfoApis(BaseTestCase):
+    """GET /api/profile/me/, POST /api/profile/avatar/, GET+POST /api/messages/."""
+
+    def test_profile_me_shape(self):
+        self.academic.user.first_name = 'Sam'
+        self.academic.user.last_name = 'Yaka'
+        self.academic.user.save()
+        self.academic.academic_title = 'Professor'
+        self.academic.save()
+        client = self._auth_client(self.academic)
+        res = client.get('/api/profile/me/')
+        self.assertEqual(res.status_code, 200)
+        self.assertTrue(res.data['success'])
+        d = res.data['data']
+        self.assertEqual(d['first_name'], 'Sam')
+        self.assertEqual(d['surname'], 'Yaka')
+        self.assertEqual(d['title'], 'Professor')
+        self.assertEqual(d['employee_id'], self.academic.staff_number)
+        self.assertEqual(d['department'], 'CSSE')
+
+    def test_messages_academic_admin_thread(self):
+        client = self._auth_client(self.academic)
+        r1 = client.post(
+            '/api/messages/',
+            data={'receiver_role': 'admin', 'message': 'Hello admin'},
+            format='json',
+        )
+        self.assertEqual(r1.status_code, 200)
+        self.assertTrue(r1.data['success'])
+        self.assertEqual(r1.data['data']['message'], 'Hello admin')
+
+        r2 = client.get('/api/messages/', {'conversation_with': 'admin'})
+        self.assertEqual(r2.status_code, 200)
+        self.assertEqual(len(r2.data['data']['items']), 1)
+
+    def test_avatar_upload_rejects_non_image(self):
+        client = self._auth_client(self.academic)
+        bad = SimpleUploadedFile('x.txt', b'not an image', content_type='text/plain')
+        res = client.post('/api/profile/avatar/', data={'avatar': bad}, format='multipart')
+        self.assertEqual(res.status_code, 400)
+        self.assertFalse(res.data['success'])
+
+    def test_avatar_upload_accepts_png(self):
+        client = self._auth_client(self.academic)
+        png = SimpleUploadedFile('a.png', _MINI_PNG, content_type='image/png')
+        res = client.post('/api/profile/avatar/', data={'avatar': png}, format='multipart')
+        self.assertEqual(res.status_code, 200)
+        self.assertTrue(res.data['success'])
+        self.assertIn('avatar_url', res.data['data'])
+
+
+@override_settings(MEDIA_ROOT=Path(tempfile.mkdtemp()))
+class TestPageinfoMessagesIsolation(BaseTestCase):
+    """Cross-tenant access rules for /api/messages/."""
+
+    def test_academic_cannot_read_other_admin_thread(self):
+        other = self._make_staff('academic_other', 'ACADEMIC', self.dept_csse)
+        c1 = self._auth_client(other)
+        c1.post('/api/messages/', data={'receiver_role': 'admin', 'message': 'Secret'}, format='json')
+
+        victim = self._auth_client(self.academic)
+        res = victim.get('/api/messages/', {'conversation_with': 'admin'})
+        self.assertEqual(res.status_code, 200)
+        bodies = [i['message'] for i in res.data['data']['items']]
+        self.assertNotIn('Secret', bodies)
+
+    def test_ops_can_read_academic_admin_thread_with_param(self):
+        other = self._make_staff('academic_ops_target', 'ACADEMIC', self.dept_csse)
+        c_ac = self._auth_client(other)
+        c_ac.post('/api/messages/', data={'receiver_role': 'admin', 'message': 'To ops inbox'}, format='json')
+
+        c_ops = self._auth_client(self.ops)
+        res = c_ops.get(
+            '/api/messages/',
+            {'conversation_with': 'admin', 'with_staff_number': other.staff_number},
+        )
+        self.assertEqual(res.status_code, 200)
+        self.assertTrue(any(i['message'] == 'To ops inbox' for i in res.data['data']['items']))
+
+    def test_hod_other_department_cannot_read_hod_thread(self):
+        ac_phys = self._make_staff('ac_phys', 'ACADEMIC', self.dept_physics)
+        self._auth_client(ac_phys).post(
+            '/api/messages/', data={'receiver_role': 'hod', 'message': 'Phys only'}, format='json'
+        )
+
+        client = self._auth_client(self.hod_csse)
+        res = client.get(
+            '/api/messages/',
+            {'conversation_with': 'hod', 'with_staff_number': ac_phys.staff_number},
+        )
+        self.assertEqual(res.status_code, 403)

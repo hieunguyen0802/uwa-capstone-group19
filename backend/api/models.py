@@ -1,8 +1,18 @@
 import uuid
-from django.db import models
+from pathlib import Path
+
 from django.contrib.auth.models import User
-from django.core.validators import MinValueValidator
+from django.core.validators import FileExtensionValidator, MinValueValidator
+from django.db import models
 from decimal import Decimal
+
+
+def staff_avatar_upload_to(instance: 'Staff', filename: str) -> str:
+    """Store avatars under media/avatars/<staff_number>.<ext> for stable URLs."""
+    ext = Path(filename).suffix.lower()
+    if ext not in ('.jpg', '.jpeg', '.png', '.webp'):
+        ext = '.png'
+    return f'avatars/{instance.staff_number}{ext}'
 
 
 class Department(models.Model):
@@ -113,6 +123,18 @@ class Staff(models.Model):
     ]
     employment_type = models.CharField(max_length=20, choices=EMPLOYMENT_CHOICES, default='FULL_TIME')
 
+    # Optional display title (e.g. "Professor") for shared profile API (contract §11.2).
+    academic_title = models.CharField(max_length=120, blank=True, default='')
+
+    # Profile photo; validated extensions only (see FileExtensionValidator).
+    avatar = models.ImageField(
+        upload_to=staff_avatar_upload_to,
+        blank=True,
+        null=True,
+        max_length=500,
+        validators=[FileExtensionValidator(allowed_extensions=['jpg', 'jpeg', 'png', 'webp'])],
+    )
+
     # Soft-delete flag. Set to False for departed staff instead of deleting the row,
     # so historical workload records remain intact.
     is_active = models.BooleanField(default=True)
@@ -129,6 +151,30 @@ class Staff(models.Model):
 
     def __str__(self):
         return f"{self.staff_number} - {self.user.get_full_name()} ({self.role})"
+
+
+class Message(models.Model):
+    """
+    Lightweight staff-to-role inbox messages (contract §11.4–11.5).
+
+    thread_key format: "<staff_number>:<peer_slug>" (e.g. "50123456:admin").
+    This groups all traffic between one staff member and a logical peer (admin/hod/hos).
+    """
+
+    thread_key = models.CharField(max_length=64, db_index=True)
+    sender = models.ForeignKey(Staff, on_delete=models.CASCADE, related_name='sent_messages')
+    body = models.TextField()
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        db_table = 'messages'
+        indexes = [
+            models.Index(fields=['thread_key', 'created_at']),
+        ]
+        ordering = ['created_at']
+
+    def __str__(self):
+        return f"{self.thread_key} @ {self.created_at}"
 
 
 class WorkloadReport(models.Model):
