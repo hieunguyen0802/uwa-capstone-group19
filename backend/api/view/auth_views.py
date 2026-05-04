@@ -33,14 +33,38 @@ def login_view(request):
       - refresh  (str): long-lived token to obtain new access tokens (7 days)
       - role     (str): staff role from the Staff table
     """
-    email = request.data.get('email')
+    email = (request.data.get('email') or '').strip()
+    staff_id = (request.data.get('staff_id') or '').strip()
     password = request.data.get('password')
 
-    user = authenticate(username=email, password=password)
+    if not email and not staff_id:
+        return Response({"error": "email or staff_id is required"}, status=400)
+
+    candidates = []
+    if email:
+        candidates.append(email)
+        staff_by_email = Staff.objects.select_related('user').filter(user__email__iexact=email).first()
+        if staff_by_email:
+            candidates.append(staff_by_email.user.username)
+
+    if staff_id:
+        staff_by_id = Staff.objects.select_related('user').filter(staff_number=staff_id).first()
+        if staff_by_id:
+            candidates.append(staff_by_id.user.username)
+
+    # Keep insertion order while removing duplicates.
+    candidate_usernames = list(dict.fromkeys(candidates))
+
+    user = None
+    for username in candidate_usernames:
+        user = authenticate(username=username, password=password)
+        if user:
+            break
 
     if not user:
         # Log failed attempt without exposing which field was wrong (prevents enumeration)
-        logger.warning('Login failed for identifier=%s ip=%s', email, _get_client_ip(request))
+        identifier = staff_id or email
+        logger.warning('Login failed for identifier=%s ip=%s', identifier, _get_client_ip(request))
         return Response({"error": "Invalid credentials"}, status=400)
 
     # Require a Staff record — no fallback to a default role.

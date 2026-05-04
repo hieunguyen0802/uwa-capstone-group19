@@ -1,6 +1,8 @@
+from datetime import timedelta
 from decimal import Decimal
 
 from django.contrib.auth.models import User
+from django.utils import timezone
 from rest_framework.test import APITestCase, APIClient
 from rest_framework_simplejwt.tokens import RefreshToken
 
@@ -97,6 +99,16 @@ class BaseTestCase(APITestCase):
         )
         report.status = 'PENDING'
         report.save(update_fields=['status', 'updated_at'])
+
+    def _confirm_report_via_api(self, report, staff=None):
+        """Confirm one report via the public API."""
+        actor = staff or self.academic
+        client = self._auth_client(actor)
+        return client.post(
+            f'/api/academic/workloads/{report.report_id}/confirm/',
+            data={'confirmation': 'confirmed'},
+            format='json',
+        )
 
 
 # ─── Test: require_role decorator ────────────────────────────────────────────
@@ -373,6 +385,7 @@ class TestAcademicContractEndpoints(BaseTestCase):
         self.assertEqual(res.status_code, 400)
 
     def test_submit_workload_request_success(self):
+        self._confirm_report_via_api(self.report)
         client = self._auth_client(self.academic)
         res = client.post(
             '/api/academic/workload-requests/',
@@ -387,6 +400,7 @@ class TestAcademicContractEndpoints(BaseTestCase):
         self.assertEqual(res.data['data']['status'], 'pending')
 
     def test_submit_workload_request_duplicate_conflict(self):
+        self._confirm_report_via_api(self.report)
         client = self._auth_client(self.academic)
         payload = {
             'workload_ids': [str(self.report.report_id)],
@@ -898,6 +912,7 @@ class TestCodexFixes(BaseTestCase):
         client_hod = self._auth_client(self.hod_csse)
 
         # Academic submits first request
+        self._confirm_report_via_api(self.report)
         first = client_academic.post(
             '/api/academic/workload-requests/',
             data={'workload_ids': [str(self.report.report_id)], 'request_reason': 'Please review.'},
@@ -927,6 +942,8 @@ class TestCodexFixes(BaseTestCase):
         # The first must NOT be created (all-or-nothing).
         clean = self._make_clean_report(self.academic, year=2024, semester='S1')
         client = self._auth_client(self.academic)
+        self._confirm_report_via_api(self.report)
+        self._confirm_report_via_api(clean)
 
         # Pre-create a pending request for self.report only
         client.post(
@@ -1069,3 +1086,147 @@ class TestHoSContractEndpoints(BaseTestCase):
             res['Content-Type'],
             'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
         )
+class TestHODV2CaiFindings(BaseTestCase):
+    """Regression tests for issues reported during HOD v2 review."""
+
+    def test_submit_requires_confirmation(self):
+        client = self._auth_client(self.academic)
+        res = client.post(
+            '/api/academic/workload-requests/',
+            data={'workload_ids': [str(self.report.report_id)], 'request_reason': 'Try submit without confirm'},
+            format='json',
+        )
+        self.assertEqual(res.status_code, 409)
+        self.assertIn(str(self.report.report_id), res.data['errors']['workload_ids'])
+
+    def test_submit_blocks_anomaly_even_if_confirmed_flag_exists(self):
+        anomaly_report = self._make_anomaly_report(self.academic, year=2026, semester='S1')
+        AuditLog.objects.create(
+            report=anomaly_report,
+            action_by=self.academic,
+            action_type='COMMENT',
+            changes={'kind': 'CONFIRMATION', 'confirmation': 'confirmed'},
+        )
+        client = self._auth_client(self.academic)
+        res = client.post(
+            '/api/academic/workload-requests/',
+            data={'workload_ids': [str(anomaly_report.report_id)], 'request_reason': 'Bypass anomaly check'},
+            format='json',
+        )
+        self.assertEqual(res.status_code, 409)
+        self.assertIn(str(anomaly_report.report_id), res.data['errors']['anomaly'])
+
+    def test_inactive_staff_token_cannot_access_protected_endpoint(self):
+        client = self._auth_client(self.academic)
+        self.academic.is_active = False
+        self.academic.save(update_fields=['is_active'])
+        res = client.get('/api/academic/workloads/')
+        self.assertEqual(res.status_code, 403)
+        self.assertEqual(res.data['code'], 'ACCOUNT_INACTIVE')
+
+    def test_legacy_supervisor_list_hides_unconfirmed_initial(self):
+        client = self._auth_client(self.hod_csse)
+        unconfirmed_res = client.get('/api/supervisor/requests/')
+        self.assertEqual(unconfirmed_res.status_code, 200)
+        self.assertEqual(unconfirmed_res.data['initial'], [])
+
+        AuditLog.objects.create(
+            report=self.report,
+            action_by=self.academic,
+            action_type='COMMENT',
+            changes={'kind': 'CONFIRMATION', 'confirmation': 'confirmed'},
+        )
+        confirmed_res = client.get('/api/supervisor/requests/')
+        self.assertEqual(confirmed_res.status_code, 200)
+        initial_ids = [r['report_id'] for r in confirmed_res.data['initial']]
+        self.assertIn(str(self.report.report_id), initial_ids)
+
+    def test_login_supports_staff_id_and_user_email(self):
+        login_user = User.objects.create_user(
+            username='non_email_username',
+            email='real.email@uwa.edu.au',
+            password='LoginPass123!',
+        )
+        login_staff = Staff.objects.create(
+            user=login_user,
+            staff_number='87654321',
+            role='ACADEMIC',
+            department=self.dept_csse,
+        )
+
+        by_staff = self.client.post(
+            '/api/login/',
+            data={'staff_id': login_staff.staff_number, 'password': 'LoginPass123!'},
+            format='json',
+        )
+        self.assertEqual(by_staff.status_code, 200)
+        self.assertIn('access', by_staff.data)
+
+        by_email = self.client.post(
+            '/api/login/',
+            data={'email': login_user.email, 'password': 'LoginPass123!'},
+            format='json',
+        )
+        self.assertEqual(by_email.status_code, 200)
+        self.assertIn('access', by_email.data)
+
+    def test_breakdown_invalid_payload_does_not_delete_existing_items(self):
+        self._submit_report(self.report)
+        WorkloadItem.objects.create(
+            report=self.report,
+            category='TEACHING',
+            unit_code='CITS9999',
+            allocated_hours=Decimal('10.00'),
+        )
+        before_count = self.report.items.count()
+        client = self._auth_client(self.hod_csse)
+        res = client.post(
+            f'/api/supervisor/workload-requests/{self.report.report_id}/decision/',
+            data={
+                'decision': 'approved',
+                'note': 'bad breakdown',
+                'breakdown': {'Teaching': [{'name': '', 'hours': 'abc'}]},
+            },
+            format='json',
+        )
+        self.assertEqual(res.status_code, 400)
+        self.report.refresh_from_db()
+        self.assertEqual(self.report.items.count(), before_count)
+
+    def test_resubmit_uses_latest_reason_and_submitted_time(self):
+        self._confirm_report_via_api(self.report)
+        academic_client = self._auth_client(self.academic)
+        hod_client = self._auth_client(self.hod_csse)
+
+        first = academic_client.post(
+            '/api/academic/workload-requests/',
+            data={'workload_ids': [str(self.report.report_id)], 'request_reason': 'first reason'},
+            format='json',
+        )
+        self.assertEqual(first.status_code, 201)
+        first_log = AuditLog.objects.filter(
+            report=self.report,
+            changes__kind='WORKLOAD_REQUEST',
+        ).order_by('-created_at').first()
+        first_log.created_at = timezone.now() - timedelta(days=1)
+        first_log.save(update_fields=['created_at'])
+
+        reject = hod_client.post(
+            f'/api/supervisor/reject/{self.report.report_id}/',
+            data={'comment': 'please revise'},
+            format='json',
+        )
+        self.assertEqual(reject.status_code, 200)
+
+        second = academic_client.post(
+            '/api/academic/workload-requests/',
+            data={'workload_ids': [str(self.report.report_id)], 'request_reason': 'second reason'},
+            format='json',
+        )
+        self.assertEqual(second.status_code, 201)
+
+        listing = hod_client.get('/api/supervisor/workload-requests/?status=pending')
+        self.assertEqual(listing.status_code, 200)
+        row = next(item for item in listing.data['data']['items'] if item['id'] == str(self.report.report_id))
+        self.assertEqual(row['request_reason'], 'second reason')
+        self.assertIn(timezone.now().strftime('%Y-%m-%d'), row['submitted_time'])

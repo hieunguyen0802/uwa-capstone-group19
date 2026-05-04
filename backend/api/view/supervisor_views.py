@@ -42,7 +42,7 @@ def _get_request_reason(report):
     log = AuditLog.objects.filter(
         report=report,
         changes__kind='WORKLOAD_REQUEST',
-    ).order_by('created_at').first()
+    ).order_by('-created_at').first()
     return log.comment if log else ''
 
 
@@ -51,7 +51,7 @@ def _get_submitted_time(report):
     log = AuditLog.objects.filter(
         report=report,
         changes__kind='WORKLOAD_REQUEST',
-    ).order_by('created_at').first()
+    ).order_by('-created_at').first()
     return log.created_at.strftime('%Y-%m-%d %H:%M') if log else ''
 
 
@@ -108,26 +108,40 @@ def _serialize_report_row(report, items):
 def _parse_breakdown_data(breakdown_data):
     """Convert frontend breakdown dict to list of dicts for WorkloadItem creation."""
     result = []
+    errors = []
     for label, rows in breakdown_data.items():
         category = LABEL_TO_CATEGORY.get(label)
         if not category:
             continue
         if not isinstance(rows, list):
+            errors.append(f'{label} must be a list')
             continue
-        for row in rows:
-            name = str(row.get('name', ''))[:100]  # cap at model field limit
+        for idx, row in enumerate(rows):
+            if not isinstance(row, dict):
+                errors.append(f'{label}[{idx}] must be an object')
+                continue
+
+            name = str(row.get('name', '')).strip()[:100]  # cap at model field limit
+            if not name:
+                errors.append(f'{label}[{idx}].name is required')
+                continue
+
             try:
                 hours = Decimal(str(row.get('hours', 0)))
             except Exception:
-                hours = Decimal('0.00')
-            # Reject negative or implausibly large values
+                errors.append(f'{label}[{idx}].hours must be numeric')
+                continue
+
+            # Reject negative or implausibly large values.
             if hours < Decimal('0') or hours > Decimal('10000'):
-                hours = Decimal('0.00')
+                errors.append(f'{label}[{idx}].hours out of range')
+                continue
+
             if category == 'TEACHING':
                 result.append({'category': category, 'unit_code': name, 'description': None, 'allocated_hours': hours})
             else:
                 result.append({'category': category, 'unit_code': None, 'description': name, 'allocated_hours': hours})
-    return result
+    return result, errors
 
 
 def _hod_visible_qs(staff):
@@ -371,7 +385,18 @@ def supervisor_single_decision(request, id):
 
     # Optional breakdown update: replace all items with the provided data.
     if breakdown_data and isinstance(breakdown_data, dict):
-        parsed = _parse_breakdown_data(breakdown_data)
+        parsed, parse_errors = _parse_breakdown_data(breakdown_data)
+        if parse_errors:
+            return Response(
+                {'success': False, 'message': 'Validation failed', 'errors': {'breakdown': parse_errors}},
+                status=http_status.HTTP_400_BAD_REQUEST,
+            )
+        if not parsed:
+            return Response(
+                {'success': False, 'message': 'Validation failed',
+                 'errors': {'breakdown': ['At least one valid breakdown row is required']}},
+                status=http_status.HTTP_400_BAD_REQUEST,
+            )
         report.items.all().delete()
         WorkloadItem.objects.bulk_create([
             WorkloadItem(report=report, **kwargs) for kwargs in parsed
@@ -551,7 +576,9 @@ def _serialize_report(r):
 @require_role('HOD', 'SCHOOL_OPS', 'HOS')
 def supervisor_requests(request):
     """Return workload reports grouped by status, scoped to the caller's role."""
-    qs = get_workload_queryset(request.staff).order_by('-created_at')
+    # Reuse v2 visibility rules for legacy endpoint to avoid leaking
+    # INITIAL reports that are still unconfirmed by academic.
+    qs = _hod_visible_qs(request.staff).order_by('-created_at')
     return Response({
         'initial': [_serialize_report(r) for r in qs.filter(status='INITIAL')],
         'pending': [_serialize_report(r) for r in qs.filter(status='PENDING')],

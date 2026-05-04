@@ -52,6 +52,7 @@ type BreakdownData = Record<BreakdownCategory, BreakdownEntry[]>;
 
 const SUPERVISOR_DRAFT_KEY = "academic_to_supervisor_requests_v1";
 const SUPERVISOR_STATE_KEY = "supervisor_requests_state_v1";
+const HOD_ASSIGNMENTS_KEY = "hod_role_assignments_v1";
 const ACADEMIC_STATUS_SYNC_KEY = "academic_status_sync_v1";
 const ACADEMIC_NOTES_SYNC_KEY = "academic_notes_sync_v1";
 const SUPERVISOR_SYNC_EVENT = "supervisor-status-updated";
@@ -192,6 +193,7 @@ export default function HeadofSchool() {
   type RoleAssignment = {
     id: number;
     staffId: string;
+    email?: string;
     name: string;
     role: AssignRole;
     department: AssignDepartment;
@@ -589,6 +591,23 @@ export default function HeadofSchool() {
     "Senior School Coordinator",
   ];
   const availablePermissions = rolePermissionMap[assignRole];
+
+  useEffect(() => {
+    try {
+      const raw = window.localStorage.getItem(HOD_ASSIGNMENTS_KEY);
+      if (!raw) return;
+      const parsed = JSON.parse(raw);
+      if (!Array.isArray(parsed)) return;
+      setRoleAssignments(parsed);
+    } catch {
+      // ignore invalid cached assignment data
+    }
+  }, []);
+
+  useEffect(() => {
+    window.localStorage.setItem(HOD_ASSIGNMENTS_KEY, JSON.stringify(roleAssignments));
+  }, [roleAssignments]);
+
   const initialAssignablePeople: AssignablePerson[] = [
     {
       id: 1,
@@ -1420,6 +1439,7 @@ export default function HeadofSchool() {
     const next: RoleAssignment = {
       id: Date.now(),
       staffId: selectedPerson.staffId,
+      email: selectedPerson.email,
       name: `${selectedPerson.firstName} ${selectedPerson.lastName}`,
       role: assignRole,
       department: assignDepartment,
