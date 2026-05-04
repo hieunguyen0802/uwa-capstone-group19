@@ -86,10 +86,11 @@ urlpatterns = [
     path('admin/workloads/import-template/download/', admin_workload_import_template_download),
     path('admin/workloads/import/', admin_workload_import),
     path('admin/staff/', admin_staff_list),
-    path('admin/staff/<str:staff_id>/', admin_staff_patch),
+    # Literal paths must come before the parameterised catch-all to avoid shadowing.
     path('admin/staff/import-template/', admin_staff_import_template),
     path('admin/staff/import-template/download/', admin_staff_import_template_download),
     path('admin/staff/import/', admin_staff_import),
+    path('admin/staff/<str:staff_id>/', admin_staff_patch),
     path('admin/role-assignments/', admin_role_assignments),
     path('admin/role-assignments/<int:assignment_id>/disable/', admin_role_assignment_disable),
     path('admin/visualization/', admin_visualization),

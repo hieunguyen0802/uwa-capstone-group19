@@ -714,8 +714,8 @@ def admin_workload_import(request):
         employee_id = col(cells, 'employee_id')
         hours_raw = col(cells, 'total_work_hours')
         description = col(cells, 'description')
-        raw_status = col(cells, 'status')
-        norm_status = _normalize_front_status(raw_status) or 'INITIAL'
+        # Always force INITIAL — spreadsheet status column must never bypass the approval workflow.
+        norm_status = 'INITIAL'
 
         if not employee_id:
             failures.append({'row': offset, 'field': 'employee_id', 'message': 'employee_id is required'})
@@ -725,6 +725,10 @@ def admin_workload_import(request):
             hours_val = Decimal(str(hours_raw or '0'))
         except Exception:
             failures.append({'row': offset, 'field': 'total_work_hours', 'message': 'invalid decimal'})
+            continue
+
+        if hours_val < 0:
+            failures.append({'row': offset, 'field': 'total_work_hours', 'message': 'total_work_hours must be non-negative'})
             continue
 
         staff_row = Staff.objects.select_related('department', 'user').filter(staff_number=employee_id).first()
@@ -750,9 +754,6 @@ def admin_workload_import(request):
             is_current=True,
         )
         superseded_reports = list(orphan_reports)
-        for old in superseded_reports:
-            old.is_current = False
-            old.save(update_fields=['is_current', 'updated_at'])
 
         report = WorkloadReport.objects.create(
             staff=staff_row,
@@ -765,6 +766,17 @@ def admin_workload_import(request):
             is_anomaly=False,
             is_current=True,
         )
+
+        for old in superseded_reports:
+            old.is_current = False
+            old.superseded_by = report
+            old.save(update_fields=['is_current', 'superseded_by', 'updated_at'])
+            AuditLog.objects.create(
+                report=old,
+                action_by=request.staff,
+                action_type='MODIFIED_BY_REIMPORT',
+                changes={'superseded_by': str(report.report_id), 'batch': str(batch_id)},
+            )
 
         AuditLog.objects.create(
             report=report,
@@ -1019,6 +1031,13 @@ def admin_role_assignments(request):
         permissions=permissions,
         status='active',
     )
+
+    # Sync Staff.role so require_role() checks take effect immediately.
+    _FRONT_TO_CANONICAL = {'HoD': 'HOD', 'Admin': 'SCHOOL_OPS'}
+    canonical = _FRONT_TO_CANONICAL.get(role_front)
+    if canonical:
+        staff_row.role = canonical
+        staff_row.save(update_fields=['role', 'updated_at'])
 
     return Response({
         'success': True,
