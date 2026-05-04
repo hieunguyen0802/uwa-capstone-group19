@@ -38,7 +38,8 @@ type MockRequest = {
   periodLabel: string;
   name: string;
   unit: string;
-  description: string;
+  notes?: string;
+  description?: string;
   requestReason?: string;
   title: string;
   department: string;
@@ -153,6 +154,12 @@ function cleanDescription(description: string) {
   return description.slice(0, idx).trim();
 }
 
+function workloadModalNotes(row: Pick<MockRequest, "notes" | "description">) {
+  const n = row.notes?.trim();
+  if (n) return n;
+  return cleanDescription(row.description ?? "");
+}
+
 function shortDepartmentName(department: string) {
   if (department === "Computer Science & Software Engineering") return "CS&SE";
   if (department === "Mathematics & Statistics") return "Math&Stats";
@@ -240,76 +247,7 @@ export default function HeadofSchool() {
   const currentYear = useMemo(() => new Date().getFullYear(), []);
 
   const [loading] = useState(false);
-  const [pending, setPending] = useState<MockRequest[]>(() => {
-    const saved = readSupervisorState();
-    if (saved.length > 0) {
-      const drafts = consumeAcademicDrafts();
-      return mergeDraftsIntoRequests(saved, drafts);
-    }
-
-    // Fake data (plus requests submitted from Academic page via localStorage)
-    const base: MockRequest[] = [
-      {
-        id: 1,
-        studentId: "2345678",
-        semesterLabel: "Sem1",
-        periodLabel: "2025-1",
-        name: "Ann Culhane",
-        unit: "CITS 2206",
-        description: "Sample pending request.",
-        title: "Professor",
-        department: "Computer Science",
-        rate: 70,
-        status: "pending",
-        hours: 10,
-      },
-      {
-        id: 2,
-        studentId: "2345679",
-        semesterLabel: "Sem1",
-        periodLabel: "2025-1",
-        name: "Ahmed Adhyyasar",
-        unit: "CITS 1201",
-        description: "Older submission — replaced by a newer version.",
-        title: "Professor",
-        department: "Computer Science",
-        rate: 70,
-        status: "approved",
-        hours: 20,
-        cancelled: true,
-      },
-      {
-        id: 3,
-        studentId: "2345680",
-        semesterLabel: "Sem1",
-        periodLabel: "2025-1",
-        name: "Mary Smith",
-        unit: "CITS 1302",
-        description: "Sample rejected request.",
-        title: "Professor",
-        department: "Computer Science",
-        rate: 70,
-        status: "rejected",
-        hours: 5,
-      },
-      {
-        id: 4,
-        studentId: "2345681",
-        semesterLabel: "Sem1",
-        periodLabel: "2025-1",
-        name: "John Doe",
-        unit: "CITS 2103",
-        description: "Sample approved request.",
-        title: "Professor",
-        department: "Computer Science",
-        rate: 70,
-        status: "approved",
-        hours: 15,
-      },
-    ];
-    const drafts = consumeAcademicDrafts();
-    return [...drafts, ...base];
-  });
+  const [pending, setPending] = useState<MockRequest[]>([]);
 
   useEffect(() => {
     function mergeLatestDrafts() {
@@ -471,68 +409,7 @@ export default function HeadofSchool() {
     window.localStorage.setItem(HOD_ASSIGNMENTS_KEY, JSON.stringify(roleAssignments));
   }, [roleAssignments]);
 
-  const initialAssignablePeople: AssignablePerson[] = [
-    {
-      id: 1,
-      staffId: "50123451",
-      firstName: "Ann",
-      lastName: "Culhane",
-      email: "ann.culhane@uwa.edu.au",
-      title: "Professor",
-      currentDepartment: "Physics",
-      isActive: true,
-      isNewEmployee: false,
-      notes: "",
-    },
-    {
-      id: 2,
-      staffId: "50123462",
-      firstName: "Oliver",
-      lastName: "Stone",
-      email: "oliver.stone@uwa.edu.au",
-      title: "Associate Professor",
-      currentDepartment: "Mathematics & Statistics",
-      isActive: true,
-      isNewEmployee: false,
-      notes: "",
-    },
-    {
-      id: 3,
-      staffId: "50123473",
-      firstName: "Ahmed",
-      lastName: "Adhyyasar",
-      email: "ahmed.adhyyasar@uwa.edu.au",
-      title: "Professor",
-      currentDepartment: "Computer Science & Software Engineering",
-      isActive: true,
-      isNewEmployee: false,
-      notes: "",
-    },
-    {
-      id: 4,
-      staffId: "50123484",
-      firstName: "Lisa",
-      lastName: "Brown",
-      email: "lisa.brown@uwa.edu.au",
-      title: "",
-      currentDepartment: "",
-      isActive: true,
-      isNewEmployee: false,
-      notes: "",
-    },
-    {
-      id: 5,
-      staffId: "50123495",
-      firstName: "Mary",
-      lastName: "Smith",
-      email: "mary.smith@uwa.edu.au",
-      title: "Lecturer",
-      currentDepartment: "Computer Science & Software Engineering",
-      isActive: true,
-      isNewEmployee: false,
-      notes: "",
-    },
-  ];
+  const initialAssignablePeople: AssignablePerson[] = [];
   const [assignablePeople, setAssignablePeople] = useState<AssignablePerson[]>(initialAssignablePeople);
   const [importMessage, setImportMessage] = useState("");
   const [staffModalOpen, setStaffModalOpen] = useState(false);
@@ -1926,7 +1803,7 @@ export default function HeadofSchool() {
                               <td className="px-3 py-3 text-slate-700">{item.title}</td>
                               <td className="px-3 py-3 text-slate-700">{item.department || "-"}</td>
                               <td className="px-3 py-3 text-slate-600">
-                                {item.requestReason || extractRequestReason(item.description) || "- no reason provided -"}
+                                {item.requestReason || extractRequestReason(item.description ?? "") || "- no reason provided -"}
                               </td>
                               <td className="px-3 py-3">
                                 <StatusPill status={item.status} variant="supervisor" />
@@ -2059,13 +1936,13 @@ export default function HeadofSchool() {
                             onClick={() => setDescriptionExpanded((v) => !v)}
                             className="flex w-full items-center justify-between rounded-sm border border-slate-300 bg-slate-50 px-3 py-2 text-left text-sm font-semibold uppercase text-slate-700"
                           >
-                            <span>Description</span>
+                            <span>Note</span>
                             <span className="text-base leading-none">{descriptionExpanded ? "−" : "+"}</span>
                           </button>
                           {descriptionExpanded && (
                             <textarea
                               readOnly
-                              value={cleanDescription(detailsItem.description)}
+                              value={workloadModalNotes(detailsItem)}
                               className="mt-2 h-28 w-full resize-none rounded-sm border border-slate-300 bg-white px-4 py-3 text-sm text-slate-700"
                             />
                           )}
@@ -2075,7 +1952,7 @@ export default function HeadofSchool() {
                           <div className="text-sm font-semibold text-slate-700">Application Reason</div>
                           <textarea
                             readOnly
-                            value={detailsItem.requestReason || extractRequestReason(detailsItem.description) || "- no reason provided -"}
+                            value={detailsItem.requestReason || extractRequestReason(detailsItem.description ?? "") || "- no reason provided -"}
                             className="mt-2 h-24 w-full resize-none rounded-sm border border-slate-300 bg-white px-4 py-3 text-sm text-slate-700"
                           />
                         </div>

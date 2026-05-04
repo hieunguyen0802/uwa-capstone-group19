@@ -31,7 +31,7 @@ type AcademicItem = {
   employeeId: string;
   /** Job title (shown in detail modal; optional — falls back to generated title by id). */
   title?: string;
-  description: string;
+  notes: string;
   hours: number;
   /** Expected teaching hours; if the teaching subtotal in the breakdown is lower, self-confirm is blocked as abnormal. */
   teachingTargetHours?: number;
@@ -98,13 +98,17 @@ type SupervisorDraftRequest = {
   periodLabel: string;
   name: string;
   unit: string;
-  description: string;
+  notes?: string;
+  /** Legacy drafts from localStorage may still use this key. */
+  description?: string;
   requestReason?: string;
   title: string;
   department: string;
   rate: number;
   status: "pending";
   hours: number;
+  targetTeachingRatio?: number;
+  teachingTargetHours?: number;
 };
 
 const SUPERVISOR_DRAFT_KEY = "academic_to_supervisor_requests_v1";
@@ -414,7 +418,7 @@ function AcademicDetailModal({
             {descriptionExpanded && (
               <textarea
                 readOnly
-                value={item.description}
+                value={item.notes}
                 className="mt-1 h-24 w-full resize-none rounded border border-slate-300 px-3 py-2 text-sm"
               />
             )}
@@ -461,62 +465,7 @@ function AcademicDetailModal({
 export default function Academic() {
   const user = MOCK_DASHBOARD_USER;
 
-  const [items, setItems] = useState<AcademicItem[]>(() => {
-    const base: AcademicItem[] = [
-      {
-        id: 1,
-        name: "Ann Culhane",
-        employeeId: "5684236526",
-        title: "Associate Professor",
-        description: "Sample workload row for testing.",
-        hours: 10,
-        status: "pending",
-        confirmation: "unconfirmed",
-        assignedBy: "D ideal",
-        targetTeachingRatio: 50,
-      },
-      {
-        id: 2,
-        name: "Ahmad Rosser",
-        employeeId: "5684236527",
-        title: "Senior Lecturer",
-        description: "Older submission — replaced by a newer version.",
-        hours: 20,
-        status: "approved",
-        confirmation: "confirmed",
-        confirmationTime: "2026-03-02 11:30",
-        assignedBy: "bronte",
-        cancelled: true,
-      },
-      {
-        id: 3,
-        name: "Mary Smith",
-        employeeId: "5684236528",
-        title: "Lecturer",
-        description: "Sample workload row for testing.",
-        hours: 5,
-        status: "rejected",
-        confirmation: "unconfirmed",
-        assignedBy: "D ideal",
-      },
-      {
-        id: 4,
-        name: "John Doe",
-        employeeId: "5684236529",
-        title: "Professor",
-        description: "Sample workload row for testing.",
-        hours: 15,
-        status: "pending",
-        confirmation: "confirmed",
-        confirmationTime: "2026-03-04 14:30",
-        assignedBy: "bronte",
-        targetTeachingRatio: 40,
-      },
-    ];
-    const synced = readAcademicStatusSync();
-    const syncedNotes = readAcademicNotesSync();
-    return applySyncedStatus(base, synced, syncedNotes);
-  });
+  const [items, setItems] = useState<AcademicItem[]>([]);
 
   const [selectedIds, setSelectedIds] = useState<Set<number>>(new Set([1]));
   const [page, setPage] = useState(1);
@@ -749,13 +698,15 @@ export default function Academic() {
       periodLabel: "2025-1",
       name: row.name,
       unit: "CITS 2200",
-      description: row.description,
+      notes: row.notes,
       requestReason: reason,
       title: user.title,
       department: user.department,
       rate: 70,
       status: "pending",
       hours: row.hours,
+      targetTeachingRatio: row.targetTeachingRatio,
+      teachingTargetHours: row.teachingTargetHours,
     }));
 
     if (typeof window !== "undefined") {
@@ -900,7 +851,7 @@ export default function Academic() {
         Name: item.name,
         EmployeeID: item.employeeId,
         Title: academicItemTitle(item),
-        Description: item.description,
+        Notes: item.notes,
         Status: statusLabel(item.status) || "-",
         Confirmation: confirmationLabel(item.confirmation),
         ConfirmationTime: academicConfirmationTimeCell(item) || "-",
@@ -1403,4 +1354,4 @@ export default function Academic() {
       )}
     </div>
   );
-}
+  }

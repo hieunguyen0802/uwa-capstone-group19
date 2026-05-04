@@ -3,7 +3,7 @@ import Login from "./pages/Login";
 import Role from "./pages/Role";
 import Academic from "./pages/Academic";
 import Supervisor from "./pages/Supervisor";
-import Admin from "./pages/Admin";
+import SchoolofOperations from "./pages/SchoolofOperations";
 import HeadofSchool from "./pages/HeadofSchool";
 
 function App() {
@@ -15,7 +15,7 @@ function App() {
         <Route path="/role" element={<Role />} />
         <Route path="/academic" element={<Academic />} />
         <Route path="/supervisor" element={<Supervisor />} />
-        <Route path="/school-operations" element={<Admin />} />
+        <Route path="/school-operations" element={<SchoolofOperations />} />
         <Route path="/schoolofoperations" element={<Navigate to="/school-operations" replace />} />
         <Route path="/admin" element={<Navigate to="/school-operations" replace />} />
         <Route path="/headofschool" element={<HeadofSchool />} />

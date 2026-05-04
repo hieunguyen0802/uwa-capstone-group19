@@ -21,7 +21,8 @@ type MockRequest = {
   periodLabel: string;
   name: string;
   unit: string;
-  description: string;
+  notes?: string;
+  description?: string;
   requestReason?: string;
   title: string;
   department: string;
@@ -146,6 +147,12 @@ function cleanDescription(description: string) {
   return description.slice(0, idx).trim();
 }
 
+function workloadModalNotes(row: Pick<MockRequest, "notes" | "description">) {
+  const n = row.notes?.trim();
+  if (n) return n;
+  return cleanDescription(row.description ?? "");
+}
+
 function parsePeriod(periodLabel: string) {
   const matched = periodLabel.match(/(\d{4})-(1|2)/);
   if (!matched) return { year: NaN, semester: "" as "" | "S1" | "S2" };
@@ -238,76 +245,7 @@ export default function Supervisor() {
   );
 
   const [loading] = useState(false);
-  const [pending, setPending] = useState<MockRequest[]>(() => {
-    const saved = readSupervisorState();
-    if (saved.length > 0) {
-      const drafts = consumeAcademicDrafts();
-      return mergeDraftsIntoRequests(reseedSemestersIfNeeded(saved), drafts);
-    }
-
-    // Fake data (plus requests submitted from Academic page via localStorage)
-    const base: MockRequest[] = [
-      {
-        id: 1,
-        studentId: "2345678",
-        semesterLabel: "Sem1",
-        periodLabel: "2025-1",
-        name: "Ann Culhane",
-        unit: "CITS 2206",
-        description: "Sample pending request.",
-        title: "Professor",
-        department: "Computer Science",
-        rate: 70,
-        status: "pending",
-        hours: 10,
-      },
-      {
-        id: 2,
-        studentId: "2345679",
-        semesterLabel: "Sem1",
-        periodLabel: "2025-1",
-        name: "Ahmed Adhyyasar",
-        unit: "CITS 1201",
-        description: "Older submission — replaced by a newer version.",
-        title: "Professor",
-        department: "Computer Science",
-        rate: 70,
-        status: "approved",
-        hours: 20,
-        cancelled: true,
-      },
-      {
-        id: 3,
-        studentId: "2345680",
-        semesterLabel: "Sem1",
-        periodLabel: "2025-1",
-        name: "Mary Smith",
-        unit: "CITS 1302",
-        description: "Sample rejected request.",
-        title: "Professor",
-        department: "Computer Science",
-        rate: 70,
-        status: "rejected",
-        hours: 5,
-      },
-      {
-        id: 4,
-        studentId: "2345681",
-        semesterLabel: "Sem1",
-        periodLabel: "2025-1",
-        name: "John Doe",
-        unit: "CITS 2103",
-        description: "Sample approved request.",
-        title: "Professor",
-        department: "Computer Science",
-        rate: 70,
-        status: "approved",
-        hours: 15,
-      },
-    ];
-    const drafts = consumeAcademicDrafts();
-    return [...drafts, ...reseedSemestersIfNeeded(base)];
-  });
+  const [pending, setPending] = useState<MockRequest[]>([]);
 
   useEffect(() => {
     function mergeLatestDrafts() {
@@ -964,7 +902,7 @@ export default function Supervisor() {
                           >
                             ›
                           </button>
-                        </div>
+            </div>
 
                         <div className="mb-1 grid grid-cols-7 gap-1 text-center text-xs font-semibold text-slate-500">
                           {["Su", "Mo", "Tu", "We", "Th", "Fr", "Sa"].map((d) => (
@@ -1017,7 +955,7 @@ export default function Supervisor() {
 
                             return cells;
                           })()}
-                        </div>
+            </div>
                       </div>
                     )}
                   </div>
@@ -1050,10 +988,10 @@ export default function Supervisor() {
                 >
                   Send
                 </button>
-              </div>
             </div>
-          </div>
-        )}
+            </div>
+        </div>
+      )}
 
         <ProfileModal
           open={profileOpen}
@@ -1134,7 +1072,7 @@ export default function Supervisor() {
               <div className="w-fit rounded bg-[#2f4d9c] px-3 py-1 text-xs font-bold text-white">
                 Last name
               </div>
-              <input
+          <input
                 value={searchLastNameInput}
                 onChange={(e) => setSearchLastNameInput(e.target.value)}
                 onKeyDown={handleSearchKeyDown}
@@ -1357,7 +1295,7 @@ export default function Supervisor() {
                         >
                           <td className="px-2 py-3">
                             {statusFilter === "pending" ? (
-                              <input
+          <input
                                 type="checkbox"
                                 checked={isSelected}
                                 onChange={(e) => {
@@ -1386,7 +1324,7 @@ export default function Supervisor() {
                           <td className="px-3 py-3 text-slate-700">{item.title}</td>
                           <td className="px-3 py-3 text-slate-600">
                             {item.requestReason ||
-                              extractRequestReason(item.description) ||
+                              extractRequestReason(item.description ?? "") ||
                               "- no reason provided -"}
                           </td>
                           <td className="px-3 py-3">
@@ -1462,7 +1400,7 @@ export default function Supervisor() {
                           <div className="w-32 rounded-sm bg-[#2f4d9c] px-3 py-2 text-center text-base font-semibold text-white">
                             Full name
                           </div>
-                          <input
+          <input
                             readOnly
                             value={detailsItem.name}
                             className="w-full flex-1 rounded-sm border border-[#2f4d9c] px-3 py-2 text-base"
@@ -1473,7 +1411,7 @@ export default function Supervisor() {
                           <div className="w-32 rounded-sm bg-[#2f4d9c] px-3 py-2 text-center text-base font-semibold text-white">
                             Title
                           </div>
-                          <input
+          <input
                             readOnly
                             value={detailsItem.title}
                             className="w-full flex-1 rounded-sm border border-[#2f4d9c] px-3 py-2 text-base"
@@ -1494,7 +1432,7 @@ export default function Supervisor() {
                                   )
                                 : detailsItem.hours;
                             return (
-                          <input
+          <input
                             readOnly
                             value={totalHours}
                             className="w-full flex-1 rounded-sm border border-[#2f4d9c] px-3 py-2 text-base tabular-nums font-sans"
@@ -1507,7 +1445,7 @@ export default function Supervisor() {
                           <div className="w-32 rounded-sm bg-[#2f4d9c] px-3 py-2 text-center text-base font-semibold text-white">
                             Department
                           </div>
-                          <input
+          <input
                             readOnly
                             value={detailsItem.department}
                             className="w-full flex-1 rounded-sm border border-[#2f4d9c] px-3 py-2 text-base"
@@ -1547,7 +1485,7 @@ export default function Supervisor() {
                               {(detailsBreakdown?.[detailsTab] ?? breakdownById(detailsItem.id, detailsItem.hours)[detailsTab]).map((row, idx) => (
                                 <tr key={`${detailsItem.id}-${detailsTab}-${idx}`}>
                                   <td className="px-3 py-2">
-                                    <input
+          <input
                                       value={row.name}
                                       onChange={(e) => updateBreakdownRow(detailsTab, idx, "name", e.target.value)}
                                       maxLength={60}
@@ -1608,13 +1546,13 @@ export default function Supervisor() {
                           onClick={() => setDescriptionExpanded((v) => !v)}
                           className="flex w-full items-center justify-between rounded-sm border border-slate-300 bg-slate-50 px-3 py-2 text-left text-sm font-semibold uppercase text-slate-700"
                         >
-                          <span>Description</span>
+                          <span>Note</span>
                           <span className="text-base leading-none">{descriptionExpanded ? "−" : "+"}</span>
                         </button>
                         {descriptionExpanded && (
                           <textarea
                             readOnly
-                            value={cleanDescription(detailsItem.description)}
+                            value={workloadModalNotes(detailsItem)}
                             className="mt-2 h-28 w-full resize-none rounded-sm border border-slate-300 bg-white px-4 py-3 text-sm text-slate-700"
                           />
                         )}
@@ -1626,7 +1564,7 @@ export default function Supervisor() {
                           readOnly
                           value={
                             detailsItem.requestReason ||
-                            extractRequestReason(detailsItem.description) ||
+                            extractRequestReason(detailsItem.description ?? "") ||
                             "- no reason provided -"
                           }
                           className="mt-2 h-24 w-full resize-none rounded-sm border border-slate-300 bg-white px-4 py-3 text-sm text-slate-700"
@@ -1747,15 +1685,15 @@ export default function Supervisor() {
                   </label>
                   <label className="flex flex-col gap-1">
                     <span className="text-xs font-semibold uppercase text-[#2f4d9c]">Semester</span>
-                    <select
+          <select
                       value={visualSemesterInput}
                       onChange={(e) => setVisualSemesterInput(e.target.value as "All" | "S1" | "S2")}
                       className="rounded border border-slate-300 px-3 py-2 text-sm"
                     >
                       <option value="All">All</option>
-                      <option value="S1">S1</option>
-                      <option value="S2">S2</option>
-                    </select>
+            <option value="S1">S1</option>
+            <option value="S2">S2</option>
+          </select>
                   </label>
                   <div className="flex flex-col gap-1">
                     <span className="select-none text-xs font-semibold uppercase text-transparent">Action</span>
@@ -1848,15 +1786,15 @@ export default function Supervisor() {
                     >
                       Export Excel
                     </button>
-                  </div>
+            </div>
                 </div>
                 {exportMessage && <div className="mt-3 text-sm font-semibold text-[#2f4d9c]">{exportMessage}</div>}
                 <div className="mt-2 text-sm text-slate-600">
                   If years are blank, export all years. If only one side is blank, export from/to the available range.
                 </div>
               </div>
-            </div>
-          )}
+        </div>
+      )}
         </div>
       </div>
 
