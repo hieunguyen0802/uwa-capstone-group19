@@ -8,6 +8,12 @@ from api.view.supervisor_views import (
     reject_request,
     get_my_workloads as supervisor_workloads,
     get_pending_requests,
+    supervisor_workload_requests,
+    supervisor_workload_request_detail,
+    supervisor_batch_decision,
+    supervisor_single_decision,
+    supervisor_visualization,
+    supervisor_export,
 )
 from api.view.academic_views import (
     academic_workloads,
@@ -24,6 +30,7 @@ urlpatterns = [
     # Auth — password-based (legacy, kept for admin/superuser use)
     path('login/', login_view),
 
+<<<<<<< HEAD
     # Auth — OTP passwordless login
     path('login/request-otp/', otp_request_view),
     path('login/verify-otp/', otp_verify_view),
@@ -32,6 +39,18 @@ urlpatterns = [
     path('import/workload/', import_workload_view),
 
     # Supervisor / Manager APIs
+=======
+    # Supervisor — new contract (8.2–8.8)
+    # batch-decision must come before <str:id>/ to avoid routing conflict
+    path('supervisor/workload-requests/', supervisor_workload_requests),
+    path('supervisor/workload-requests/batch-decision/', supervisor_batch_decision),
+    path('supervisor/workload-requests/<str:id>/', supervisor_workload_request_detail),
+    path('supervisor/workload-requests/<str:id>/decision/', supervisor_single_decision),
+    path('supervisor/visualization/', supervisor_visualization),
+    path('supervisor/export/', supervisor_export),
+
+    # Supervisor — legacy endpoints
+>>>>>>> origin/main
     path('supervisor/requests/', supervisor_requests),
     path('supervisor/approve/<str:id>/', approve_request),
     path('supervisor/reject/<str:id>/', reject_request),

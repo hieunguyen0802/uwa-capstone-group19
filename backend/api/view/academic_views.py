@@ -18,6 +18,10 @@ from api.services.workload_service import (
     evaluate_mvp_anomaly,
     get_workload_queryset,
     persist_report_anomaly,
+    _parse_year_range,
+    _filter_reports_by_range,
+    _build_semester_label,
+    _reporting_period_label,
 )
 
 CATEGORY_LABELS = {
@@ -66,6 +70,22 @@ def _build_department_conflict_keys(reports):
         key = (report.staff_id, report.academic_year, report.semester)
         key_dept_map.setdefault(key, set()).add(report.snapshot_department_id)
     return {key for key, dept_ids in key_dept_map.items() if len(dept_ids) > 1}
+
+
+def _is_department_conflict(report):
+    """Return True if this staff member has reports in multiple departments for the same period."""
+    dept_count = (
+        WorkloadReport.objects.filter(
+            staff=report.staff,
+            academic_year=report.academic_year,
+            semester=report.semester,
+            is_current=True,
+        )
+        .values('snapshot_department')
+        .distinct()
+        .count()
+    )
+    return dept_count > 1
 
 
 def _get_supervisor_note(report):
@@ -161,8 +181,14 @@ def academic_workloads(request):
             continue
         items.append(_serialize_workload_row(report, confirmation, anomaly_result, report_items))
 
-    page = int(request.GET.get('page', 1))
-    page_size = int(request.GET.get('page_size', 10))
+    try:
+        page = max(1, int(request.GET.get('page', 1)))
+        page_size = max(1, min(100, int(request.GET.get('page_size', 10))))
+    except (ValueError, TypeError):
+        return Response(
+            {'success': False, 'message': 'page and page_size must be positive integers'},
+            status=status.HTTP_400_BAD_REQUEST,
+        )
     paginator = Paginator(items, page_size)
     current_page = paginator.get_page(page)
 
@@ -187,7 +213,7 @@ def academic_workload_detail(request, id):
     report = get_object_or_404(qs, report_id=id)
 
     report_items = list(report.items.all())
-    anomaly_result = evaluate_mvp_anomaly(report)
+    anomaly_result = evaluate_mvp_anomaly(report, department_conflict=_is_department_conflict(report))
     confirmation = _get_report_confirmation(report)
     row = _serialize_workload_row(report, confirmation, anomaly_result, report_items)
 
@@ -226,7 +252,7 @@ def academic_confirm_workload(request, id):
         )
 
     report = get_object_or_404(get_workload_queryset(request.staff), report_id=id)
-    anomaly_result = persist_report_anomaly(report)
+    anomaly_result = persist_report_anomaly(report, department_conflict=_is_department_conflict(report))
     if anomaly_result['is_anomaly']:
         return Response(
             {
@@ -283,6 +309,16 @@ def academic_submit_workload_requests(request):
             status=status.HTTP_400_BAD_REQUEST,
         )
 
+    if len(workload_ids) > 10:
+        return Response(
+            {
+                'success': False,
+                'message': 'Validation failed',
+                'errors': {'workload_ids': ['Cannot submit more than 10 workloads at once']},
+            },
+            status=status.HTTP_400_BAD_REQUEST,
+        )
+
     if not request_reason:
         return Response(
             {
@@ -315,28 +351,53 @@ def academic_submit_workload_requests(request):
             status=status.HTTP_400_BAD_REQUEST,
         )
 
-    report_id_strs = [str(report.report_id) for report in reports]
-    pending_ids = set(
-        str(rid)
-        for rid in AuditLog.objects.filter(
-            report_id__in=report_id_strs,
-            changes__kind='WORKLOAD_REQUEST',
-            changes__status='pending',
-        ).values_list('report_id', flat=True)
-    )
+    # Only INITIAL or REJECTED reports can be submitted.
+    # PENDING = already submitted and awaiting HOD decision.
+    # APPROVED = terminal, no re-submission needed.
+    non_submittable = [r for r in reports if r.status not in ('INITIAL', 'REJECTED')]
+    if non_submittable:
+        return Response(
+            {
+                'success': False,
+                'message': 'One or more reports cannot be submitted (already pending or approved)',
+                'errors': {'workload_ids': [str(r.report_id) for r in non_submittable]},
+            },
+            status=status.HTTP_409_CONFLICT,
+        )
+
+    # Academic must confirm before submit. This closes the bypass path where
+    # users could directly submit unconfirmed records.
+    confirmation_map = _get_confirmation_map([str(r.report_id) for r in reports])
+    unconfirmed = [str(r.report_id) for r in reports if confirmation_map.get(str(r.report_id), 'unconfirmed') != 'confirmed']
+    if unconfirmed:
+        return Response(
+            {
+                'success': False,
+                'message': 'One or more reports must be confirmed before submit',
+                'errors': {'workload_ids': unconfirmed},
+            },
+            status=status.HTTP_409_CONFLICT,
+        )
+
+    # Re-evaluate anomaly on submit to prevent bypassing the confirm endpoint.
+    anomaly_map = {}
+    for report in reports:
+        anomaly_result = persist_report_anomaly(report, department_conflict=_is_department_conflict(report))
+        if anomaly_result['is_anomaly']:
+            anomaly_map[str(report.report_id)] = anomaly_result['reasons']
+
+    if anomaly_map:
+        return Response(
+            {
+                'success': False,
+                'message': 'One or more reports have anomalies and cannot be submitted',
+                'errors': {'anomaly': anomaly_map},
+            },
+            status=status.HTTP_409_CONFLICT,
+        )
 
     created_ids = []
     for report in reports:
-        if str(report.report_id) in pending_ids:
-            return Response(
-                {
-                    'success': False,
-                    'message': 'A pending request already exists for this workload',
-                    'errors': {'workload_ids': [str(report.report_id)]},
-                },
-                status=status.HTTP_409_CONFLICT,
-            )
-
         log = AuditLog.objects.create(
             report=report,
             action_by=request.staff,
@@ -344,6 +405,8 @@ def academic_submit_workload_requests(request):
             comment=request_reason,
             changes={'kind': 'WORKLOAD_REQUEST', 'status': 'pending'},
         )
+        report.status = 'PENDING'
+        report.save(update_fields=['status', 'updated_at'])
         created_ids.append(str(log.log_id))
 
     return Response(
@@ -434,36 +497,6 @@ def submit_query(request):
         {'report_id': str(report.report_id), 'status': report.status},
         status=status.HTTP_201_CREATED,
     )
-
-
-def _build_semester_label(year: int, semester: str) -> str:
-    return f"{year} {semester}"
-
-
-def _parse_year_range(request):
-    """Parse year_from / year_to from query params. Returns (year_from, year_to) as ints or None."""
-    try:
-        year_from = int(request.GET['year_from']) if request.GET.get('year_from') else None
-        year_to = int(request.GET['year_to']) if request.GET.get('year_to') else None
-    except (ValueError, TypeError):
-        year_from = year_to = None
-    return year_from, year_to
-
-
-def _filter_reports_by_range(qs, year_from, year_to, semester_filter):
-    if year_from:
-        qs = qs.filter(academic_year__gte=year_from)
-    if year_to:
-        qs = qs.filter(academic_year__lte=year_to)
-    if semester_filter and semester_filter.upper() != 'ALL':
-        qs = qs.filter(semester=semester_filter.upper())
-    return qs
-
-
-def _reporting_period_label(year_from, year_to, semester_filter) -> str:
-    year_part = f"{year_from or '?'}-{year_to or '?'}"
-    sem_part = 'All Semesters' if not semester_filter or semester_filter.upper() == 'ALL' else semester_filter.upper()
-    return f"{year_part} {sem_part}"
 
 
 @api_view(['GET'])

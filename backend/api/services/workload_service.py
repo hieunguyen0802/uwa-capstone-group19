@@ -130,9 +130,41 @@ def evaluate_mvp_anomaly(report, department_conflict=False):
     }
 
 
-def persist_report_anomaly(report):
-    result = evaluate_mvp_anomaly(report)
+def persist_report_anomaly(report, department_conflict=False):
+    result = evaluate_mvp_anomaly(report, department_conflict=department_conflict)
     if report.is_anomaly != result['is_anomaly']:
         report.is_anomaly = result['is_anomaly']
         report.save(update_fields=['is_anomaly', 'updated_at'])
     return result
+
+
+# ─── Shared query helpers (used by both academic and supervisor views) ─────────
+
+def _parse_year_range(request):
+    """Parse year_from / year_to from query params. Returns (int|None, int|None)."""
+    try:
+        year_from = int(request.GET['year_from']) if request.GET.get('year_from') else None
+        year_to = int(request.GET['year_to']) if request.GET.get('year_to') else None
+    except (ValueError, TypeError):
+        year_from = year_to = None
+    return year_from, year_to
+
+
+def _filter_reports_by_range(qs, year_from, year_to, semester_filter):
+    if year_from:
+        qs = qs.filter(academic_year__gte=year_from)
+    if year_to:
+        qs = qs.filter(academic_year__lte=year_to)
+    if semester_filter and semester_filter.upper() != 'ALL':
+        qs = qs.filter(semester=semester_filter.upper())
+    return qs
+
+
+def _build_semester_label(year: int, semester: str) -> str:
+    return f"{year} {semester}"
+
+
+def _reporting_period_label(year_from, year_to, semester_filter) -> str:
+    year_part = f"{year_from or '?'}-{year_to or '?'}"
+    sem_part = 'All Semesters' if not semester_filter or semester_filter.upper() == 'ALL' else semester_filter.upper()
+    return f"{year_part} {sem_part}"

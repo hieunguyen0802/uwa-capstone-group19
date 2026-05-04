@@ -170,9 +170,16 @@ class WorkloadReport(models.Model):
         related_name='historical_reports'
     )
 
+<<<<<<< HEAD
     # Approval status lifecycle: INITIAL → PENDING → APPROVED or REJECTED
     # INITIAL: just imported, academic has not yet viewed or confirmed.
     # PENDING: academic has viewed/confirmed; awaiting HOD approval.
+=======
+    # Status lifecycle: INITIAL → PENDING → APPROVED or REJECTED
+    # INITIAL:  Daniela imported; academic can see, HOD can see but cannot act.
+    # PENDING:  Academic submitted request; HOD can approve or reject.
+    # APPROVED / REJECTED: terminal states set by HOD.
+>>>>>>> origin/main
     STATUS_CHOICES = [
         ('INITIAL', 'Initial'),
         ('PENDING', 'Pending Review'),
