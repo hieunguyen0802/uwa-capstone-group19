@@ -13,7 +13,7 @@ from rest_framework.permissions import IsAuthenticated
 from rest_framework.response import Response
 
 from api.decorators import require_role
-from api.models import AuditLog, WorkloadItem, WorkloadReport
+from api.models import AuditLog, WorkloadItem
 from api.services.workload_service import (
     get_workload_queryset,
     _parse_year_range,
