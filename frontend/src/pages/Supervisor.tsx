@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useState, type ChangeEvent } from "react";
 import * as XLSX from "xlsx";
 import DashboardHeader from "../components/common/DashboardHeader";
+import { MOCK_DASHBOARD_USER } from "../data/mockDashboardUser";
 import LineMetricChartCard from "../components/common/LineMetricChartCard";
 import PaginationControls from "../components/common/PaginationControls";
 import ProfileModal from "../components/common/ProfileModal";
@@ -10,6 +11,7 @@ import SearchButton from "../components/common/SearchButton";
 import SectionTabs from "../components/common/SectionTabs";
 import StatusPill from "../components/common/StatusPill";
 import VisualizationSummaryCards from "../components/common/VisualizationSummaryCards";
+import ThemedNoticeModal, { SUPERSEDED_RECORD_MESSAGE } from "../components/common/ThemedNoticeModal";
 import WorkHoursBadge from "../components/common/WorkHoursBadge";
 
 type MockRequest = {
@@ -19,7 +21,8 @@ type MockRequest = {
   periodLabel: string;
   name: string;
   unit: string;
-  description: string;
+  notes?: string;
+  description?: string;
   requestReason?: string;
   title: string;
   department: string;
@@ -27,6 +30,8 @@ type MockRequest = {
   status: "pending" | "approved" | "rejected";
   hours: number;
   supervisorNote?: string;
+  /** When true (from API), row is read-only and detail is blocked — superseded by a newer version. */
+  cancelled?: boolean;
 };
 
 type BreakdownCategory = "Teaching" | "Assigned Roles" | "HDR" | "Service";
@@ -142,6 +147,12 @@ function cleanDescription(description: string) {
   return description.slice(0, idx).trim();
 }
 
+function workloadModalNotes(row: Pick<MockRequest, "notes" | "description">) {
+  const n = row.notes?.trim();
+  if (n) return n;
+  return cleanDescription(row.description ?? "");
+}
+
 function parsePeriod(periodLabel: string) {
   const matched = periodLabel.match(/(\d{4})-(1|2)/);
   if (!matched) return { year: NaN, semester: "" as "" | "S1" | "S2" };
@@ -203,13 +214,7 @@ export default function Supervisor() {
     date: string;
   };
 
-  const user = {
-    surname: "Sam",
-    firstName: "Yaka",
-    employeeId: "2345678",
-    title: "Professor",
-    department: "Computer Science",
-  };
+  const user = MOCK_DASHBOARD_USER;
 
   const [hasNewMessage, setHasNewMessage] = useState(true);
   const [messagePanelOpen, setMessagePanelOpen] = useState(false);
@@ -240,214 +245,7 @@ export default function Supervisor() {
   );
 
   const [loading] = useState(false);
-  const [pending, setPending] = useState<MockRequest[]>(() => {
-    const saved = readSupervisorState();
-    if (saved.length > 0) {
-      const drafts = consumeAcademicDrafts();
-      return mergeDraftsIntoRequests(reseedSemestersIfNeeded(saved), drafts);
-    }
-
-    // Fake data (plus requests submitted from Academic page via localStorage)
-    const base: MockRequest[] = [
-      {
-        id: 1,
-        studentId: "2345678",
-        semesterLabel: "Sem1",
-        periodLabel: "2025-1",
-        name: "Ann Culhane",
-        unit: "CITS 2206",
-        description:
-          "Lorem ipsum dolor sit amet, consectetur adipiscing elit. Nulla...",
-        title: "Professor",
-        department: "Computer Science",
-        rate: 70,
-        status: "pending",
-        hours: 10,
-      },
-      {
-        id: 2,
-        studentId: "2345679",
-        semesterLabel: "Sem1",
-        periodLabel: "2025-1",
-        name: "Ahmed Adhyyasar",
-        unit: "CITS 1201",
-        description:
-          "Lorem ipsum dolor sit amet, consectetur adipiscing elit. Nulla...",
-        title: "Professor",
-        department: "Computer Science",
-        rate: 70,
-        status: "pending",
-        hours: 20,
-      },
-      {
-        id: 3,
-        studentId: "2345680",
-        semesterLabel: "Sem1",
-        periodLabel: "2025-1",
-        name: "Mary Smith",
-        unit: "CITS 1302",
-        description:
-          "Lorem ipsum dolor sit amet, consectetur adipiscing elit. Nulla...",
-        title: "Professor",
-        department: "Computer Science",
-        rate: 70,
-        status: "rejected",
-        hours: 5,
-      },
-      {
-        id: 4,
-        studentId: "2345681",
-        semesterLabel: "Sem1",
-        periodLabel: "2025-1",
-        name: "John Doe",
-        unit: "CITS 2103",
-        description:
-          "Lorem ipsum dolor sit amet, consectetur adipiscing elit. Nulla...",
-        title: "Professor",
-        department: "Computer Science",
-        rate: 70,
-        status: "approved",
-        hours: 15,
-      },
-      {
-        id: 5,
-        studentId: "2345682",
-        semesterLabel: "Sem1",
-        periodLabel: "2025-1",
-        name: "Lisa Brown",
-        unit: "CITS 2304",
-        description:
-          "Lorem ipsum dolor sit amet, consectetur adipiscing elit. Nulla...",
-        title: "Professor",
-        department: "Computer Science",
-        rate: 70,
-        status: "pending",
-        hours: 8,
-      },
-      {
-        id: 6,
-        studentId: "2345683",
-        semesterLabel: "Sem1",
-        periodLabel: "2025-1",
-        name: "Chris Martin",
-        unit: "CITS 3401",
-        description:
-          "Lorem ipsum dolor sit amet, consectetur adipiscing elit. Nulla...",
-        title: "Professor",
-        department: "Computer Science",
-        rate: 70,
-        status: "pending",
-        hours: 12,
-      },
-      {
-        id: 7,
-        studentId: "2345684",
-        semesterLabel: "Sem1",
-        periodLabel: "2025-1",
-        name: "Emma Wilson",
-        unit: "CITS 3100",
-        description:
-          "Lorem ipsum dolor sit amet, consectetur adipiscing elit. Nulla...",
-        title: "Professor",
-        department: "Computer Science",
-        rate: 70,
-        status: "pending",
-        hours: 6,
-      },
-      {
-        id: 8,
-        studentId: "2345685",
-        semesterLabel: "Sem1",
-        periodLabel: "2025-1",
-        name: "Oliver Stone",
-        unit: "CITS 4202",
-        description:
-          "Lorem ipsum dolor sit amet, consectetur adipiscing elit. Nulla...",
-        title: "Professor",
-        department: "Computer Science",
-        rate: 70,
-        status: "pending",
-        hours: 18,
-      },
-      {
-        id: 9,
-        studentId: "2345686",
-        semesterLabel: "Sem1",
-        periodLabel: "2025-1",
-        name: "Sophia Lee",
-        unit: "CITS 2008",
-        description:
-          "Lorem ipsum dolor sit amet, consectetur adipiscing elit. Nulla...",
-        title: "Professor",
-        department: "Computer Science",
-        rate: 70,
-        status: "pending",
-        hours: 9,
-      },
-      {
-        id: 10,
-        studentId: "2345687",
-        semesterLabel: "Sem1",
-        periodLabel: "2025-1",
-        name: "Daniel Smith",
-        unit: "CITS 2601",
-        description:
-          "Lorem ipsum dolor sit amet, consectetur adipiscing elit. Nulla...",
-        title: "Professor",
-        department: "Computer Science",
-        rate: 70,
-        status: "pending",
-        hours: 11,
-      },
-      {
-        id: 11,
-        studentId: "2345688",
-        semesterLabel: "Sem1",
-        periodLabel: "2025-1",
-        name: "Grace Taylor",
-        unit: "CITS 2803",
-        description:
-          "Lorem ipsum dolor sit amet, consectetur adipiscing elit. Nulla...",
-        title: "Professor",
-        department: "Computer Science",
-        rate: 70,
-        status: "pending",
-        hours: 7,
-      },
-      {
-        id: 12,
-        studentId: "2345689",
-        semesterLabel: "Sem1",
-        periodLabel: "2025-1",
-        name: "Henry Clark",
-        unit: "CITS 1500",
-        description:
-          "Lorem ipsum dolor sit amet, consectetur adipiscing elit. Nulla...",
-        title: "Professor",
-        department: "Computer Science",
-        rate: 70,
-        status: "rejected",
-        hours: 14,
-      },
-      {
-        id: 13,
-        studentId: "2345690",
-        semesterLabel: "Sem1",
-        periodLabel: "2025-1",
-        name: "Ava Robinson",
-        unit: "CITS 4101",
-        description:
-          "Lorem ipsum dolor sit amet, consectetur adipiscing elit. Nulla...",
-        title: "Professor",
-        department: "Computer Science",
-        rate: 70,
-        status: "approved",
-        hours: 8,
-      },
-    ];
-    const drafts = consumeAcademicDrafts();
-    return [...drafts, ...reseedSemestersIfNeeded(base)];
-  });
+  const [pending, setPending] = useState<MockRequest[]>([]);
 
   useEffect(() => {
     function mergeLatestDrafts() {
@@ -511,6 +309,7 @@ export default function Supervisor() {
   });
 
   const [detailsOpen, setDetailsOpen] = useState(false);
+  const [supersededNoticeOpen, setSupersededNoticeOpen] = useState(false);
   const [detailsItem, setDetailsItem] = useState<MockRequest | null>(null);
   const [detailsBreakdown, setDetailsBreakdown] = useState<BreakdownData | null>(null);
   const [detailsTab, setDetailsTab] = useState<BreakdownCategory>("Teaching");
@@ -912,6 +711,10 @@ export default function Supervisor() {
   }
 
   function openDetails(item: MockRequest) {
+    if (item.cancelled) {
+      setSupersededNoticeOpen(true);
+      return;
+    }
     setDetailsItem(item);
     setDetailsBreakdown(breakdownById(item.id, item.hours));
     setDetailsOpen(true);
@@ -1099,7 +902,7 @@ export default function Supervisor() {
                           >
                             ›
                           </button>
-                        </div>
+            </div>
 
                         <div className="mb-1 grid grid-cols-7 gap-1 text-center text-xs font-semibold text-slate-500">
                           {["Su", "Mo", "Tu", "We", "Th", "Fr", "Sa"].map((d) => (
@@ -1152,7 +955,7 @@ export default function Supervisor() {
 
                             return cells;
                           })()}
-                        </div>
+            </div>
                       </div>
                     )}
                   </div>
@@ -1185,10 +988,10 @@ export default function Supervisor() {
                 >
                   Send
                 </button>
-              </div>
             </div>
-          </div>
-        )}
+            </div>
+        </div>
+      )}
 
         <ProfileModal
           open={profileOpen}
@@ -1267,22 +1070,22 @@ export default function Supervisor() {
           <div className="grid grid-cols-3 gap-6">
             <div className="flex flex-col gap-1">
               <div className="w-fit rounded bg-[#2f4d9c] px-3 py-1 text-xs font-bold text-white">
-                First name
+                Last name
               </div>
-              <input
-                value={searchFirstNameInput}
-                onChange={(e) => setSearchFirstNameInput(e.target.value)}
+          <input
+                value={searchLastNameInput}
+                onChange={(e) => setSearchLastNameInput(e.target.value)}
                 onKeyDown={handleSearchKeyDown}
                 className="rounded border border-slate-300 px-3 py-2 text-sm"
               />
             </div>
             <div className="flex flex-col gap-1">
               <div className="w-fit rounded bg-[#2f4d9c] px-3 py-1 text-xs font-bold text-white">
-                Last name
+                First name
               </div>
               <input
-                value={searchLastNameInput}
-                onChange={(e) => setSearchLastNameInput(e.target.value)}
+                value={searchFirstNameInput}
+                onChange={(e) => setSearchFirstNameInput(e.target.value)}
                 onKeyDown={handleSearchKeyDown}
                 className="rounded border border-slate-300 px-3 py-2 text-sm"
               />
@@ -1474,12 +1277,17 @@ export default function Supervisor() {
                   {!loading &&
                     pageItems.map((item, idx) => {
                       const isSelected = selectedIds.has(item.id);
+                      const rowCancelled = Boolean(item.cancelled);
                       const rowIndex = (page - 1) * pageSize + idx + 1;
                       return (
                         <tr
                           key={item.id}
-                          className={`cursor-pointer text-sm hover:bg-slate-50 ${
-                            isSelected ? "border-l-4 border-[#2f4d9c] bg-[#e9f2ff]" : ""
+                          className={`text-sm ${
+                            rowCancelled
+                              ? "cursor-not-allowed bg-slate-100 text-slate-400 opacity-80"
+                              : `cursor-pointer hover:bg-slate-50 ${
+                                  isSelected ? "border-l-4 border-[#2f4d9c] bg-[#e9f2ff]" : ""
+                                }`
                           }`}
                           onClick={() => {
                             openDetails(item);
@@ -1487,7 +1295,7 @@ export default function Supervisor() {
                         >
                           <td className="px-2 py-3">
                             {statusFilter === "pending" ? (
-                              <input
+          <input
                                 type="checkbox"
                                 checked={isSelected}
                                 onChange={(e) => {
@@ -1516,7 +1324,7 @@ export default function Supervisor() {
                           <td className="px-3 py-3 text-slate-700">{item.title}</td>
                           <td className="px-3 py-3 text-slate-600">
                             {item.requestReason ||
-                              extractRequestReason(item.description) ||
+                              extractRequestReason(item.description ?? "") ||
                               "- no reason provided -"}
                           </td>
                           <td className="px-3 py-3">
@@ -1592,7 +1400,7 @@ export default function Supervisor() {
                           <div className="w-32 rounded-sm bg-[#2f4d9c] px-3 py-2 text-center text-base font-semibold text-white">
                             Full name
                           </div>
-                          <input
+          <input
                             readOnly
                             value={detailsItem.name}
                             className="w-full flex-1 rounded-sm border border-[#2f4d9c] px-3 py-2 text-base"
@@ -1603,7 +1411,7 @@ export default function Supervisor() {
                           <div className="w-32 rounded-sm bg-[#2f4d9c] px-3 py-2 text-center text-base font-semibold text-white">
                             Title
                           </div>
-                          <input
+          <input
                             readOnly
                             value={detailsItem.title}
                             className="w-full flex-1 rounded-sm border border-[#2f4d9c] px-3 py-2 text-base"
@@ -1624,7 +1432,7 @@ export default function Supervisor() {
                                   )
                                 : detailsItem.hours;
                             return (
-                          <input
+          <input
                             readOnly
                             value={totalHours}
                             className="w-full flex-1 rounded-sm border border-[#2f4d9c] px-3 py-2 text-base tabular-nums font-sans"
@@ -1637,7 +1445,7 @@ export default function Supervisor() {
                           <div className="w-32 rounded-sm bg-[#2f4d9c] px-3 py-2 text-center text-base font-semibold text-white">
                             Department
                           </div>
-                          <input
+          <input
                             readOnly
                             value={detailsItem.department}
                             className="w-full flex-1 rounded-sm border border-[#2f4d9c] px-3 py-2 text-base"
@@ -1677,7 +1485,7 @@ export default function Supervisor() {
                               {(detailsBreakdown?.[detailsTab] ?? breakdownById(detailsItem.id, detailsItem.hours)[detailsTab]).map((row, idx) => (
                                 <tr key={`${detailsItem.id}-${detailsTab}-${idx}`}>
                                   <td className="px-3 py-2">
-                                    <input
+          <input
                                       value={row.name}
                                       onChange={(e) => updateBreakdownRow(detailsTab, idx, "name", e.target.value)}
                                       maxLength={60}
@@ -1738,13 +1546,13 @@ export default function Supervisor() {
                           onClick={() => setDescriptionExpanded((v) => !v)}
                           className="flex w-full items-center justify-between rounded-sm border border-slate-300 bg-slate-50 px-3 py-2 text-left text-sm font-semibold uppercase text-slate-700"
                         >
-                          <span>Description</span>
+                          <span>Note</span>
                           <span className="text-base leading-none">{descriptionExpanded ? "−" : "+"}</span>
                         </button>
                         {descriptionExpanded && (
                           <textarea
                             readOnly
-                            value={cleanDescription(detailsItem.description)}
+                            value={workloadModalNotes(detailsItem)}
                             className="mt-2 h-28 w-full resize-none rounded-sm border border-slate-300 bg-white px-4 py-3 text-sm text-slate-700"
                           />
                         )}
@@ -1756,7 +1564,7 @@ export default function Supervisor() {
                           readOnly
                           value={
                             detailsItem.requestReason ||
-                            extractRequestReason(detailsItem.description) ||
+                            extractRequestReason(detailsItem.description ?? "") ||
                             "- no reason provided -"
                           }
                           className="mt-2 h-24 w-full resize-none rounded-sm border border-slate-300 bg-white px-4 py-3 text-sm text-slate-700"
@@ -1877,15 +1685,15 @@ export default function Supervisor() {
                   </label>
                   <label className="flex flex-col gap-1">
                     <span className="text-xs font-semibold uppercase text-[#2f4d9c]">Semester</span>
-                    <select
+          <select
                       value={visualSemesterInput}
                       onChange={(e) => setVisualSemesterInput(e.target.value as "All" | "S1" | "S2")}
                       className="rounded border border-slate-300 px-3 py-2 text-sm"
                     >
                       <option value="All">All</option>
-                      <option value="S1">S1</option>
-                      <option value="S2">S2</option>
-                    </select>
+            <option value="S1">S1</option>
+            <option value="S2">S2</option>
+          </select>
                   </label>
                   <div className="flex flex-col gap-1">
                     <span className="select-none text-xs font-semibold uppercase text-transparent">Action</span>
@@ -1978,17 +1786,23 @@ export default function Supervisor() {
                     >
                       Export Excel
                     </button>
-                  </div>
+            </div>
                 </div>
                 {exportMessage && <div className="mt-3 text-sm font-semibold text-[#2f4d9c]">{exportMessage}</div>}
                 <div className="mt-2 text-sm text-slate-600">
                   If years are blank, export all years. If only one side is blank, export from/to the available range.
                 </div>
               </div>
-            </div>
-          )}
+        </div>
+      )}
         </div>
       </div>
+
+      <ThemedNoticeModal
+        open={supersededNoticeOpen}
+        onClose={() => setSupersededNoticeOpen(false)}
+        message={SUPERSEDED_RECORD_MESSAGE}
+      />
     </div>
   );
 }

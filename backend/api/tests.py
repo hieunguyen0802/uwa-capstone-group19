@@ -6,7 +6,13 @@ from django.utils import timezone
 from rest_framework.test import APITestCase, APIClient
 from rest_framework_simplejwt.tokens import RefreshToken
 
-from .models import AuditLog, Department, Staff, WorkloadItem, WorkloadReport
+from .models import AuditLog, Department, Staff, WorkloadItem, WorkloadReport, WorkloadDistributionJob
+
+# 1×1 transparent PNG (valid binary for Pillow / ImageField).
+_MINI_PNG = (
+    b'\x89PNG\r\n\x1a\n\x00\x00\x00\rIHDR\x00\x00\x00\x01\x00\x00\x00\x01\x08\x06\x00\x00\x00'
+    b'\x1f\x15\xc4\x89\x00\x00\x00\nIDATx\x9cc\x00\x01\x00\x00\x05\x00\x01\r\n-\xb4\x00\x00\x00\x00IEND\xaeB`\x82'
+)
 
 
 # ─── Shared test fixture ──────────────────────────────────────────────────────
@@ -26,10 +32,10 @@ class BaseTestCase(APITestCase):
 
         # One staff per role
         self.academic = self._make_staff('academic1', 'ACADEMIC', self.dept_csse)
-        self.hod_csse  = self._make_staff('hod_csse',  'HOD',      self.dept_csse)
-        self.hod_phys  = self._make_staff('hod_phys',  'HOD',      self.dept_physics)
-        self.ops       = self._make_staff('ops1',       'SCHOOL_OPS', self.dept_csse)
-        self.hos       = self._make_staff('hos1',       'HOS',      self.dept_csse)
+        self.hod_csse = self._make_staff('hod_csse', 'HOD', self.dept_csse)
+        self.hod_phys = self._make_staff('hod_phys', 'HOD', self.dept_physics)
+        self.ops = self._make_staff('ops1', 'SCHOOL_OPS', self.dept_csse)
+        self.hos = self._make_staff('hos1', 'HOS', self.dept_csse)
 
         # One INITIAL report belonging to the CSSE academic (Daniela just imported it)
         self.report = WorkloadReport.objects.create(
@@ -42,10 +48,11 @@ class BaseTestCase(APITestCase):
         )
 
     def _make_staff(self, username, role, department):
-        user = User.objects.create_user(username=username, password='testpass')
+        password = f'{username}_Pass123!'
+        user = User.objects.create_user(username=username, password=password)
         # Use a hash suffix to guarantee uniqueness across all test methods
         import hashlib
-        staff_number = hashlib.md5(username.encode()).hexdigest()[:8]
+        staff_number = hashlib.sha256(username.encode()).hexdigest()[:8]
         return Staff.objects.create(
             user=user,
             staff_number=staff_number,
@@ -982,6 +989,97 @@ class TestCodexFixes(BaseTestCase):
         self.assertIn('department_conflict', res.data['anomaly'])
 
 
+class TestHoSContractEndpoints(BaseTestCase):
+    def setUp(self):
+        super().setUp()
+        self._submit_report(self.report)
+        WorkloadItem.objects.create(
+            report=self.report,
+            category='TEACHING',
+            unit_code='CITS5206',
+            description='Teaching load',
+            allocated_hours=Decimal('40.00'),
+        )
+
+    def test_hos_can_access_workload_requests(self):
+        client = self._auth_client(self.hos)
+        res = client.get('/api/headofschool/workload-requests/')
+        self.assertEqual(res.status_code, 200)
+        self.assertTrue(res.data['success'])
+
+    def test_academic_forbidden_on_hos_workload_requests(self):
+        client = self._auth_client(self.academic)
+        res = client.get('/api/headofschool/workload-requests/')
+        self.assertEqual(res.status_code, 403)
+
+    def test_hos_staff_list_contract_shape(self):
+        client = self._auth_client(self.hos)
+        res = client.get('/api/headofschool/staff/?page=1&page_size=10')
+        self.assertEqual(res.status_code, 200)
+        item = res.data['data']['items'][0]
+        for key in ('staff_id', 'first_name', 'last_name', 'email', 'department', 'active_status'):
+            self.assertIn(key, item)
+
+    def test_hos_staff_update_success(self):
+        client = self._auth_client(self.hos)
+        payload = {
+            'staff_id': self.academic.staff_number,
+            'first_name': 'Updated',
+            'last_name': 'Teacher',
+            'email': 'updated.teacher@uwa.edu.au',
+            'title': 'Professor',
+            'department': 'Physics',
+            'active_status': 'Active',
+        }
+        res = client.patch(f'/api/headofschool/staff/{self.academic.staff_number}/', data=payload, format='json')
+        self.assertEqual(res.status_code, 200)
+        self.academic.refresh_from_db()
+        self.assertEqual(self.academic.user.first_name, 'Updated')
+        self.assertEqual(self.academic.department.name, 'Physics')
+
+    def test_hos_create_and_disable_role_assignment(self):
+        client = self._auth_client(self.hos)
+        create_res = client.post(
+            '/api/headofschool/role-assignments/',
+            data={
+                'staff_id': self.academic.staff_number,
+                'role': 'HoD',
+                'department': 'Physics',
+                'permissions': ['View Workload', 'Approve Workload', 'Update Workload'],
+            },
+            format='json',
+        )
+        self.assertEqual(create_res.status_code, 200)
+        assignment_id = create_res.data['data']['id']
+        self.academic.refresh_from_db()
+        self.assertEqual(self.academic.role, 'HOD')
+
+        disable_res = client.post(
+            f'/api/headofschool/role-assignments/{assignment_id}/disable/',
+            data={'reason': 'Permission no longer required'},
+            format='json',
+        )
+        self.assertEqual(disable_res.status_code, 200)
+        self.academic.refresh_from_db()
+        self.assertEqual(self.academic.role, 'ACADEMIC')
+
+    def test_hos_visualization_contract_shape(self):
+        client = self._auth_client(self.hos)
+        res = client.get('/api/headofschool/visualization/?from_year=2024&to_year=2026&semester=All')
+        self.assertEqual(res.status_code, 200)
+        data = res.data['data']
+        self.assertIn('summary', data)
+        self.assertIn('department_stats', data)
+        self.assertIn('workload_trend', data)
+
+    def test_hos_export_returns_xlsx(self):
+        client = self._auth_client(self.hos)
+        res = client.get('/api/headofschool/export/')
+        self.assertEqual(res.status_code, 200)
+        self.assertEqual(
+            res['Content-Type'],
+            'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+        )
 class TestHODV2CaiFindings(BaseTestCase):
     """Regression tests for issues reported during HOD v2 review."""
 
@@ -1126,3 +1224,65 @@ class TestHODV2CaiFindings(BaseTestCase):
         row = next(item for item in listing.data['data']['items'] if item['id'] == str(self.report.report_id))
         self.assertEqual(row['request_reason'], 'second reason')
         self.assertIn(timezone.now().strftime('%Y-%m-%d'), row['submitted_time'])
+
+
+class TestAdminOpsContract(BaseTestCase):
+    """
+    Smoke tests for IntegrationLog/frontend_api_contract_cn.md §10 /admin routes.
+
+    These verify RBAC + critical response shapes so Daniela/ops screens do not silently 404.
+    """
+
+    def test_ops_can_list_admin_workloads(self):
+        client = self._auth_client(self.ops)
+        res = client.get('/api/admin/workload-requests/')
+        self.assertEqual(res.status_code, 200)
+        self.assertTrue(res.data['success'])
+        self.assertIn('items', res.data['data'])
+
+    def test_academic_blocked_from_admin_scope(self):
+        client = self._auth_client(self.academic)
+        res = client.get('/api/admin/workload-requests/')
+        self.assertEqual(res.status_code, 403)
+
+    def test_distribute_creates_job_record(self):
+        client = self._auth_client(self.ops)
+        before = WorkloadDistributionJob.objects.count()
+        res = client.post('/api/admin/workloads/distribute/', {
+            'workloadIds': [str(self.report.report_id)],
+            'academicYear': 2026,
+            'semester': 'S1',
+        }, format='json')
+        self.assertEqual(res.status_code, 201)
+        self.assertEqual(WorkloadDistributionJob.objects.count(), before + 1)
+        self.assertTrue(res.data['success'])
+
+    def test_role_assignment_crud_shapes(self):
+        client = self._auth_client(self.ops)
+        create = client.post('/api/admin/role-assignments/', {
+            'staff_id': self.hod_csse.staff_number,
+            'role': 'HoD',
+            'department': self.dept_csse.name,
+            'permissions': ['View Workload'],
+        }, format='json')
+        self.assertEqual(create.status_code, 201)
+        assignment_id = create.data['data']['id']
+
+        listing = client.get('/api/admin/role-assignments/')
+        self.assertEqual(listing.status_code, 200)
+        ids = {row['id'] for row in listing.data['data']['items']}
+        self.assertIn(assignment_id, ids)
+
+        disabled = client.post(f'/api/admin/role-assignments/{assignment_id}/disable/', {}, format='json')
+        self.assertEqual(disabled.status_code, 200)
+        self.assertEqual(disabled.data['data']['status'], 'disabled')
+
+    def test_admin_export_manifest_and_download_roundtrip(self):
+        client = self._auth_client(self.ops)
+        manifest = client.get('/api/admin/export/')
+        self.assertEqual(manifest.status_code, 200)
+        download_url = manifest.data['data']['download_url']
+        token = download_url.split('token=')[-1]
+        download = client.get(f'/api/admin/export/download/?token={token}')
+        self.assertEqual(download.status_code, 200)
+        self.assertIn('spreadsheetml', download['Content-Type'])

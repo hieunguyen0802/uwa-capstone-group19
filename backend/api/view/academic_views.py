@@ -5,7 +5,6 @@ from decimal import Decimal
 
 from django.core.paginator import Paginator
 from django.db import transaction
-from django.db.models import Sum
 from django.http import HttpResponse
 from django.shortcuts import get_object_or_404
 from rest_framework import status
@@ -14,7 +13,7 @@ from rest_framework.permissions import IsAuthenticated
 from rest_framework.response import Response
 
 from api.decorators import require_role
-from api.models import AuditLog, WorkloadItem, WorkloadReport
+from api.models import AuditLog, WorkloadReport
 from api.services.workload_service import (
     evaluate_mvp_anomaly,
     get_workload_queryset,
