@@ -138,6 +138,16 @@ class Staff(models.Model):
     # Soft-delete flag. Set to False for departed staff instead of deleting the row,
     # so historical workload records remain intact.
     is_active = models.BooleanField(default=True)
+
+    # Academic title (e.g. "Lecturer", "Associate Professor") — display only, not used for RBAC.
+    title = models.CharField(max_length=100, blank=True, default='')
+
+    # True for staff in their first year; affects workload band calculation.
+    is_new_employee = models.BooleanField(default=False)
+
+    # Free-text notes visible to School Ops only.
+    notes = models.TextField(blank=True, default='')
+
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)  # auto-updated on every save()
 
@@ -216,19 +226,29 @@ class WorkloadReport(models.Model):
         related_name='historical_reports'
     )
 
-    # Approval status lifecycle: PENDING → APPROVED or REJECTED → ACTIONED
-    # ACTIONED means SCHOOL_OPS has processed the outcome (e.g. updated records).
+    # Status lifecycle: INITIAL → PENDING → APPROVED or REJECTED
+    # INITIAL:  Daniela imported; academic can see, HOD can see but cannot act.
+    # PENDING:  Academic submitted request; HOD can approve or reject.
+    # APPROVED / REJECTED: terminal states set by HOD.
     STATUS_CHOICES = [
+        ('INITIAL', 'Initial'),
         ('PENDING', 'Pending Review'),
         ('APPROVED', 'Approved'),
         ('REJECTED', 'Rejected'),
-        ('ACTIONED', 'Actioned'),
     ]
-    status = models.CharField(max_length=20, choices=STATUS_CHOICES, default='PENDING')
+    status = models.CharField(max_length=20, choices=STATUS_CHOICES, default='INITIAL')
 
     # Set to True at import time if the staff member's T:R ratio does not match
     # their contract type (e.g. contract says T&R 50/50 but actual teaching is 90%).
     is_anomaly = models.BooleanField(default=False)
+
+    # Target band and teaching percentage from the Excel template (columns F and G).
+    # Required to enable teaching_mismatch and tr_discrepancy anomaly checks.
+    # Null until populated by importer; workload_service uses getattr fallback in the interim.
+    target_band = models.CharField(max_length=50, blank=True, null=True)
+    target_teaching_pct = models.DecimalField(
+        max_digits=5, decimal_places=2, blank=True, null=True
+    )
 
     # ── Re-import tracking fields ─────────────────────────────────────────────
     #
@@ -374,15 +394,25 @@ class AuditLog(models.Model):
     # What happened:
     #   IMPORTED            — Daniela uploaded Excel; new WorkloadReport created
     #   MODIFIED_BY_REIMPORT — Daniela re-uploaded; old record superseded by new one
+    #   IMPORT_SKIP         — re-import skipped a protected record (approved/confirmed)
     #   APPROVE             — HOD / SCHOOL_OPS / HOS approved the report
     #   REJECT              — HOD / SCHOOL_OPS / HOS rejected the report
+    #   CONFIRMATION        — Academic confirmed their own workload
+    #   SUBMIT_REQUEST      — Academic submitted an approval request
+    #   WORKLOAD_EDIT       — HOD edited staff metadata (name/email/title)
+    #   PROFILE_EDIT        — SCHOOL_OPS edited staff metadata
     #   COMMENT             — any role added a comment
     #   CONFIG_CHANGE       — someone changed a SystemConfig value (e.g. TR_TOLERANCE)
     ACTION_CHOICES = [
         ('IMPORTED', 'Imported from Excel'),
         ('MODIFIED_BY_REIMPORT', 'Modified by Re-import'),
+        ('IMPORT_SKIP', 'Skipped by Re-import (protected)'),
         ('APPROVE', 'Approved'),
         ('REJECT', 'Rejected'),
+        ('CONFIRMATION', 'Confirmed by Academic'),
+        ('SUBMIT_REQUEST', 'Approval Request Submitted'),
+        ('WORKLOAD_EDIT', 'Staff Metadata Edited by HOD'),
+        ('PROFILE_EDIT', 'Staff Metadata Edited by School Ops'),
         ('COMMENT', 'Added Comment'),
         ('CONFIG_CHANGE', 'System Config Changed'),
     ]
@@ -468,3 +498,126 @@ class SystemConfig(models.Model):
             if self.config_value.lower() not in ['true', 'false', '1', '0']:
                 raise ValueError(f"Invalid BOOL value: {self.config_value}")
         super().save(*args, **kwargs)
+
+
+class WorkloadDistributionJob(models.Model):
+    """
+    Records a school-level “distribute workload” action initiated from /admin.
+
+    This does not mutate WorkloadReport rows by itself — it creates an audit trail
+    placeholder so ops can correlate UI actions later when real distribution rules exist.
+    """
+
+    job_id = models.BigAutoField(primary_key=True)
+    academic_year = models.PositiveIntegerField()
+    semester = models.CharField(max_length=10)  # S1/S2 only for admin workflow
+    triggered_by = models.ForeignKey(
+        Staff,
+        on_delete=models.SET_NULL,
+        null=True,
+        related_name='distribution_jobs',
+    )
+    created_at = models.DateTimeField(auto_now_add=True)
+    notes = models.TextField(blank=True, default='')
+
+    class Meta:
+        db_table = 'workload_distribution_jobs'
+        indexes = [
+            models.Index(fields=['academic_year', 'semester', '-created_at']),
+        ]
+
+    def __str__(self):
+        return f"distribution {self.job_id}: {self.academic_year} {self.semester}"
+
+
+class StaffRoleAssignment(models.Model):
+    """
+    Extra role grants for HoD / school Admin beyond the canonical Staff.role field.
+
+    Contract field `role` from the frontend maps to ROLE_CHOICES string values stored here.
+    """
+
+    FRONT_ROLE_CHOICES = [
+        ('HoD', 'HoD'),
+        ('Admin', 'Admin'),
+    ]
+
+    assignment_id = models.BigAutoField(primary_key=True)
+    staff = models.ForeignKey(Staff, on_delete=models.CASCADE, related_name='role_assignments')
+    role_code = models.CharField(max_length=20, choices=FRONT_ROLE_CHOICES)
+
+    # Text label from frontend (e.g. “Senior School Coordinator”) or real department name.
+    department_scope = models.CharField(max_length=150)
+    resolved_department = models.ForeignKey(
+        Department,
+        on_delete=models.PROTECT,
+        null=True,
+        blank=True,
+        related_name='role_assignments',
+        help_text='Populated when department_scope matches an existing Department.name',
+    )
+
+    permissions = models.JSONField(default=list, blank=True)
+
+    STATUS_CHOICES = [
+        ('active', 'active'),
+        ('disabled', 'disabled'),
+    ]
+    status = models.CharField(max_length=20, choices=STATUS_CHOICES, default='active')
+    disable_reason = models.TextField(blank=True, default='')
+
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        db_table = 'staff_role_assignments'
+        indexes = [
+            models.Index(fields=['staff', 'status']),
+        ]
+
+    def __str__(self):
+        return f"{self.staff.staff_number} → {self.role_code} ({self.status})"
+class OTPToken(models.Model):
+    """
+    One-time password tokens for passwordless email login.
+
+    Flow:
+        1. POST /login/request-otp/ → create OTPToken(email, code_hash, expires_at)
+        2. POST /login/verify-otp/  → find token, check hash + expiry + used_at, issue JWT
+
+    Security notes:
+        - code_hash stores SHA-256(code), never the raw 6-digit code.
+        - expires_at = now + 5 minutes; tokens older than this are rejected.
+        - used_at is set on first successful verify; subsequent attempts are rejected
+          even if the token hasn't expired (prevents replay attacks).
+        - Old tokens are not deleted automatically; a periodic cleanup task should
+          purge rows where expires_at < now - 24h.
+    """
+
+    token_id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+
+    # The email address the OTP was sent to. Not a FK to User because the email
+    # must be looked up before we know which User it belongs to.
+    email = models.EmailField()
+
+    # SHA-256 hash of salt:code. Never store the raw code.
+    # Salt is stored separately so verify can recompute the hash.
+    code_hash = models.CharField(max_length=64)
+    # Per-token random salt (hex, 32 chars = 16 bytes). Prevents rainbow table
+    # attacks against the small 6-digit OTP space.
+    salt = models.CharField(max_length=32, default='')
+
+    created_at = models.DateTimeField(auto_now_add=True)
+    expires_at = models.DateTimeField()
+
+    # Set when the token is successfully used. NULL = not yet used.
+    used_at = models.DateTimeField(null=True, blank=True)
+
+    class Meta:
+        db_table = 'otp_tokens'
+        indexes = [
+            models.Index(fields=['email', 'expires_at']),  # look up valid tokens by email
+        ]
+
+    def __str__(self):
+        return f"OTP for {self.email} (expires {self.expires_at})"

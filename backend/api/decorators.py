@@ -21,6 +21,11 @@ def require_role(*roles):
         @wraps(view_func)
         def wrapper(request, *args, **kwargs):
             staff = get_object_or_404(Staff, user=request.user)
+            if not staff.is_active:
+                return Response(
+                    {"code": "ACCOUNT_INACTIVE", "message": "Account is inactive."},
+                    status=403
+                )
             if staff.role not in roles:
                 return Response(
                     {"code": "FORBIDDEN", "message": "You do not have permission to access this resource."},
