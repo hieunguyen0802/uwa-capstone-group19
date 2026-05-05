@@ -141,10 +141,24 @@ def persist_report_anomaly(report, department_conflict=False):
 # ─── Shared query helpers (used by both academic and supervisor views) ─────────
 
 def _parse_year_range(request):
-    """Parse year_from / year_to from query params. Returns (int|None, int|None)."""
+    """Parse year_from / year_to from query params. Returns (int|None, int|None).
+
+    Also accepts frontend alias keys from IntegrationLog frontend contract:
+      from_year / to_year (e.g. admin & headofschool visualization/export).
+    """
     try:
-        year_from = int(request.GET['year_from']) if request.GET.get('year_from') else None
-        year_to = int(request.GET['year_to']) if request.GET.get('year_to') else None
+        yf_raw = (
+            request.GET.get('year_from')
+            or request.GET.get('from_year')
+            or ''
+        )
+        yt_raw = (
+            request.GET.get('year_to')
+            or request.GET.get('to_year')
+            or ''
+        )
+        year_from = int(yf_raw) if yf_raw else None
+        year_to = int(yt_raw) if yt_raw else None
     except (ValueError, TypeError):
         year_from = year_to = None
     return year_from, year_to

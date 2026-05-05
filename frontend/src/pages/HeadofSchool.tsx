@@ -22,11 +22,13 @@ import InfoField from "../components/common/InfoField";
 import PaginationControls from "../components/common/PaginationControls";
 import ProfileModal from "../components/common/ProfileModal";
 import SearchButton from "../components/common/SearchButton";
+import { MOCK_DASHBOARD_USER } from "../data/mockDashboardUser";
 import SectionTabs from "../components/common/SectionTabs";
 import SectionTitleBlock from "../components/common/SectionTitleBlock";
 import StaffProfileModal, { type StaffProfileDraft } from "../components/common/StaffProfileModal";
 import StatusPill from "../components/common/StatusPill";
 import TemplateImportExportActions from "../components/common/TemplateImportExportActions";
+import ThemedNoticeModal, { SUPERSEDED_RECORD_MESSAGE } from "../components/common/ThemedNoticeModal";
 import WorkHoursBadge from "../components/common/WorkHoursBadge";
 
 type MockRequest = {
@@ -36,7 +38,8 @@ type MockRequest = {
   periodLabel: string;
   name: string;
   unit: string;
-  description: string;
+  notes?: string;
+  description?: string;
   requestReason?: string;
   title: string;
   department: string;
@@ -44,6 +47,8 @@ type MockRequest = {
   status: "pending" | "approved" | "rejected";
   hours: number;
   supervisorNote?: string;
+  /** When true (from API), row is read-only and detail is blocked — superseded by a newer version. */
+  cancelled?: boolean;
 };
 
 type BreakdownCategory = "Teaching" | "Assigned Roles" | "HDR" | "Service";
@@ -149,6 +154,12 @@ function cleanDescription(description: string) {
   return description.slice(0, idx).trim();
 }
 
+function workloadModalNotes(row: Pick<MockRequest, "notes" | "description">) {
+  const n = row.notes?.trim();
+  if (n) return n;
+  return cleanDescription(row.description ?? "");
+}
+
 function shortDepartmentName(department: string) {
   if (department === "Computer Science & Software Engineering") return "CS&SE";
   if (department === "Mathematics & Statistics") return "Math&Stats";
@@ -189,6 +200,8 @@ export default function HeadofSchool() {
     title: string;
     currentDepartment: string;
     isActive: boolean;
+    isNewEmployee: boolean;
+    notes: string;
   };
   type RoleAssignment = {
     id: number;
@@ -202,13 +215,7 @@ export default function HeadofSchool() {
     status: "active" | "disabled";
   };
 
-  const user = {
-    surname: "Sam",
-    firstName: "Yaka",
-    employeeId: "2345678",
-    title: "Head of School",
-    department: "School of Physics, Mathematics and Computing",
-  };
+  const user = MOCK_DASHBOARD_USER;
 
   const [hasNewMessage, setHasNewMessage] = useState(true);
   const [messagePanelOpen, setMessagePanelOpen] = useState(false);
@@ -240,214 +247,7 @@ export default function HeadofSchool() {
   const currentYear = useMemo(() => new Date().getFullYear(), []);
 
   const [loading] = useState(false);
-  const [pending, setPending] = useState<MockRequest[]>(() => {
-    const saved = readSupervisorState();
-    if (saved.length > 0) {
-      const drafts = consumeAcademicDrafts();
-      return mergeDraftsIntoRequests(saved, drafts);
-    }
-
-    // Fake data (plus requests submitted from Academic page via localStorage)
-    const base: MockRequest[] = [
-      {
-        id: 1,
-        studentId: "2345678",
-        semesterLabel: "Sem1",
-        periodLabel: "2025-1",
-        name: "Ann Culhane",
-        unit: "CITS 2206",
-        description:
-          "Lorem ipsum dolor sit amet, consectetur adipiscing elit. Nulla...",
-        title: "Professor",
-        department: "Computer Science",
-        rate: 70,
-        status: "pending",
-        hours: 10,
-      },
-      {
-        id: 2,
-        studentId: "2345679",
-        semesterLabel: "Sem1",
-        periodLabel: "2025-1",
-        name: "Ahmed Adhyyasar",
-        unit: "CITS 1201",
-        description:
-          "Lorem ipsum dolor sit amet, consectetur adipiscing elit. Nulla...",
-        title: "Professor",
-        department: "Computer Science",
-        rate: 70,
-        status: "pending",
-        hours: 20,
-      },
-      {
-        id: 3,
-        studentId: "2345680",
-        semesterLabel: "Sem1",
-        periodLabel: "2025-1",
-        name: "Mary Smith",
-        unit: "CITS 1302",
-        description:
-          "Lorem ipsum dolor sit amet, consectetur adipiscing elit. Nulla...",
-        title: "Professor",
-        department: "Computer Science",
-        rate: 70,
-        status: "rejected",
-        hours: 5,
-      },
-      {
-        id: 4,
-        studentId: "2345681",
-        semesterLabel: "Sem1",
-        periodLabel: "2025-1",
-        name: "John Doe",
-        unit: "CITS 2103",
-        description:
-          "Lorem ipsum dolor sit amet, consectetur adipiscing elit. Nulla...",
-        title: "Professor",
-        department: "Computer Science",
-        rate: 70,
-        status: "approved",
-        hours: 15,
-      },
-      {
-        id: 5,
-        studentId: "2345682",
-        semesterLabel: "Sem1",
-        periodLabel: "2025-1",
-        name: "Lisa Brown",
-        unit: "CITS 2304",
-        description:
-          "Lorem ipsum dolor sit amet, consectetur adipiscing elit. Nulla...",
-        title: "Professor",
-        department: "Computer Science",
-        rate: 70,
-        status: "pending",
-        hours: 8,
-      },
-      {
-        id: 6,
-        studentId: "2345683",
-        semesterLabel: "Sem1",
-        periodLabel: "2025-1",
-        name: "Chris Martin",
-        unit: "CITS 3401",
-        description:
-          "Lorem ipsum dolor sit amet, consectetur adipiscing elit. Nulla...",
-        title: "Professor",
-        department: "Computer Science",
-        rate: 70,
-        status: "pending",
-        hours: 12,
-      },
-      {
-        id: 7,
-        studentId: "2345684",
-        semesterLabel: "Sem1",
-        periodLabel: "2025-1",
-        name: "Emma Wilson",
-        unit: "CITS 3100",
-        description:
-          "Lorem ipsum dolor sit amet, consectetur adipiscing elit. Nulla...",
-        title: "Professor",
-        department: "Computer Science",
-        rate: 70,
-        status: "pending",
-        hours: 6,
-      },
-      {
-        id: 8,
-        studentId: "2345685",
-        semesterLabel: "Sem1",
-        periodLabel: "2025-1",
-        name: "Oliver Stone",
-        unit: "CITS 4202",
-        description:
-          "Lorem ipsum dolor sit amet, consectetur adipiscing elit. Nulla...",
-        title: "Professor",
-        department: "Computer Science",
-        rate: 70,
-        status: "pending",
-        hours: 18,
-      },
-      {
-        id: 9,
-        studentId: "2345686",
-        semesterLabel: "Sem1",
-        periodLabel: "2025-1",
-        name: "Sophia Lee",
-        unit: "CITS 2008",
-        description:
-          "Lorem ipsum dolor sit amet, consectetur adipiscing elit. Nulla...",
-        title: "Professor",
-        department: "Computer Science",
-        rate: 70,
-        status: "pending",
-        hours: 9,
-      },
-      {
-        id: 10,
-        studentId: "2345687",
-        semesterLabel: "Sem1",
-        periodLabel: "2025-1",
-        name: "Daniel Smith",
-        unit: "CITS 2601",
-        description:
-          "Lorem ipsum dolor sit amet, consectetur adipiscing elit. Nulla...",
-        title: "Professor",
-        department: "Computer Science",
-        rate: 70,
-        status: "pending",
-        hours: 11,
-      },
-      {
-        id: 11,
-        studentId: "2345688",
-        semesterLabel: "Sem1",
-        periodLabel: "2025-1",
-        name: "Grace Taylor",
-        unit: "CITS 2803",
-        description:
-          "Lorem ipsum dolor sit amet, consectetur adipiscing elit. Nulla...",
-        title: "Professor",
-        department: "Computer Science",
-        rate: 70,
-        status: "pending",
-        hours: 7,
-      },
-      {
-        id: 12,
-        studentId: "2345689",
-        semesterLabel: "Sem1",
-        periodLabel: "2025-1",
-        name: "Henry Clark",
-        unit: "CITS 1500",
-        description:
-          "Lorem ipsum dolor sit amet, consectetur adipiscing elit. Nulla...",
-        title: "Professor",
-        department: "Computer Science",
-        rate: 70,
-        status: "rejected",
-        hours: 14,
-      },
-      {
-        id: 13,
-        studentId: "2345690",
-        semesterLabel: "Sem1",
-        periodLabel: "2025-1",
-        name: "Ava Robinson",
-        unit: "CITS 4101",
-        description:
-          "Lorem ipsum dolor sit amet, consectetur adipiscing elit. Nulla...",
-        title: "Professor",
-        department: "Computer Science",
-        rate: 70,
-        status: "approved",
-        hours: 8,
-      },
-    ];
-    const drafts = consumeAcademicDrafts();
-    return [...drafts, ...base];
-  });
+  const [pending, setPending] = useState<MockRequest[]>([]);
 
   useEffect(() => {
     function mergeLatestDrafts() {
@@ -511,6 +311,7 @@ export default function HeadofSchool() {
   });
 
   const [detailsOpen, setDetailsOpen] = useState(false);
+  const [supersededNoticeOpen, setSupersededNoticeOpen] = useState(false);
   const [detailsItem, setDetailsItem] = useState<MockRequest | null>(null);
   const [detailsBreakdown, setDetailsBreakdown] = useState<BreakdownData | null>(null);
   const [detailsTab, setDetailsTab] = useState<BreakdownCategory>("Teaching");
@@ -608,58 +409,7 @@ export default function HeadofSchool() {
     window.localStorage.setItem(HOD_ASSIGNMENTS_KEY, JSON.stringify(roleAssignments));
   }, [roleAssignments]);
 
-  const initialAssignablePeople: AssignablePerson[] = [
-    {
-      id: 1,
-      staffId: "50123451",
-      firstName: "Ann",
-      lastName: "Culhane",
-      email: "ann.culhane@uwa.edu.au",
-      title: "Professor",
-      currentDepartment: "Physics",
-      isActive: true,
-    },
-    {
-      id: 2,
-      staffId: "50123462",
-      firstName: "Oliver",
-      lastName: "Stone",
-      email: "oliver.stone@uwa.edu.au",
-      title: "Associate Professor",
-      currentDepartment: "Mathematics & Statistics",
-      isActive: true,
-    },
-    {
-      id: 3,
-      staffId: "50123473",
-      firstName: "Ahmed",
-      lastName: "Adhyyasar",
-      email: "ahmed.adhyyasar@uwa.edu.au",
-      title: "Professor",
-      currentDepartment: "Computer Science & Software Engineering",
-      isActive: true,
-    },
-    {
-      id: 4,
-      staffId: "50123484",
-      firstName: "Lisa",
-      lastName: "Brown",
-      email: "lisa.brown@uwa.edu.au",
-      title: "",
-      currentDepartment: "",
-      isActive: true,
-    },
-    {
-      id: 5,
-      staffId: "50123495",
-      firstName: "Mary",
-      lastName: "Smith",
-      email: "mary.smith@uwa.edu.au",
-      title: "Lecturer",
-      currentDepartment: "Computer Science & Software Engineering",
-      isActive: true,
-    },
-  ];
+  const initialAssignablePeople: AssignablePerson[] = [];
   const [assignablePeople, setAssignablePeople] = useState<AssignablePerson[]>(initialAssignablePeople);
   const [importMessage, setImportMessage] = useState("");
   const [staffModalOpen, setStaffModalOpen] = useState(false);
@@ -1156,6 +906,8 @@ export default function HeadofSchool() {
       title: person.title,
       department: person.currentDepartment,
       isActive: person.isActive ? "Active" : "Inactive",
+      isNewEmployee: person.isNewEmployee,
+      notes: person.notes,
     });
     setStaffModalError("");
     setStaffModalOpen(true);
@@ -1206,6 +958,8 @@ export default function HeadofSchool() {
       title: staffDraft.title.trim(),
       currentDepartment: staffDraft.department.trim(),
       isActive: staffDraft.isActive === "Active",
+      isNewEmployee: staffDraft.isNewEmployee,
+      notes: staffDraft.notes.trim(),
     };
 
     setAssignablePeople((prev) => prev.map((person) => (person.id === updatedPerson.id ? updatedPerson : person)));
@@ -1231,6 +985,8 @@ export default function HeadofSchool() {
       { header: "title", key: "title", width: 18 },
       { header: "department", key: "department", width: 40 },
       { header: "active_status", key: "active_status", width: 16 },
+      { header: "is_new_employee", key: "is_new_employee", width: 18 },
+      { header: "notes", key: "notes", width: 52 },
     ];
 
     const headerRow = worksheet.getRow(1);
@@ -1257,6 +1013,8 @@ export default function HeadofSchool() {
       title: "Lecturer",
       department: "Physics",
       active_status: "Active",
+      is_new_employee: "false",
+      notes: "",
     });
 
     // Apply data validation to a practical import range.
@@ -1307,10 +1065,18 @@ export default function HeadofSchool() {
       worksheet.getCell(`G${row}`).dataValidation = {
         type: "list",
         allowBlank: false,
-        formulae: ['"Yes,No"'],
+        formulae: ['"Active,Inactive"'],
         showErrorMessage: true,
         errorTitle: "Invalid Active Status",
         error: "Active Status must be Active or Inactive.",
+      };
+      worksheet.getCell(`H${row}`).dataValidation = {
+        type: "list",
+        allowBlank: true,
+        formulae: ['"true,false"'],
+        showErrorMessage: true,
+        errorTitle: "Invalid is_new_employee",
+        error: "Use true or false — leave blank for false.",
       };
     }
 
@@ -1337,6 +1103,13 @@ export default function HeadofSchool() {
     if (normalized === "active" || normalized === "yes" || normalized === "true") return true;
     if (normalized === "inactive" || normalized === "no" || normalized === "false") return false;
     return null;
+  }
+
+  function parseIsNewEmployee(value: unknown): boolean {
+    const raw = String(value ?? "").trim().toLowerCase();
+    if (!raw) return false;
+    if (raw === "false" || raw === "no" || raw === "n" || raw === "0") return false;
+    return raw === "true" || raw === "yes" || raw === "y" || raw === "1";
   }
 
   function handleImportTemplate(event: ChangeEvent<HTMLInputElement>) {
@@ -1373,6 +1146,8 @@ export default function HeadofSchool() {
           const department = String(row.department ?? "").trim();
           const isActiveRaw = String(row.active_status ?? row.is_active ?? "").trim();
           const isActive = parseActiveStatus(isActiveRaw);
+          const isNewEmployee = parseIsNewEmployee(row.is_new_employee ?? row.new_employee);
+          const notes = String(row.notes ?? "").trim();
           const rowNumber = i + 2;
 
           if (!/^\d{8}$/.test(staffId)) {
@@ -1409,6 +1184,8 @@ export default function HeadofSchool() {
             title,
             currentDepartment: department,
             isActive,
+            isNewEmployee,
+            notes,
           });
         }
 
@@ -1475,6 +1252,10 @@ export default function HeadofSchool() {
   }
 
   function openDetails(item: MockRequest) {
+    if (item.cancelled) {
+      setSupersededNoticeOpen(true);
+      return;
+    }
     setDetailsItem(item);
     setDetailsBreakdown(breakdownById(item.id));
     setDetailsOpen(true);
@@ -1719,10 +1500,6 @@ export default function HeadofSchool() {
           avatarSrc={avatarSrc}
           onAvatarUpload={handleAvatarUpload}
           user={user}
-          departmentLabel="School"
-          titleLabel="Role"
-          titleBeforeDepartment
-          departmentFullWidth
         />
 
         <div className="mt-6 rounded-md bg-white p-4 shadow-sm">
@@ -1790,19 +1567,19 @@ export default function HeadofSchool() {
 
               <div className="grid grid-cols-3 gap-6">
                 <div className="flex flex-col gap-1">
-                  <div className="w-fit rounded bg-[#2f4d9c] px-3 py-1 text-xs font-bold text-white">First name</div>
+                  <div className="w-fit rounded bg-[#2f4d9c] px-3 py-1 text-xs font-bold text-white">Last name</div>
                   <input
-                    value={searchFirstNameInput}
-                    onChange={(e) => setSearchFirstNameInput(e.target.value)}
+                    value={searchLastNameInput}
+                    onChange={(e) => setSearchLastNameInput(e.target.value)}
                     onKeyDown={handleSearchKeyDown}
                     className="rounded border border-slate-300 px-3 py-2 text-sm"
                   />
                 </div>
                 <div className="flex flex-col gap-1">
-                  <div className="w-fit rounded bg-[#2f4d9c] px-3 py-1 text-xs font-bold text-white">Last name</div>
+                  <div className="w-fit rounded bg-[#2f4d9c] px-3 py-1 text-xs font-bold text-white">First name</div>
                   <input
-                    value={searchLastNameInput}
-                    onChange={(e) => setSearchLastNameInput(e.target.value)}
+                    value={searchFirstNameInput}
+                    onChange={(e) => setSearchFirstNameInput(e.target.value)}
                     onKeyDown={handleSearchKeyDown}
                     className="rounded border border-slate-300 px-3 py-2 text-sm"
                   />
@@ -1826,9 +1603,7 @@ export default function HeadofSchool() {
                   />
                 </div>
                 <div className="flex flex-col gap-1">
-                  <div className="w-fit rounded bg-[#2f4d9c] px-3 py-1 text-xs font-bold text-white">
-                    Department / School
-                  </div>
+                  <div className="w-fit rounded bg-[#2f4d9c] px-3 py-1 text-xs font-bold text-white">Department</div>
                   <input
                     value={searchDepartmentInput}
                     onChange={(e) => setSearchDepartmentInput(e.target.value)}
@@ -1984,12 +1759,17 @@ export default function HeadofSchool() {
                       {!loading &&
                         pageItems.map((item, idx) => {
                           const isSelected = selectedIds.has(item.id);
+                          const rowCancelled = Boolean(item.cancelled);
                           const rowIndex = (page - 1) * pageSize + idx + 1;
                           return (
                             <tr
                               key={item.id}
-                              className={`cursor-pointer text-sm hover:bg-slate-50 ${
-                                isSelected ? "border-l-4 border-[#2f4d9c] bg-[#e9f2ff]" : ""
+                              className={`text-sm ${
+                                rowCancelled
+                                  ? "cursor-not-allowed bg-slate-100 text-slate-400 opacity-80"
+                                  : `cursor-pointer hover:bg-slate-50 ${
+                                      isSelected ? "border-l-4 border-[#2f4d9c] bg-[#e9f2ff]" : ""
+                                    }`
                               }`}
                               onClick={() => openDetails(item)}
                             >
@@ -2023,7 +1803,7 @@ export default function HeadofSchool() {
                               <td className="px-3 py-3 text-slate-700">{item.title}</td>
                               <td className="px-3 py-3 text-slate-700">{item.department || "-"}</td>
                               <td className="px-3 py-3 text-slate-600">
-                                {item.requestReason || extractRequestReason(item.description) || "- no reason provided -"}
+                                {item.requestReason || extractRequestReason(item.description ?? "") || "- no reason provided -"}
                               </td>
                               <td className="px-3 py-3">
                                 <StatusPill status={item.status} variant="supervisor" />
@@ -2156,13 +1936,13 @@ export default function HeadofSchool() {
                             onClick={() => setDescriptionExpanded((v) => !v)}
                             className="flex w-full items-center justify-between rounded-sm border border-slate-300 bg-slate-50 px-3 py-2 text-left text-sm font-semibold uppercase text-slate-700"
                           >
-                            <span>Description</span>
+                            <span>Note</span>
                             <span className="text-base leading-none">{descriptionExpanded ? "−" : "+"}</span>
                           </button>
                           {descriptionExpanded && (
                             <textarea
                               readOnly
-                              value={cleanDescription(detailsItem.description)}
+                              value={workloadModalNotes(detailsItem)}
                               className="mt-2 h-28 w-full resize-none rounded-sm border border-slate-300 bg-white px-4 py-3 text-sm text-slate-700"
                             />
                           )}
@@ -2172,7 +1952,7 @@ export default function HeadofSchool() {
                           <div className="text-sm font-semibold text-slate-700">Application Reason</div>
                           <textarea
                             readOnly
-                            value={detailsItem.requestReason || extractRequestReason(detailsItem.description) || "- no reason provided -"}
+                            value={detailsItem.requestReason || extractRequestReason(detailsItem.description ?? "") || "- no reason provided -"}
                             className="mt-2 h-24 w-full resize-none rounded-sm border border-slate-300 bg-white px-4 py-3 text-sm text-slate-700"
                           />
                         </div>
@@ -2273,12 +2053,12 @@ export default function HeadofSchool() {
                 <FilterFormRow
                   fields={[
                     {
-                      key: "firstName",
-                      label: "First name",
+                      key: "lastName",
+                      label: "Last name",
                       input: (
                         <input
-                          value={adminSearchFirstNameInput}
-                          onChange={(e) => setAdminSearchFirstNameInput(e.target.value)}
+                          value={adminSearchLastNameInput}
+                          onChange={(e) => setAdminSearchLastNameInput(e.target.value)}
                           className="rounded border border-slate-300 bg-white px-3 py-2 text-sm"
                           onKeyDown={(e) => {
                             if (e.key === "Enter") {
@@ -2290,12 +2070,12 @@ export default function HeadofSchool() {
                       ),
                     },
                     {
-                      key: "lastName",
-                      label: "Last name",
+                      key: "firstName",
+                      label: "First name",
                       input: (
                         <input
-                          value={adminSearchLastNameInput}
-                          onChange={(e) => setAdminSearchLastNameInput(e.target.value)}
+                          value={adminSearchFirstNameInput}
+                          onChange={(e) => setAdminSearchFirstNameInput(e.target.value)}
                           className="rounded border border-slate-300 bg-white px-3 py-2 text-sm"
                           onKeyDown={(e) => {
                             if (e.key === "Enter") {
@@ -3067,6 +2847,12 @@ export default function HeadofSchool() {
           )}
         </div>
       </div>
+
+      <ThemedNoticeModal
+        open={supersededNoticeOpen}
+        onClose={() => setSupersededNoticeOpen(false)}
+        message={SUPERSEDED_RECORD_MESSAGE}
+      />
     </div>
   );
 }

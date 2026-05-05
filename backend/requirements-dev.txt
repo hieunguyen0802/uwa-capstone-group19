@@ -1,0 +1,8 @@
+# Development and CI only. Do not use in production Docker image.
+# Install: pip install -r requirements-dev.txt
+#
+-r requirements.txt
+
+pytest==9.0.3
+pytest-cov==7.0.0
+pytest-django==4.11.1

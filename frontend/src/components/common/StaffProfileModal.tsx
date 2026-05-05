@@ -7,6 +7,8 @@ export type StaffProfileDraft = {
   title: string;
   department: string;
   isActive: "Active" | "Inactive";
+  isNewEmployee: boolean;
+  notes: string;
 };
 
 type StaffProfileModalProps = {
@@ -15,9 +17,15 @@ type StaffProfileModalProps = {
   departments: string[];
   error: string;
   onClose: () => void;
-  onFieldChange: (field: keyof StaffProfileDraft, value: string) => void;
+  onFieldChange: (
+    field: keyof StaffProfileDraft,
+    value: string | boolean
+  ) => void;
   onUpdate: () => void;
 };
+
+export const STAFF_PROFILE_NOTES_PLACEHOLDER =
+  "e.g.: This staff member has been identified as new. Please submit to your Head of Department to update and approve their workload in your system.";
 
 export default function StaffProfileModal({
   open,
