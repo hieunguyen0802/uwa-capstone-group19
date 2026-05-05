@@ -6,7 +6,7 @@ from django.db import migrations, models
 class Migration(migrations.Migration):
 
     dependencies = [
-        ('api', '0002_alter_staff_staff_number'),
+        ('api', '0003_workloadreport_target_band_and_more'),
     ]
 
     operations = [

@@ -1,5 +1,4 @@
 import io
-import uuid
 from datetime import date
 from decimal import Decimal
 
@@ -574,7 +573,6 @@ def academic_export(request):
 def academic_contact_school_ops(request):
     """POST /api/academic/contact-school-of-operations/"""
     message_body = (request.data.get('messageBody') or '').strip()
-    sender = request.data.get('sender') or {}
 
     if not message_body:
         return Response(
@@ -582,11 +580,17 @@ def academic_contact_school_ops(request):
             status=status.HTTP_400_BAD_REQUEST,
         )
 
-    # Log the contact request as an audit entry (no report FK — system-level action).
-    # A future integration can hook into this log to send an actual email/notification.
-    AuditLog.objects.create(
+    # Derive sender from the authenticated staff — never trust client-provided identity.
+    staff = request.staff
+    sender = {
+        'name': staff.user.get_full_name(),
+        'email': staff.user.email,
+        'role': staff.role,
+    }
+
+    log = AuditLog.objects.create(
         report=None,
-        action_by=request.staff,
+        action_by=staff,
         action_type='COMMENT',
         comment=message_body,
         changes={
@@ -595,9 +599,8 @@ def academic_contact_school_ops(request):
         },
     )
 
-    reference_id = f"msg_{uuid.uuid4().hex[:8]}"
     return Response(
-        {'ok': True, 'referenceId': reference_id},
+        {'ok': True, 'referenceId': str(log.log_id)},
         status=status.HTTP_201_CREATED,
     )
 

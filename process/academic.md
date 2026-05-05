@@ -595,7 +595,58 @@ def academic_workload_history(request, id):
 
 ---
 
-## 第八章：下一步
+## 第八章：Git 冲突实战记录（2026-05-05）
+
+### 背景
+
+`feature/jaffrey-academic-v3` 分支向 `main` 发起 PR 时，`backend/api/urls.py` 出现 1 处冲突。
+
+### 冲突原因
+
+该分支是从一个较旧的 `main` 版本分出去的。分支开发期间，另一位成员将 HoD（Head of School）路由合并进了 `main`。两个分支都修改了 `urls.py` 的同一区域（第96行附近），导致 Git 无法自动合并。
+
+```
+你的分支在第96行写了：
+    # Academic APIs (v3 contract)
+
+main 在同一位置写了：
+    # Head of School APIs (9.2-9.12)
+    path('headofschool/workload-requests/', ...)
+    ... (共12行 HoD 路由)
+    # Academic APIs (new contract)
+```
+
+Git 看到"同一位置，两边内容不同"，停下来让人决定，这就是冲突。
+
+### 冲突的本质
+
+不是"占位问题"，而是**两个人同时修改了同一块地方，Git 无法判断谁对谁错，必须人工决定**。
+
+三个快捷按钮（Accept current / Accept incoming / Accept both）都不适用：
+- Accept current = 丢掉 HoD 路由，项目功能缺失
+- Accept incoming = 丢掉 `v3 contract` 注释标签
+- Accept both = 两个注释叠在一起，语义重复
+
+### 解决过程
+
+在 GitHub 网页冲突编辑器中手动编辑：
+
+1. 删除三行冲突标记（`<<<<<<<`、`=======`、`>>>>>>>`）
+2. 保留 main 带来的全部 HoD 路由
+3. 将注释从 `# Academic APIs (new contract)` 改为 `# Academic APIs (v3 contract)`
+4. 点击 **Mark as resolved** → **Commit merge**
+
+最终结果：HoD 路由完整保留，academic 路由（含新增的 `contact-school-of-operations`）也完整保留。
+
+### 经验总结
+
+- 分支存活时间越长，和 main 的差异越大，冲突概率越高。
+- 冲突不可怕，关键是**理解两边各自加了什么**，再决定如何合并。
+- 三个快捷按钮适合"一边完全正确、另一边完全错误"的场景；内容需要融合时，手动编辑更安全。
+
+---
+
+## 第九章：下一步
 
 完成上面三个练习之后，你应该能：
 - 解释 `academic_views.py` 里任意一个函数的逻辑
@@ -610,7 +661,137 @@ def academic_workload_history(request, id):
 
 ---
 
-## 附录：常用 Django ORM 速查
+## 第十章：代码审查复盘（2026-05-05）
+
+> 来源：cai 通过 Codex 对 `feature/jaffrey-academic-v3` 分支的检测报告，共4条，3条属实，1条误报。
+
+---
+
+### P1（严重）：Migration 图分叉，导致 Django 测试无法启动
+
+**错在哪里**
+
+`main` 上已有 `0003_workloadreport_target_band_and_more`，它从 `0002` 出发，添加了 `target_band` 和 `target_teaching_pct` 两列。
+
+我的分支上：
+- `0004_alter_workloadreport_status` 依赖 `0002`（应该依赖 `0003`）
+- `0005_workloadreport_target_fields` 依赖 `0004`，又添加了同样两列
+
+结果 migration 图变成了这样：
+
+```
+0002
+├── 0003 (main 添加 target_band/target_teaching_pct)
+└── 0004 (我的分支，依赖写错了)
+    └── 0005 (我的分支，重复添加同样两列)
+```
+
+Django 看到两条从 `0002` 出发的叶节点（`0003` 和 `0005`），报 `Conflicting migrations detected`，测试直接无法启动。
+
+**为什么会犯这个错**
+
+我的分支是在 `0003` 合并进 `main` 之前分出去的，当时本地没有 `0003`。我自己生成了 `0005` 来添加这两列，但没有意识到 `main` 上已经有了同样的 migration。
+
+**怎么修**
+
+1. 把 `0004` 的依赖从 `0002` 改为 `0003`：
+   ```python
+   # 修改前
+   dependencies = [('api', '0002_alter_staff_staff_number')]
+   # 修改后
+   dependencies = [('api', '0003_workloadreport_target_band_and_more')]
+   ```
+2. 删掉 `0005`（它的内容 `0003` 已经做了）。
+
+**经验**
+
+> 分支存活时间越长，越容易和 main 的 migration 产生冲突。
+> 每次从 main 拉取更新后，先检查 migration 图有没有新叶节点，再生成自己的 migration。
+> 命令：`python manage.py showmigrations api`，看有没有多个没有后继的叶节点。
+
+---
+
+### P2a（安全）：AuditLog 中的 sender 可被客户端伪造
+
+**错在哪里**
+
+```python
+# 修改前（有漏洞）
+sender = request.data.get('sender') or {}
+AuditLog.objects.create(
+    ...
+    changes={'kind': 'CONTACT_SCHOOL_OPS', 'sender': sender},
+)
+```
+
+`sender` 直接从请求体取出写入审计日志。任何人只要发一个请求，就可以在 `changes.sender` 里写任意 name/email/role，伪造成别人发的消息。
+
+审计日志的核心价值是**不可抵赖**——谁做了什么必须可信。一旦 sender 可以伪造，这条日志就失去了法律和运营意义。
+
+**怎么修**
+
+```python
+# 修改后（从已认证的 request.staff 派生 sender）
+staff = request.staff
+sender = {
+    'name': staff.user.get_full_name(),
+    'email': staff.user.email,
+    'role': staff.role,
+}
+```
+
+`request.staff` 是经过 JWT 验证后由 `@require_role` 装饰器注入的，不可伪造。
+
+**经验**
+
+> 凡是写入审计日志、通知、或任何"谁做了什么"记录的字段，必须从服务端已认证的身份派生，绝不能信任客户端传来的值。
+> 规则：**身份信息只从 `request.user` / `request.staff` 取，不从 `request.data` 取。**
+
+---
+
+### P2b（功能）：返回的 referenceId 无法追溯到实际记录
+
+**错在哪里**
+
+```python
+# 修改前（有问题）
+AuditLog.objects.create(...)          # 创建了记录，但没有保存返回值
+reference_id = f"msg_{uuid.uuid4().hex[:8]}"  # 随机生成一个新 ID
+return Response({'ok': True, 'referenceId': reference_id})
+```
+
+`AuditLog.objects.create()` 的返回值（含真实 `log_id`）被丢弃了。返回给前端的是一个随机生成的字符串，和数据库里的记录没有任何关联。
+
+前端拿到这个 `referenceId` 后，无法用它查询、对账或调试——因为数据库里根本没有这个 ID。
+
+**怎么修**
+
+```python
+# 修改后（返回真实的 log_id）
+log = AuditLog.objects.create(...)
+return Response({'ok': True, 'referenceId': str(log.log_id)})
+```
+
+**经验**
+
+> `Model.objects.create()` 会返回刚创建的对象实例，包含数据库生成的主键。
+> 如果需要把这个记录的 ID 告诉调用方，必须用这个返回值，不能另外生成一个随机 ID。
+> 随机生成 ID 再返回，是一种"假装有追踪能力"的反模式。
+
+---
+
+### P3（误报）：target_band 和 target_teaching_pct 重复声明
+
+**结论：不属实。**
+
+检查 `backend/api/models.py`，`target_band` 和 `target_teaching_pct` 只在第224-225行出现一次，没有重复声明。cai 可能看的是合并前存在冲突标记的旧版本，或者是另一个分支的状态。
+
+**经验**
+
+> 代码审查工具的报告不是100%准确的，特别是在分支合并过程中，工具可能分析的是含冲突标记的中间状态。
+> 收到审查报告后，先用 `grep` 在当前分支实际文件里核实，再决定是否修改。
+
+---
 
 ```python
 # 查所有
