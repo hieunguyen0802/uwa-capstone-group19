@@ -137,6 +137,17 @@ USE_TZ = True
 
 STATIC_URL = 'static/'
 
+# User-generated exports / import templates (development default; use object storage in prod).
+MEDIA_ROOT = BASE_DIR / 'media'
+MEDIA_URL = '/media/'
+
+CACHES = {
+    'default': {
+        'BACKEND': 'django.core.cache.backends.locmem.LocMemCache',
+        'LOCATION': 'uwa-capstone-locmem',
+    }
+}
+
 # Default primary key field type
 # https://docs.djangoproject.com/en/5.2/ref/settings/#default-auto-field
 

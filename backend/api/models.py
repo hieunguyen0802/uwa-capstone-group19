@@ -116,6 +116,16 @@ class Staff(models.Model):
     # Soft-delete flag. Set to False for departed staff instead of deleting the row,
     # so historical workload records remain intact.
     is_active = models.BooleanField(default=True)
+
+    # Academic title (e.g. "Lecturer", "Associate Professor") — display only, not used for RBAC.
+    title = models.CharField(max_length=100, blank=True, default='')
+
+    # True for staff in their first year; affects workload band calculation.
+    is_new_employee = models.BooleanField(default=False)
+
+    # Free-text notes visible to School Ops only.
+    notes = models.TextField(blank=True, default='')
+
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)  # auto-updated on every save()
 
@@ -170,16 +180,10 @@ class WorkloadReport(models.Model):
         related_name='historical_reports'
     )
 
-<<<<<<< HEAD
-    # Approval status lifecycle: INITIAL → PENDING → APPROVED or REJECTED
-    # INITIAL: just imported, academic has not yet viewed or confirmed.
-    # PENDING: academic has viewed/confirmed; awaiting HOD approval.
-=======
     # Status lifecycle: INITIAL → PENDING → APPROVED or REJECTED
     # INITIAL:  Daniela imported; academic can see, HOD can see but cannot act.
     # PENDING:  Academic submitted request; HOD can approve or reject.
     # APPROVED / REJECTED: terminal states set by HOD.
->>>>>>> origin/main
     STATUS_CHOICES = [
         ('INITIAL', 'Initial'),
         ('PENDING', 'Pending Review'),
@@ -450,6 +454,83 @@ class SystemConfig(models.Model):
         super().save(*args, **kwargs)
 
 
+class WorkloadDistributionJob(models.Model):
+    """
+    Records a school-level “distribute workload” action initiated from /admin.
+
+    This does not mutate WorkloadReport rows by itself — it creates an audit trail
+    placeholder so ops can correlate UI actions later when real distribution rules exist.
+    """
+
+    job_id = models.BigAutoField(primary_key=True)
+    academic_year = models.PositiveIntegerField()
+    semester = models.CharField(max_length=10)  # S1/S2 only for admin workflow
+    triggered_by = models.ForeignKey(
+        Staff,
+        on_delete=models.SET_NULL,
+        null=True,
+        related_name='distribution_jobs',
+    )
+    created_at = models.DateTimeField(auto_now_add=True)
+    notes = models.TextField(blank=True, default='')
+
+    class Meta:
+        db_table = 'workload_distribution_jobs'
+        indexes = [
+            models.Index(fields=['academic_year', 'semester', '-created_at']),
+        ]
+
+    def __str__(self):
+        return f"distribution {self.job_id}: {self.academic_year} {self.semester}"
+
+
+class StaffRoleAssignment(models.Model):
+    """
+    Extra role grants for HoD / school Admin beyond the canonical Staff.role field.
+
+    Contract field `role` from the frontend maps to ROLE_CHOICES string values stored here.
+    """
+
+    FRONT_ROLE_CHOICES = [
+        ('HoD', 'HoD'),
+        ('Admin', 'Admin'),
+    ]
+
+    assignment_id = models.BigAutoField(primary_key=True)
+    staff = models.ForeignKey(Staff, on_delete=models.CASCADE, related_name='role_assignments')
+    role_code = models.CharField(max_length=20, choices=FRONT_ROLE_CHOICES)
+
+    # Text label from frontend (e.g. “Senior School Coordinator”) or real department name.
+    department_scope = models.CharField(max_length=150)
+    resolved_department = models.ForeignKey(
+        Department,
+        on_delete=models.PROTECT,
+        null=True,
+        blank=True,
+        related_name='role_assignments',
+        help_text='Populated when department_scope matches an existing Department.name',
+    )
+
+    permissions = models.JSONField(default=list, blank=True)
+
+    STATUS_CHOICES = [
+        ('active', 'active'),
+        ('disabled', 'disabled'),
+    ]
+    status = models.CharField(max_length=20, choices=STATUS_CHOICES, default='active')
+    disable_reason = models.TextField(blank=True, default='')
+
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        db_table = 'staff_role_assignments'
+        indexes = [
+            models.Index(fields=['staff', 'status']),
+        ]
+
+    def __str__(self):
+        return f"{self.staff.staff_number} → {self.role_code} ({self.status})"
 class OTPToken(models.Model):
     """
     One-time password tokens for passwordless email login.
