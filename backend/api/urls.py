@@ -85,7 +85,6 @@ urlpatterns = [
     path('supervisor/export/', supervisor_export),
 
     # Supervisor — legacy endpoints
-
     path('supervisor/requests/', supervisor_requests),
     path('supervisor/approve/<str:id>/', approve_request),
     path('supervisor/reject/<str:id>/', reject_request),
