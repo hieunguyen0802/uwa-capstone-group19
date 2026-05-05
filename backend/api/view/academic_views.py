@@ -63,6 +63,17 @@ def _get_report_confirmation(report):
     return log.changes.get('confirmation', 'unconfirmed')
 
 
+def _get_confirmation_time(report):
+    log = AuditLog.objects.filter(
+        report=report,
+        changes__kind='CONFIRMATION',
+        changes__confirmation='confirmed',
+    ).order_by('-created_at').first()
+    if not log:
+        return None
+    return log.created_at.strftime('%Y-%m-%d %H:%M')
+
+
 def _build_department_conflict_keys(reports):
     key_dept_map = {}
     for report in reports:
@@ -95,28 +106,62 @@ def _get_supervisor_note(report):
     return note_log.comment if note_log else ''
 
 
+def _get_assigned_by(report):
+    """Return the name of the SCHOOL_OPS staff who imported this report."""
+    log = AuditLog.objects.filter(
+        report=report,
+        action_type__in=['IMPORTED', 'MODIFIED_BY_REIMPORT'],
+    ).select_related('action_by__user').order_by('-created_at').first()
+    if not log or not log.action_by:
+        return ''
+    return log.action_by.user.get_full_name().strip() or log.action_by.user.username
+
+
+def _calc_target_teaching_hours(report) -> float:
+    """Derive target teaching hours from target_teaching_pct × FTE × 1725 hrs/year."""
+    if report.target_teaching_pct is None or report.snapshot_fte is None:
+        return 0.0
+    annual_hrs = float(report.snapshot_fte) * 100 * 17.25
+    return round(annual_hrs * float(report.target_teaching_pct) / 100, 2)
+
+
+def _calc_actual_teaching_ratio(report_items) -> float:
+    """Actual teaching hours / total hours, as a percentage."""
+    total = sum(i.allocated_hours for i in report_items)
+    if not total:
+        return 0.0
+    teaching = sum(i.allocated_hours for i in report_items if i.category == 'TEACHING')
+    return round(float(teaching / total) * 100, 1)
+
+
 def _serialize_workload_row(report, confirmation, anomaly_result=None, report_items=None):
+    """Serialize a WorkloadReport to the v3 list-item shape."""
     staff_user = report.staff.user
     full_name = staff_user.get_full_name().strip() or staff_user.username
     items = report_items if report_items is not None else list(report.items.all())
     total_hours = sum((item.allocated_hours for item in items), Decimal('0.00'))
-    first_desc = next((item for item in items if item.description), None)
 
     if anomaly_result is None:
         anomaly_result = {'is_anomaly': report.is_anomaly, 'reasons': []}
 
     return {
         'id': str(report.report_id),
-        'employee_id': report.staff.staff_number,
         'name': full_name,
+        'employeeId': report.staff.staff_number,
         'title': '',
-        'description': first_desc.description if first_desc else '',
+        'notes': _get_supervisor_note(report),
+        'hours': _to_decimal_hours(total_hours),
+        'targetTeachingRatio': float(report.target_teaching_pct) if report.target_teaching_pct is not None else None,
+        'teachingTargetHours': _calc_target_teaching_hours(report),
         'status': report.status.lower(),
         'confirmation': confirmation,
-        'total_hours': _to_decimal_hours(total_hours),
-        'pushed_time': report.created_at.strftime('%Y-%m-%d %H:%M') if report.created_at else '',
-        'is_anomaly': anomaly_result['is_anomaly'],
-        'anomaly_reasons': anomaly_result['reasons'],
+        'confirmationTime': _get_confirmation_time(report),
+        'supervisorNote': _get_supervisor_note(report),
+        'assignedBy': _get_assigned_by(report),
+        'pushedAt': report.created_at.strftime('%Y-%m-%d %H:%M') if report.created_at else '',
+        'cancelled': report.status == 'REJECTED',
+        'isAbnormal': anomaly_result['is_anomaly'],
+        'anomalyReasons': anomaly_result['reasons'],
     }
 
 
@@ -185,20 +230,19 @@ def academic_workloads(request):
         page_size = max(1, min(100, int(request.GET.get('page_size', 10))))
     except (ValueError, TypeError):
         return Response(
-            {'success': False, 'message': 'page and page_size must be positive integers'},
+            {'detail': 'page and page_size must be positive integers'},
             status=status.HTTP_400_BAD_REQUEST,
         )
     paginator = Paginator(items, page_size)
     current_page = paginator.get_page(page)
 
     return Response({
-        'success': True,
-        'message': 'Academic workloads loaded',
-        'data': {
+        'items': list(current_page.object_list),
+        'pagination': {
             'page': current_page.number,
-            'page_size': page_size,
-            'total': paginator.count,
-            'items': list(current_page.object_list),
+            'pageSize': page_size,
+            'totalItems': paginator.count,
+            'totalPages': paginator.num_pages,
         },
     })
 
@@ -214,22 +258,31 @@ def academic_workload_detail(request, id):
     report_items = list(report.items.all())
     anomaly_result = evaluate_mvp_anomaly(report, department_conflict=_is_department_conflict(report))
     confirmation = _get_report_confirmation(report)
-    row = _serialize_workload_row(report, confirmation, anomaly_result, report_items)
+    total_hours = sum((i.allocated_hours for i in report_items), Decimal('0.00'))
+    staff_user = report.staff.user
 
     return Response({
-        'success': True,
-        'message': 'Workload detail loaded',
-        'data': {
-            'id': row['id'],
-            'employee_id': row['employee_id'],
-            'name': row['name'],
-            'status': row['status'],
-            'confirmation': row['confirmation'],
-            'total_hours': row['total_hours'],
-            'description': row['description'],
-            'supervisor_note': _get_supervisor_note(report),
-            'breakdown': _serialize_breakdown(report_items),
+        'id': str(report.report_id),
+        'name': staff_user.get_full_name().strip() or staff_user.username,
+        'employeeId': report.staff.staff_number,
+        'title': '',
+        'notes': _get_supervisor_note(report),
+        'hours': _to_decimal_hours(total_hours),
+        'targetTeachingRatio': float(report.target_teaching_pct) if report.target_teaching_pct is not None else None,
+        'teachingTargetHours': _calc_target_teaching_hours(report),
+        'actualTeachingRatio': _calc_actual_teaching_ratio(report_items),
+        'status': report.status.lower(),
+        'confirmation': confirmation,
+        'confirmationTime': _get_confirmation_time(report),
+        'supervisorNote': _get_supervisor_note(report),
+        'assignedBy': _get_assigned_by(report),
+        'pushedAt': report.created_at.strftime('%Y-%m-%d %H:%M') if report.created_at else '',
+        'cancelled': report.status == 'REJECTED',
+        'validation': {
+            'isAbnormal': anomaly_result['is_anomaly'],
+            'reason': ', '.join(anomaly_result['reasons']),
         },
+        'breakdown': _serialize_breakdown(report_items),
     })
 
 
@@ -238,28 +291,14 @@ def academic_workload_detail(request, id):
 @require_role('ACADEMIC')
 @transaction.atomic
 def academic_confirm_workload(request, id):
-    """POST /api/academic/workloads/{id}/confirm/"""
-    confirmation = (request.data.get('confirmation') or '').lower()
-    if confirmation != 'confirmed':
-        return Response(
-            {
-                'success': False,
-                'message': 'confirmation must be confirmed',
-                'errors': {'confirmation': ['Only confirmed is supported']},
-            },
-            status=status.HTTP_400_BAD_REQUEST,
-        )
-
+    """POST /api/academic/workloads/{id}/confirm/  — no request body required."""
     report = get_object_or_404(get_workload_queryset(request.staff), report_id=id)
     anomaly_result = persist_report_anomaly(report, department_conflict=_is_department_conflict(report))
     if anomaly_result['is_anomaly']:
         return Response(
             {
-                'success': False,
-                'message': 'Cannot confirm workload with anomaly',
-                'errors': {
-                    'anomaly': anomaly_result['reasons'],
-                },
+                'detail': 'Cannot confirm workload with anomaly',
+                'anomaly': anomaly_result['reasons'],
             },
             status=status.HTTP_409_CONFLICT,
         )
@@ -280,12 +319,9 @@ def academic_confirm_workload(request, id):
         )
 
     return Response({
-        'success': True,
-        'message': 'Workload confirmed',
-        'data': {
-            'id': str(report.report_id),
-            'confirmation': 'confirmed',
-        },
+        'id': str(report.report_id),
+        'confirmation': 'confirmed',
+        'confirmationTime': _get_confirmation_time(report),
     })
 
 
@@ -295,46 +331,31 @@ def academic_confirm_workload(request, id):
 @transaction.atomic
 def academic_submit_workload_requests(request):
     """POST /api/academic/workload-requests/"""
-    workload_ids = request.data.get('workload_ids') or []
-    request_reason = (request.data.get('request_reason') or '').strip()
+    # v3 contract uses camelCase keys
+    workload_ids = request.data.get('workloadIds') or []
+    reason = (request.data.get('reason') or '').strip()
 
     if not isinstance(workload_ids, list) or not workload_ids:
         return Response(
-            {
-                'success': False,
-                'message': 'Validation failed',
-                'errors': {'workload_ids': ['At least one workload id is required']},
-            },
+            {'detail': 'workloadIds must be a non-empty list'},
             status=status.HTTP_400_BAD_REQUEST,
         )
 
     if len(workload_ids) > 10:
         return Response(
-            {
-                'success': False,
-                'message': 'Validation failed',
-                'errors': {'workload_ids': ['Cannot submit more than 10 workloads at once']},
-            },
+            {'detail': 'Cannot submit more than 10 workloads at once'},
             status=status.HTTP_400_BAD_REQUEST,
         )
 
-    if not request_reason:
+    if not reason:
         return Response(
-            {
-                'success': False,
-                'message': 'Validation failed',
-                'errors': {'request_reason': ['Application reason is required']},
-            },
+            {'detail': 'reason is required'},
             status=status.HTTP_400_BAD_REQUEST,
         )
 
-    if len(request_reason) > 240:
+    if len(reason) > 240:
         return Response(
-            {
-                'success': False,
-                'message': 'Validation failed',
-                'errors': {'request_reason': ['Application reason must be <= 240 characters']},
-            },
+            {'detail': 'reason must be <= 240 characters'},
             status=status.HTTP_400_BAD_REQUEST,
         )
 
@@ -342,38 +363,28 @@ def academic_submit_workload_requests(request):
     reports = list(scoped.filter(report_id__in=workload_ids))
     if len(reports) != len(workload_ids):
         return Response(
-            {
-                'success': False,
-                'message': 'Validation failed',
-                'errors': {'workload_ids': ['One or more workload ids are invalid']},
-            },
+            {'detail': 'One or more workloadIds are invalid or not accessible'},
             status=status.HTTP_400_BAD_REQUEST,
         )
 
-    # Only INITIAL or REJECTED reports can be submitted.
-    # PENDING = already submitted and awaiting HOD decision.
-    # APPROVED = terminal, no re-submission needed.
     non_submittable = [r for r in reports if r.status not in ('INITIAL', 'REJECTED')]
     if non_submittable:
         return Response(
             {
-                'success': False,
-                'message': 'One or more reports cannot be submitted (already pending or approved)',
-                'errors': {'workload_ids': [str(r.report_id) for r in non_submittable]},
+                'detail': 'One or more reports cannot be submitted (already pending or approved)',
+                'workloadIds': [str(r.report_id) for r in non_submittable],
             },
             status=status.HTTP_409_CONFLICT,
         )
 
-    # Academic must confirm before submit. This closes the bypass path where
-    # users could directly submit unconfirmed records.
+    # Academic must confirm before submit.
     confirmation_map = _get_confirmation_map([str(r.report_id) for r in reports])
     unconfirmed = [str(r.report_id) for r in reports if confirmation_map.get(str(r.report_id), 'unconfirmed') != 'confirmed']
     if unconfirmed:
         return Response(
             {
-                'success': False,
-                'message': 'One or more reports must be confirmed before submit',
-                'errors': {'workload_ids': unconfirmed},
+                'detail': 'One or more reports must be confirmed before submit',
+                'workloadIds': unconfirmed,
             },
             status=status.HTTP_409_CONFLICT,
         )
@@ -388,112 +399,34 @@ def academic_submit_workload_requests(request):
     if anomaly_map:
         return Response(
             {
-                'success': False,
-                'message': 'One or more reports have anomalies and cannot be submitted',
-                'errors': {'anomaly': anomaly_map},
+                'detail': 'One or more reports have anomalies and cannot be submitted',
+                'anomaly': anomaly_map,
             },
             status=status.HTTP_409_CONFLICT,
         )
 
-    created_ids = []
+    result_items = []
     for report in reports:
         log = AuditLog.objects.create(
             report=report,
             action_by=request.staff,
             action_type='COMMENT',
-            comment=request_reason,
+            comment=reason,
             changes={'kind': 'WORKLOAD_REQUEST', 'status': 'pending'},
         )
         report.status = 'PENDING'
         report.save(update_fields=['status', 'updated_at'])
-        created_ids.append(str(log.log_id))
+        result_items.append({
+            'workloadId': str(report.report_id),
+            'requestId': str(log.log_id),
+            'status': 'pending',
+        })
 
     return Response(
         {
-            'success': True,
-            'message': 'Request submitted to supervisor',
-            'data': {
-                'created_request_ids': created_ids,
-                'status': 'pending',
-            },
+            'submittedCount': len(result_items),
+            'items': result_items,
         },
-        status=status.HTTP_201_CREATED,
-    )
-
-
-@api_view(['GET'])
-@permission_classes([IsAuthenticated])
-@require_role('ACADEMIC')
-def get_my_workloads(request):
-    """
-    GET /api/workloads/my/
-    Legacy response for existing clients.
-    """
-    qs = get_workload_queryset(request.staff).order_by('-created_at')
-    data = [
-        {
-            'report_id': str(r.report_id),
-            'academic_year': r.academic_year,
-            'semester': r.semester,
-            'status': r.status,
-            'is_anomaly': r.is_anomaly,
-            'snapshot_fte': str(r.snapshot_fte),
-            'created_at': r.created_at.strftime('%Y-%m-%d %H:%M'),
-        }
-        for r in qs
-    ]
-    return Response(data)
-
-
-@api_view(['POST'])
-@permission_classes([IsAuthenticated])
-@require_role('ACADEMIC')
-@transaction.atomic
-def submit_query(request):
-    """
-    POST /api/queries/
-    Academic submits a query (dispute) on one of their workload reports.
-
-    Body: { "workload_report_id": "<uuid>", "comment": "<string>" }
-    Success: 201 { "report_id": "<uuid>", "status": "PENDING" }
-    Errors:
-      400 — missing fields
-      404 — report not found or not owned by this academic
-      409 — report already has a COMMENT log (query already submitted)
-    """
-    report_id = request.data.get('workload_report_id')
-    comment = (request.data.get('comment') or '').strip()
-
-    if not report_id or not comment:
-        return Response(
-            {'code': 'VALIDATION_ERROR', 'message': 'workload_report_id and comment are required'},
-            status=status.HTTP_400_BAD_REQUEST,
-        )
-
-    qs = get_workload_queryset(request.staff)
-    report = get_object_or_404(qs, report_id=report_id)
-
-    already_queried = AuditLog.objects.filter(
-        report=report,
-        action_type='COMMENT',
-        changes__kind='QUERY',
-    ).exists()
-    if already_queried:
-        return Response(
-            {'code': 'CONFLICT', 'message': 'A query has already been submitted for this report.'},
-            status=status.HTTP_409_CONFLICT,
-        )
-
-    AuditLog.objects.create(
-        report=report,
-        action_by=request.staff,
-        action_type='COMMENT',
-        comment=comment,
-        changes={'kind': 'QUERY'},
-    )
-
-    return Response(
-        {'report_id': str(report.report_id), 'status': report.status},
         status=status.HTTP_201_CREATED,
     )
 
@@ -509,25 +442,21 @@ def academic_visualization(request):
     qs = get_workload_queryset(request.staff).prefetch_related('items')
     qs = _filter_reports_by_range(qs, year_from, year_to, semester_filter)
 
-    # Build ordered list of (year, semester) buckets present in the data.
     SEM_ORDER = {'S1': 0, 'S2': 1, 'FULL_YEAR': 2}
     reports = list(qs.order_by('academic_year', 'semester'))
 
-    # Collect unique (year, semester) keys in display order.
     seen = {}
     for r in reports:
         key = (r.academic_year, r.semester)
         seen[key] = True
     ordered_keys = sorted(seen.keys(), key=lambda k: (k[0], SEM_ORDER.get(k[1], 9)))
 
-    # Aggregate my hours per bucket.
     my_hours_map = {}
     for r in reports:
         key = (r.academic_year, r.semester)
         total = sum(item.allocated_hours for item in r.items.all())
         my_hours_map[key] = my_hours_map.get(key, Decimal('0.00')) + total
 
-    # Aggregate department average per bucket (all staff in same department).
     dept_id = request.staff.department_id
     dept_qs = WorkloadReport.objects.filter(
         is_current=True,
@@ -535,7 +464,7 @@ def academic_visualization(request):
     ).prefetch_related('items')
     dept_qs = _filter_reports_by_range(dept_qs, year_from, year_to, semester_filter)
 
-    dept_hours_map = {}   # key -> list of per-staff totals
+    dept_hours_map = {}
     for r in dept_qs.order_by('academic_year', 'semester'):
         key = (r.academic_year, r.semester)
         total = sum(item.allocated_hours for item in r.items.all())
@@ -552,22 +481,18 @@ def academic_visualization(request):
 
         my_vs_dept.append({
             'semester': label,
-            'my_hours': my_h,
-            'department_average': dept_avg,
+            'myHours': my_h,
+            'departmentAverage': dept_avg,
         })
         total_trend.append({
             'semester': label,
-            'total_hours': dept_total,
+            'totalHours': dept_total,
         })
 
     return Response({
-        'success': True,
-        'message': 'Visualization loaded',
-        'data': {
-            'reporting_period_label': _reporting_period_label(year_from, year_to, semester_filter),
-            'my_vs_department_trend': my_vs_dept,
-            'total_hours_trend': total_trend,
-        },
+        'reportingPeriodLabel': _reporting_period_label(year_from, year_to, semester_filter),
+        'totalHoursTrend': total_trend,
+        'myVsDepartmentTrend': my_vs_dept,
     })
 
 
@@ -575,18 +500,12 @@ def academic_visualization(request):
 @permission_classes([IsAuthenticated])
 @require_role('ACADEMIC')
 def academic_export(request):
-    """GET /api/academic/export/
-
-    Returns an Excel file containing the current academic's workload records
-    for the requested year/semester range. Only APPROVED records are included
-    (in-progress records are excluded to avoid exporting unconfirmed data).
-    The file name includes today's date so repeated exports are distinguishable.
-    """
+    """GET /api/academic/export/"""
     try:
         import openpyxl
     except ImportError:
         return Response(
-            {'success': False, 'message': 'Export unavailable: openpyxl not installed'},
+            {'detail': 'Export unavailable: openpyxl not installed'},
             status=status.HTTP_503_SERVICE_UNAVAILABLE,
         )
 
@@ -595,9 +514,7 @@ def academic_export(request):
 
     qs = get_workload_queryset(request.staff).prefetch_related('items').order_by('academic_year', 'semester')
     qs = _filter_reports_by_range(qs, year_from, year_to, semester_filter)
-
-    # Only export records that have been approved; pending/rejected are excluded.
-    # Rationale: exporting unconfirmed data could mislead downstream consumers.
+    # Only export approved records; pending/rejected excluded to avoid exporting unconfirmed data.
     qs = qs.filter(status='APPROVED')
 
     wb = openpyxl.Workbook()
@@ -647,3 +564,107 @@ def academic_export(request):
     )
     response['Content-Disposition'] = f'attachment; filename="{file_name}"'
     return response
+
+
+@api_view(['POST'])
+@permission_classes([IsAuthenticated])
+@require_role('ACADEMIC')
+def academic_contact_school_ops(request):
+    """POST /api/academic/contact-school-of-operations/"""
+    message_body = (request.data.get('messageBody') or '').strip()
+
+    if not message_body:
+        return Response(
+            {'detail': 'messageBody is required'},
+            status=status.HTTP_400_BAD_REQUEST,
+        )
+
+    # Derive sender from the authenticated staff — never trust client-provided identity.
+    staff = request.staff
+    sender = {
+        'name': staff.user.get_full_name(),
+        'email': staff.user.email,
+        'role': staff.role,
+    }
+
+    log = AuditLog.objects.create(
+        report=None,
+        action_by=staff,
+        action_type='COMMENT',
+        comment=message_body,
+        changes={
+            'kind': 'CONTACT_SCHOOL_OPS',
+            'sender': sender,
+        },
+    )
+
+    return Response(
+        {'ok': True, 'referenceId': str(log.log_id)},
+        status=status.HTTP_201_CREATED,
+    )
+
+
+# ─── Legacy endpoints (kept for backward compatibility) ──────────────────────
+
+@api_view(['GET'])
+@permission_classes([IsAuthenticated])
+@require_role('ACADEMIC')
+def get_my_workloads(request):
+    """GET /api/workloads/my/  — legacy response shape."""
+    qs = get_workload_queryset(request.staff).order_by('-created_at')
+    data = [
+        {
+            'report_id': str(r.report_id),
+            'academic_year': r.academic_year,
+            'semester': r.semester,
+            'status': r.status,
+            'is_anomaly': r.is_anomaly,
+            'snapshot_fte': str(r.snapshot_fte),
+            'created_at': r.created_at.strftime('%Y-%m-%d %H:%M'),
+        }
+        for r in qs
+    ]
+    return Response(data)
+
+
+@api_view(['POST'])
+@permission_classes([IsAuthenticated])
+@require_role('ACADEMIC')
+@transaction.atomic
+def submit_query(request):
+    """POST /api/queries/  — legacy query submission."""
+    report_id = request.data.get('workload_report_id')
+    comment = (request.data.get('comment') or '').strip()
+
+    if not report_id or not comment:
+        return Response(
+            {'code': 'VALIDATION_ERROR', 'message': 'workload_report_id and comment are required'},
+            status=status.HTTP_400_BAD_REQUEST,
+        )
+
+    qs = get_workload_queryset(request.staff)
+    report = get_object_or_404(qs, report_id=report_id)
+
+    already_queried = AuditLog.objects.filter(
+        report=report,
+        action_type='COMMENT',
+        changes__kind='QUERY',
+    ).exists()
+    if already_queried:
+        return Response(
+            {'code': 'CONFLICT', 'message': 'A query has already been submitted for this report.'},
+            status=status.HTTP_409_CONFLICT,
+        )
+
+    AuditLog.objects.create(
+        report=report,
+        action_by=request.staff,
+        action_type='COMMENT',
+        comment=comment,
+        changes={'kind': 'QUERY'},
+    )
+
+    return Response(
+        {'report_id': str(report.report_id), 'status': report.status},
+        status=status.HTTP_201_CREATED,
+    )
