@@ -84,7 +84,7 @@ class BaseTestCase(APITestCase):
 
     def _item_ids(self, res):
         """Extract report id list from a paginated workload list response."""
-        return [item['id'] for item in res.data['data']['items']]
+        return [item['id'] for item in res.data['items']]
 
     def _submit_report(self, report, staff=None):
         """Academic submits a WORKLOAD_REQUEST so HOD can act on the report."""
@@ -105,7 +105,6 @@ class BaseTestCase(APITestCase):
         client = self._auth_client(actor)
         return client.post(
             f'/api/academic/workloads/{report.report_id}/confirm/',
-            data={'confirmation': 'confirmed'},
             format='json',
         )
 
@@ -349,17 +348,15 @@ class TestAcademicContractEndpoints(BaseTestCase):
         client = self._auth_client(self.academic)
         res = client.get('/api/academic/workloads/?status=all&page=1&page_size=10')
         self.assertEqual(res.status_code, 200)
-        self.assertTrue(res.data['success'])
-        self.assertIn('data', res.data)
-        self.assertIn('items', res.data['data'])
+        self.assertIn('items', res.data)
+        self.assertIn('pagination', res.data)
 
     def test_academic_workload_detail_contract_shape(self):
         client = self._auth_client(self.academic)
         res = client.get(f'/api/academic/workloads/{self.report.report_id}/')
         self.assertEqual(res.status_code, 200)
-        self.assertTrue(res.data['success'])
-        self.assertIn('breakdown', res.data['data'])
-        self.assertIn('supervisor_note', res.data['data'])
+        self.assertIn('breakdown', res.data)
+        self.assertIn('supervisorNote', res.data)
 
     def test_confirm_workload_blocked_by_anomaly(self):
         # Use a report with snapshot_fte=0 to guarantee tr_denominator_invalid anomaly.
@@ -368,20 +365,21 @@ class TestAcademicContractEndpoints(BaseTestCase):
         client = self._auth_client(self.academic)
         res = client.post(
             f'/api/academic/workloads/{anomaly_report.report_id}/confirm/',
-            data={'confirmation': 'confirmed'},
             format='json'
         )
         self.assertEqual(res.status_code, 409)
-        self.assertIn('anomaly', res.data['errors'])
+        self.assertIn('anomaly', res.data)
 
     def test_confirm_workload_invalid_value(self):
+        # v3: confirm has no body — any POST succeeds unless anomaly blocks it.
+        # A clean report (no anomaly) must return 200.
+        clean = self._make_clean_report(self.academic, year=2025, semester='S2')
         client = self._auth_client(self.academic)
         res = client.post(
-            f'/api/academic/workloads/{self.report.report_id}/confirm/',
-            data={'confirmation': 'unconfirmed'},
+            f'/api/academic/workloads/{clean.report_id}/confirm/',
             format='json'
         )
-        self.assertEqual(res.status_code, 400)
+        self.assertEqual(res.status_code, 200)
 
     def test_submit_workload_request_success(self):
         self._confirm_report_via_api(self.report)
@@ -389,21 +387,21 @@ class TestAcademicContractEndpoints(BaseTestCase):
         res = client.post(
             '/api/academic/workload-requests/',
             data={
-                'workload_ids': [str(self.report.report_id)],
-                'request_reason': 'Please review my updated workload.',
+                'workloadIds': [str(self.report.report_id)],
+                'reason': 'Please review my updated workload.',
             },
             format='json'
         )
         self.assertEqual(res.status_code, 201)
-        self.assertTrue(res.data['success'])
-        self.assertEqual(res.data['data']['status'], 'pending')
+        self.assertIn('submittedCount', res.data)
+        self.assertEqual(res.data['items'][0]['status'], 'pending')
 
     def test_submit_workload_request_duplicate_conflict(self):
         self._confirm_report_via_api(self.report)
         client = self._auth_client(self.academic)
         payload = {
-            'workload_ids': [str(self.report.report_id)],
-            'request_reason': 'Please review my updated workload.',
+            'workloadIds': [str(self.report.report_id)],
+            'reason': 'Please review my updated workload.',
         }
         first = client.post('/api/academic/workload-requests/', data=payload, format='json')
         self.assertEqual(first.status_code, 201)
@@ -415,7 +413,7 @@ class TestAcademicContractEndpoints(BaseTestCase):
         client = self._auth_client(self.academic)
         res = client.post(
             '/api/academic/workload-requests/',
-            data={'workload_ids': [str(self.report.report_id)], 'request_reason': ''},
+            data={'workloadIds': [str(self.report.report_id)], 'reason': ''},
             format='json'
         )
         self.assertEqual(res.status_code, 400)
@@ -425,8 +423,8 @@ class TestAcademicContractEndpoints(BaseTestCase):
         res = client.post(
             '/api/academic/workload-requests/',
             data={
-                'workload_ids': [str(self.report.report_id)],
-                'request_reason': 'a' * 241,
+                'workloadIds': [str(self.report.report_id)],
+                'reason': 'a' * 241,
             },
             format='json'
         )
@@ -469,7 +467,7 @@ class TestAcademicWorkloadFilters(BaseTestCase):
         self.assertEqual(res.status_code, 200)
         ids = self._item_ids(res)
         self.assertNotIn(str(self.r_approved.report_id), ids)
-        for item in res.data['data']['items']:
+        for item in res.data['items']:
             self.assertEqual(item['status'], 'pending')
 
     def test_filter_status_approved_excludes_pending(self):
@@ -542,10 +540,10 @@ class TestAcademicOwnership(BaseTestCase):
         client = self._auth_client(self.academic)
         res = client.get('/api/academic/workloads/')
         self.assertEqual(res.status_code, 200)
-        ids = [item['id'] for item in res.data['data']['items']]
+        ids = [item['id'] for item in res.data['items']]
         self.assertNotIn(str(self.other_report.report_id), ids)
 
-    def test_detail_returns_404_for_other_academic_report(self):
+    def test_confirm_returns_404_for_other_academic_report(self):
         client = self._auth_client(self.academic)
         res = client.get(f'/api/academic/workloads/{self.other_report.report_id}/')
         self.assertEqual(res.status_code, 404)
@@ -554,19 +552,18 @@ class TestAcademicOwnership(BaseTestCase):
         client = self._auth_client(self.academic)
         res = client.post(
             f'/api/academic/workloads/{self.other_report.report_id}/confirm/',
-            data={'confirmation': 'confirmed'},
             format='json',
         )
         self.assertEqual(res.status_code, 404)
 
     def test_submit_request_returns_400_for_other_academic_report(self):
-        # workload_ids validation checks the scoped queryset; foreign id → count mismatch → 400
+        # workloadIds validation checks the scoped queryset; foreign id → count mismatch → 400
         client = self._auth_client(self.academic)
         res = client.post(
             '/api/academic/workload-requests/',
             data={
-                'workload_ids': [str(self.other_report.report_id)],
-                'request_reason': 'Trying to submit for someone else.',
+                'workloadIds': [str(self.other_report.report_id)],
+                'reason': 'Trying to submit for someone else.',
             },
             format='json',
         )
@@ -593,19 +590,16 @@ class TestAcademicConfirmSuccess(BaseTestCase):
         client = self._auth_client(self.academic)
         res = client.post(
             f'/api/academic/workloads/{self.clean_report.report_id}/confirm/',
-            data={'confirmation': 'confirmed'},
             format='json',
         )
         self.assertEqual(res.status_code, 200)
-        self.assertTrue(res.data['success'])
-        self.assertEqual(res.data['data']['confirmation'], 'confirmed')
-        self.assertEqual(res.data['data']['id'], str(self.clean_report.report_id))
+        self.assertEqual(res.data['confirmation'], 'confirmed')
+        self.assertEqual(res.data['id'], str(self.clean_report.report_id))
 
     def test_confirm_writes_audit_log(self):
         client = self._auth_client(self.academic)
         client.post(
             f'/api/academic/workloads/{self.clean_report.report_id}/confirm/',
-            data={'confirmation': 'confirmed'},
             format='json',
         )
         self.assertTrue(
@@ -622,12 +616,10 @@ class TestAcademicConfirmSuccess(BaseTestCase):
         client = self._auth_client(self.academic)
         client.post(
             f'/api/academic/workloads/{self.clean_report.report_id}/confirm/',
-            data={'confirmation': 'confirmed'},
             format='json',
         )
         res2 = client.post(
             f'/api/academic/workloads/{self.clean_report.report_id}/confirm/',
-            data={'confirmation': 'confirmed'},
             format='json',
         )
         self.assertEqual(res2.status_code, 200)
@@ -642,12 +634,11 @@ class TestAcademicConfirmSuccess(BaseTestCase):
         client = self._auth_client(self.academic)
         client.post(
             f'/api/academic/workloads/{self.clean_report.report_id}/confirm/',
-            data={'confirmation': 'confirmed'},
             format='json',
         )
         res = client.get(f'/api/academic/workloads/{self.clean_report.report_id}/')
         self.assertEqual(res.status_code, 200)
-        self.assertEqual(res.data['data']['confirmation'], 'confirmed')
+        self.assertEqual(res.data['confirmation'], 'confirmed')
 
 
 # ─── Test: visualization endpoint ─────────────────────────────────────────────
@@ -664,11 +655,9 @@ class TestAcademicVisualization(BaseTestCase):
         client = self._auth_client(self.academic)
         res = client.get('/api/academic/visualization/')
         self.assertEqual(res.status_code, 200)
-        self.assertTrue(res.data['success'])
-        data = res.data['data']
-        self.assertIn('reporting_period_label', data)
-        self.assertIn('my_vs_department_trend', data)
-        self.assertIn('total_hours_trend', data)
+        self.assertIn('reportingPeriodLabel', res.data)
+        self.assertIn('myVsDepartmentTrend', res.data)
+        self.assertIn('totalHoursTrend', res.data)
 
     def test_visualization_trend_items_have_correct_keys(self):
         # Add a workload item so the trend has at least one data point
@@ -681,11 +670,11 @@ class TestAcademicVisualization(BaseTestCase):
         client = self._auth_client(self.academic)
         res = client.get('/api/academic/visualization/')
         self.assertEqual(res.status_code, 200)
-        trend = res.data['data']['my_vs_department_trend']
+        trend = res.data['myVsDepartmentTrend']
         if trend:
             self.assertIn('semester', trend[0])
-            self.assertIn('my_hours', trend[0])
-            self.assertIn('department_average', trend[0])
+            self.assertIn('myHours', trend[0])
+            self.assertIn('departmentAverage', trend[0])
 
     def test_visualization_year_filter(self):
         client = self._auth_client(self.academic)
@@ -794,40 +783,40 @@ class TestAcademicContractFieldAlignment(BaseTestCase):
         client = self._auth_client(self.academic)
         res = client.get('/api/academic/workloads/')
         self.assertEqual(res.status_code, 200)
-        item = res.data['data']['items'][0]
-        for field in ('id', 'employee_id', 'name', 'title', 'description',
-                      'status', 'confirmation', 'total_hours', 'pushed_time'):
+        item = res.data['items'][0]
+        for field in ('id', 'employeeId', 'name', 'title', 'notes',
+                      'status', 'confirmation', 'hours', 'pushedAt'):
             self.assertIn(field, item, msg=f"Missing field: {field}")
 
     def test_list_item_status_is_lowercase(self):
         client = self._auth_client(self.academic)
         res = client.get('/api/academic/workloads/')
-        item = res.data['data']['items'][0]
+        item = res.data['items'][0]
         self.assertEqual(item['status'], item['status'].lower())
 
     def test_list_item_confirmation_is_unconfirmed_by_default(self):
         client = self._auth_client(self.academic)
         res = client.get('/api/academic/workloads/')
-        item = res.data['data']['items'][0]
+        item = res.data['items'][0]
         self.assertEqual(item['confirmation'], 'unconfirmed')
 
     def test_list_item_total_hours_is_numeric(self):
         client = self._auth_client(self.academic)
         res = client.get('/api/academic/workloads/')
-        item = res.data['data']['items'][0]
-        self.assertIsInstance(item['total_hours'], float)
+        item = res.data['items'][0]
+        self.assertIsInstance(item['hours'], float)
 
     def test_detail_breakdown_has_four_categories(self):
         client = self._auth_client(self.academic)
         res = client.get(f'/api/academic/workloads/{self.report.report_id}/')
-        breakdown = res.data['data']['breakdown']
+        breakdown = res.data['breakdown']
         for cat in ('Teaching', 'Assigned Roles', 'HDR', 'Service'):
             self.assertIn(cat, breakdown, msg=f"Missing breakdown category: {cat}")
 
     def test_detail_breakdown_items_have_name_and_hours(self):
         client = self._auth_client(self.academic)
         res = client.get(f'/api/academic/workloads/{self.report.report_id}/')
-        teaching = res.data['data']['breakdown']['Teaching']
+        teaching = res.data['breakdown']['Teaching']
         self.assertTrue(len(teaching) > 0)
         self.assertIn('name', teaching[0])
         self.assertIn('hours', teaching[0])
@@ -836,7 +825,7 @@ class TestAcademicContractFieldAlignment(BaseTestCase):
     def test_detail_supervisor_note_is_empty_string_by_default(self):
         client = self._auth_client(self.academic)
         res = client.get(f'/api/academic/workloads/{self.report.report_id}/')
-        self.assertEqual(res.data['data']['supervisor_note'], '')
+        self.assertEqual(res.data['supervisorNote'], '')
 
     def test_detail_supervisor_note_populated_after_reject(self):
         # Academic submits first, then HOD rejects with a comment
@@ -850,18 +839,18 @@ class TestAcademicContractFieldAlignment(BaseTestCase):
         academic_client = self._auth_client(self.academic)
         res = academic_client.get(f'/api/academic/workloads/{self.report.report_id}/')
         self.assertEqual(res.status_code, 200)
-        self.assertEqual(res.data['data']['supervisor_note'], 'Please revise teaching hours.')
+        self.assertEqual(res.data['supervisorNote'], 'Please revise teaching hours.')
 
     def test_pagination_page_size_1(self):
         # With 3 reports and page_size=1, page 1 should return exactly 1 item
         client = self._auth_client(self.academic)
         res = client.get('/api/academic/workloads/?page=1&page_size=1')
         self.assertEqual(res.status_code, 200)
-        data = res.data['data']
-        self.assertEqual(len(data['items']), 1)
-        self.assertEqual(data['page'], 1)
-        self.assertEqual(data['page_size'], 1)
-        self.assertGreaterEqual(data['total'], 3)
+        pagination = res.data['pagination']
+        self.assertEqual(len(res.data['items']), 1)
+        self.assertEqual(pagination['page'], 1)
+        self.assertEqual(pagination['pageSize'], 1)
+        self.assertGreaterEqual(pagination['totalItems'], 3)
 
     def test_pagination_page_2(self):
         # Page 2 with page_size=1 should return a different item than page 1
@@ -914,7 +903,7 @@ class TestCodexFixes(BaseTestCase):
         self._confirm_report_via_api(self.report)
         first = client_academic.post(
             '/api/academic/workload-requests/',
-            data={'workload_ids': [str(self.report.report_id)], 'request_reason': 'Please review.'},
+            data={'workloadIds': [str(self.report.report_id)], 'reason': 'Please review.'},
             format='json',
         )
         self.assertEqual(first.status_code, 201)
@@ -931,7 +920,7 @@ class TestCodexFixes(BaseTestCase):
         # Academic must be able to re-submit after rejection
         second = client_academic.post(
             '/api/academic/workload-requests/',
-            data={'workload_ids': [str(self.report.report_id)], 'request_reason': 'Revised and resubmitting.'},
+            data={'workloadIds': [str(self.report.report_id)], 'reason': 'Revised and resubmitting.'},
             format='json',
         )
         self.assertEqual(second.status_code, 201)
@@ -947,7 +936,7 @@ class TestCodexFixes(BaseTestCase):
         # Pre-create a pending request for self.report only
         client.post(
             '/api/academic/workload-requests/',
-            data={'workload_ids': [str(self.report.report_id)], 'request_reason': 'First.'},
+            data={'workloadIds': [str(self.report.report_id)], 'reason': 'First.'},
             format='json',
         )
 
@@ -959,8 +948,8 @@ class TestCodexFixes(BaseTestCase):
         res = client.post(
             '/api/academic/workload-requests/',
             data={
-                'workload_ids': [str(clean.report_id), str(self.report.report_id)],
-                'request_reason': 'Batch attempt.',
+                'workloadIds': [str(clean.report_id), str(self.report.report_id)],
+                'reason': 'Batch attempt.',
             },
             format='json',
         )
@@ -986,12 +975,11 @@ class TestCodexFixes(BaseTestCase):
         client = self._auth_client(self.academic)
         res = client.post(
             f'/api/academic/workloads/{self.report.report_id}/confirm/',
-            data={'confirmation': 'confirmed'},
             format='json',
         )
         self.assertEqual(res.status_code, 409)
-        self.assertIn('anomaly', res.data['errors'])
-        self.assertIn('department_conflict', res.data['errors']['anomaly'])
+        self.assertIn('anomaly', res.data)
+        self.assertIn('department_conflict', res.data['anomaly'])
 
 
 class TestHODV2CaiFindings(BaseTestCase):
@@ -1001,11 +989,11 @@ class TestHODV2CaiFindings(BaseTestCase):
         client = self._auth_client(self.academic)
         res = client.post(
             '/api/academic/workload-requests/',
-            data={'workload_ids': [str(self.report.report_id)], 'request_reason': 'Try submit without confirm'},
+            data={'workloadIds': [str(self.report.report_id)], 'reason': 'Try submit without confirm'},
             format='json',
         )
         self.assertEqual(res.status_code, 409)
-        self.assertIn(str(self.report.report_id), res.data['errors']['workload_ids'])
+        self.assertIn(str(self.report.report_id), res.data['workloadIds'])
 
     def test_submit_blocks_anomaly_even_if_confirmed_flag_exists(self):
         anomaly_report = self._make_anomaly_report(self.academic, year=2026, semester='S1')
@@ -1018,11 +1006,11 @@ class TestHODV2CaiFindings(BaseTestCase):
         client = self._auth_client(self.academic)
         res = client.post(
             '/api/academic/workload-requests/',
-            data={'workload_ids': [str(anomaly_report.report_id)], 'request_reason': 'Bypass anomaly check'},
+            data={'workloadIds': [str(anomaly_report.report_id)], 'reason': 'Bypass anomaly check'},
             format='json',
         )
         self.assertEqual(res.status_code, 409)
-        self.assertIn(str(anomaly_report.report_id), res.data['errors']['anomaly'])
+        self.assertIn(str(anomaly_report.report_id), res.data['anomaly'])
 
     def test_inactive_staff_token_cannot_access_protected_endpoint(self):
         client = self._auth_client(self.academic)
@@ -1108,7 +1096,7 @@ class TestHODV2CaiFindings(BaseTestCase):
 
         first = academic_client.post(
             '/api/academic/workload-requests/',
-            data={'workload_ids': [str(self.report.report_id)], 'request_reason': 'first reason'},
+            data={'workloadIds': [str(self.report.report_id)], 'reason': 'first reason'},
             format='json',
         )
         self.assertEqual(first.status_code, 201)
@@ -1128,7 +1116,7 @@ class TestHODV2CaiFindings(BaseTestCase):
 
         second = academic_client.post(
             '/api/academic/workload-requests/',
-            data={'workload_ids': [str(self.report.report_id)], 'request_reason': 'second reason'},
+            data={'workloadIds': [str(self.report.report_id)], 'reason': 'second reason'},
             format='json',
         )
         self.assertEqual(second.status_code, 201)

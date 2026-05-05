@@ -20,6 +20,7 @@ from api.view.academic_views import (
     academic_submit_workload_requests,
     academic_visualization,
     academic_export,
+    academic_contact_school_ops,
     get_my_workloads,
     submit_query,
 )
@@ -44,13 +45,14 @@ urlpatterns = [
     path('supervisor/list/', supervisor_workloads),
     path('supervisor/pending-requests/', get_pending_requests),
 
-    # Academic APIs (new contract)
+    # Academic APIs (v3 contract)
     path('academic/workloads/', academic_workloads),
     path('academic/workloads/<str:id>/', academic_workload_detail),
     path('academic/workloads/<str:id>/confirm/', academic_confirm_workload),
     path('academic/workload-requests/', academic_submit_workload_requests),
     path('academic/visualization/', academic_visualization),
     path('academic/export/', academic_export),
+    path('academic/contact-school-of-operations/', academic_contact_school_ops),
 
     # Academic APIs (legacy compatibility)
     path('workloads/my/', get_my_workloads),
