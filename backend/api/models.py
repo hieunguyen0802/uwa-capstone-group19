@@ -196,6 +196,14 @@ class WorkloadReport(models.Model):
     # their contract type (e.g. contract says T&R 50/50 but actual teaching is 90%).
     is_anomaly = models.BooleanField(default=False)
 
+    # Target band and teaching percentage from the Excel template (columns F and G).
+    # Required to enable teaching_mismatch and tr_discrepancy anomaly checks.
+    # Null until populated by importer; workload_service uses getattr fallback in the interim.
+    target_band = models.CharField(max_length=50, blank=True, null=True)
+    target_teaching_pct = models.DecimalField(
+        max_digits=5, decimal_places=2, blank=True, null=True
+    )
+
     # ── Re-import tracking fields ─────────────────────────────────────────────
     #
     # Problem: Daniela finds that Cai's data was entered incorrectly and re-uploads
@@ -340,15 +348,25 @@ class AuditLog(models.Model):
     # What happened:
     #   IMPORTED            — Daniela uploaded Excel; new WorkloadReport created
     #   MODIFIED_BY_REIMPORT — Daniela re-uploaded; old record superseded by new one
+    #   IMPORT_SKIP         — re-import skipped a protected record (approved/confirmed)
     #   APPROVE             — HOD / SCHOOL_OPS / HOS approved the report
     #   REJECT              — HOD / SCHOOL_OPS / HOS rejected the report
+    #   CONFIRMATION        — Academic confirmed their own workload
+    #   SUBMIT_REQUEST      — Academic submitted an approval request
+    #   WORKLOAD_EDIT       — HOD edited staff metadata (name/email/title)
+    #   PROFILE_EDIT        — SCHOOL_OPS edited staff metadata
     #   COMMENT             — any role added a comment
     #   CONFIG_CHANGE       — someone changed a SystemConfig value (e.g. TR_TOLERANCE)
     ACTION_CHOICES = [
         ('IMPORTED', 'Imported from Excel'),
         ('MODIFIED_BY_REIMPORT', 'Modified by Re-import'),
+        ('IMPORT_SKIP', 'Skipped by Re-import (protected)'),
         ('APPROVE', 'Approved'),
         ('REJECT', 'Rejected'),
+        ('CONFIRMATION', 'Confirmed by Academic'),
+        ('SUBMIT_REQUEST', 'Approval Request Submitted'),
+        ('WORKLOAD_EDIT', 'Staff Metadata Edited by HOD'),
+        ('PROFILE_EDIT', 'Staff Metadata Edited by School Ops'),
         ('COMMENT', 'Added Comment'),
         ('CONFIG_CHANGE', 'System Config Changed'),
     ]
@@ -513,3 +531,47 @@ class StaffRoleAssignment(models.Model):
 
     def __str__(self):
         return f"{self.staff.staff_number} → {self.role_code} ({self.status})"
+class OTPToken(models.Model):
+    """
+    One-time password tokens for passwordless email login.
+
+    Flow:
+        1. POST /login/request-otp/ → create OTPToken(email, code_hash, expires_at)
+        2. POST /login/verify-otp/  → find token, check hash + expiry + used_at, issue JWT
+
+    Security notes:
+        - code_hash stores SHA-256(code), never the raw 6-digit code.
+        - expires_at = now + 5 minutes; tokens older than this are rejected.
+        - used_at is set on first successful verify; subsequent attempts are rejected
+          even if the token hasn't expired (prevents replay attacks).
+        - Old tokens are not deleted automatically; a periodic cleanup task should
+          purge rows where expires_at < now - 24h.
+    """
+
+    token_id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+
+    # The email address the OTP was sent to. Not a FK to User because the email
+    # must be looked up before we know which User it belongs to.
+    email = models.EmailField()
+
+    # SHA-256 hash of salt:code. Never store the raw code.
+    # Salt is stored separately so verify can recompute the hash.
+    code_hash = models.CharField(max_length=64)
+    # Per-token random salt (hex, 32 chars = 16 bytes). Prevents rainbow table
+    # attacks against the small 6-digit OTP space.
+    salt = models.CharField(max_length=32, default='')
+
+    created_at = models.DateTimeField(auto_now_add=True)
+    expires_at = models.DateTimeField()
+
+    # Set when the token is successfully used. NULL = not yet used.
+    used_at = models.DateTimeField(null=True, blank=True)
+
+    class Meta:
+        db_table = 'otp_tokens'
+        indexes = [
+            models.Index(fields=['email', 'expires_at']),  # look up valid tokens by email
+        ]
+
+    def __str__(self):
+        return f"OTP for {self.email} (expires {self.expires_at})"

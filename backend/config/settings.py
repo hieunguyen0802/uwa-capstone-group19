@@ -11,6 +11,7 @@ https://docs.djangoproject.com/en/5.2/ref/settings/
 """
 
 import os
+from datetime import timedelta
 from pathlib import Path
 
 # Build paths inside the project like this: BASE_DIR / 'subdir'.
@@ -161,7 +162,7 @@ if _cors_origins:
 else:
     CORS_ALLOW_ALL_ORIGINS = DEBUG  # only allow all origins in dev mode
 
-#AUTH_USER_MODEL = 'yourapp.User'
+# AUTH_USER_MODEL = 'yourapp.User'
 
 # DRF: use JWT authentication, but allow public access by default
 # (protected views use @permission_classes([IsAuthenticated]) explicitly)
@@ -175,7 +176,6 @@ REST_FRAMEWORK = {
     },
 }
 
-from datetime import timedelta
 SIMPLE_JWT = {
     'ACCESS_TOKEN_LIFETIME': timedelta(hours=8),
     'REFRESH_TOKEN_LIFETIME': timedelta(days=7),

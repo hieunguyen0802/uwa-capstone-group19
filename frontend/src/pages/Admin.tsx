@@ -22,11 +22,35 @@ import InfoField from "../components/common/InfoField";
 import PaginationControls from "../components/common/PaginationControls";
 import ProfileModal from "../components/common/ProfileModal";
 import SearchButton from "../components/common/SearchButton";
+import { MOCK_DASHBOARD_USER } from "../data/mockDashboardUser";
 import SectionTabs from "../components/common/SectionTabs";
 import SectionTitleBlock from "../components/common/SectionTitleBlock";
-import StaffProfileModal, { type StaffProfileDraft } from "../components/common/StaffProfileModal";
+import StaffProfileModal, {
+  STAFF_PROFILE_NOTES_PLACEHOLDER,
+  type StaffProfileDraft,
+} from "../components/common/StaffProfileModal";
 import StatusPill from "../components/common/StatusPill";
+import { postWorkloadSpreadsheetImport } from "../api/workloadSpreadsheetImport";
+import {
+  WORKLOAD_TEMPLATE_FILENAME,
+  fetchTrimmedWorkloadTemplateBlob,
+} from "../workload/downloadWorkloadTemplate";
+import {
+  applyDuplicateTeachingUnitFlagsToLines,
+  parseWorkloadWorkbookArrayBuffer,
+  type WorkloadImportParseResult,
+} from "../workload/parseWorkloadWorkbook";
+import {
+  HOD_REVIEW_COL,
+  NOTES_COL,
+  TEACHING_HOURS_FACTOR,
+  NEW_STAFF_COL,
+  TARGET_BAND_COL,
+  TARGET_TEACHING_PCT_COL,
+  TEACHING_UNIT_COL,
+} from "../workload/workloadSpreadsheetRules";
 import TemplateImportExportActions from "../components/common/TemplateImportExportActions";
+import ThemedNoticeModal, { SUPERSEDED_RECORD_MESSAGE } from "../components/common/ThemedNoticeModal";
 import WorkHoursBadge from "../components/common/WorkHoursBadge";
 
 type MockRequest = {
@@ -36,7 +60,10 @@ type MockRequest = {
   periodLabel: string;
   name: string;
   unit: string;
-  description: string;
+  /** School Ops / academic workload notes (replaces legacy `description` in UI). */
+  notes?: string;
+  /** Legacy field; still read from older localStorage / drafts. */
+  description?: string;
   requestReason?: string;
   title: string;
   department: string;
@@ -44,11 +71,64 @@ type MockRequest = {
   status: "pending" | "approved" | "rejected";
   hours: number;
   supervisorNote?: string;
+  /** School Ops user shown in DISTRIBUTED BY (approve, reject, distribute, etc.). */
+  operatedBy?: string;
+  /** Target teaching share of total workload (0–100), for validation in the detail modal. */
+  targetTeachingRatio?: number;
+  /** Minimum teaching hours expected in the breakdown (optional). */
+  teachingTargetHours?: number;
+  /** When true (from API), row is read-only and detail is blocked — superseded by a newer version. */
+  cancelled?: boolean;
+  /** Imported from workload template: list shows status as "-" and confirmation as Unconfirmed by default. */
+  importedFromTemplate?: boolean;
+  /** Target contract band from Excel column I. */
+  targetBand?: string;
+  /** Workload template column D — New Staff (true/false). */
+  workloadNewStaff?: boolean;
+  /** Workload template column F — HoD Review (yes/no). */
+  hodReview?: "yes" | "no";
 };
 
-type BreakdownCategory = "Teaching" | "Assigned Roles" | "HDR" | "Service";
-type BreakdownEntry = { name: string; hours: number };
+type BreakdownCategory = "Teaching" | "Assigned Roles" | "HDR" | "Service" | "Research (residual)";
+type BreakdownEntry = {
+  name: string;
+  hours: number;
+  /** If true (e.g. HDR “FT students” row), count is shown but excluded from summed workload hours. */
+  excludeFromWorkloadTotal?: boolean;
+  /** Imported template: same role name + different hours on another row for this staff. */
+  roleHourConflict?: boolean;
+  /** Imported template: same Unit Code / course appears on more than one row for this staff. */
+  teachingDuplicateUnit?: boolean;
+};
 type BreakdownData = Record<BreakdownCategory, BreakdownEntry[]>;
+
+/** HDR tab: imported summary row label (must match merged HDR breakdown). */
+const HDR_TOTAL_ROW_LABEL = "HDR Total";
+
+function workloadBreakdownTotalLabel(tab: BreakdownCategory): string {
+  switch (tab) {
+    case "Teaching":
+      return "Teaching Total";
+    case "HDR":
+      return HDR_TOTAL_ROW_LABEL;
+    case "Service":
+      return "Service Total";
+    case "Assigned Roles":
+      return "Assigned Roles Total";
+    case "Research (residual)":
+      return "Research Total";
+    default:
+      return "Total";
+  }
+}
+
+const ADMIN_WORKLOAD_BREAKDOWN_TABS: BreakdownCategory[] = [
+  "Teaching",
+  "HDR",
+  "Service",
+  "Assigned Roles",
+  "Research (residual)",
+];
 
 const SUPERVISOR_DRAFT_KEY = "academic_to_supervisor_requests_v1";
 const SUPERVISOR_STATE_KEY = "supervisor_requests_state_v1";
@@ -56,6 +136,17 @@ const ACADEMIC_STATUS_SYNC_KEY = "academic_status_sync_v1";
 const ACADEMIC_NOTES_SYNC_KEY = "academic_notes_sync_v1";
 const SUPERVISOR_SYNC_EVENT = "supervisor-status-updated";
 const ACADEMIC_DRAFT_EVENT = "academic-drafts-updated";
+const SEMESTER_EXPECTED_MIN_HOURS = 856;
+const SEMESTER_EXPECTED_MAX_HOURS = 864;
+const WORKLOAD_REPORT_SEMESTER_LABEL = "2025-S1";
+/** Workload search filter: school departments (org chart). */
+const WORKLOAD_SEARCH_DEPARTMENT_OPTIONS = [
+  "Physics",
+  "Mathematics & Statistics",
+  "Computer Science & Software Engineering",
+] as const;
+const BAND_THRESHOLDS_TOOLTIP =
+  "Band thresholds: (Calculated T:R <= 0.20 is Research Focused); (Calculated T:R > 0.20 and <= 0.79 is Balanced Teaching & Research); (Calculated T:R > 0.79 and <= 1.00 is Teaching Focused)";
 
 function submittedTimeById(id: number) {
   const day = ((id - 1) % 28) + 1;
@@ -110,41 +201,82 @@ function mergeDraftsIntoRequests(current: MockRequest[], drafts: MockRequest[]) 
   return [...incoming, ...current];
 }
 
-function breakdownById(id: number): BreakdownData {
-  const patterns: BreakdownData[] = [
-    {
-      Teaching: [
-        { name: "CITS2401", hours: 15 },
-        { name: "CITS2200", hours: 5 },
-      ],
-      "Assigned Roles": [
-        { name: "Program Chair", hours: 20 },
-        { name: "Outreach Chair", hours: 10 },
-      ],
-      HDR: [
-        { name: "Student A", hours: 2 },
-        { name: "Student B", hours: 2 },
-      ],
-      Service: [{ name: "Committee support", hours: 10 }],
-    },
-    {
-      Teaching: [{ name: "CITS3002", hours: 15 }],
-      "Assigned Roles": [{ name: "Industry liaison", hours: 6 }],
-      HDR: [
-        { name: "Student D", hours: 3 },
-        { name: "Student E", hours: 2 },
-      ],
-      Service: [{ name: "Peer review", hours: 4 }],
-    },
-  ];
-  return patterns[id % patterns.length];
+function breakdownById(id: number, totalHours: number): BreakdownData {
+  const safeTotal = Math.max(0, Math.round(totalHours));
+  const teaching1 = Math.max(0, Math.floor(safeTotal * 0.3));
+  const teaching2 = Math.max(0, Math.floor(safeTotal * 0.15));
+  const role1 = Math.max(0, Math.floor(safeTotal * 0.2));
+  const role2 = Math.max(0, Math.floor(safeTotal * 0.1));
+  const hdr1 = Math.max(0, Math.floor(safeTotal * 0.1));
+  const hdr2 = Math.max(0, Math.floor(safeTotal * 0.05));
+  const used = teaching1 + teaching2 + role1 + role2 + hdr1 + hdr2;
+  const service = Math.max(0, safeTotal - used);
+
+  const teachingUnits = [
+    ["CITS2401", "CITS2200"],
+    ["CITS3002", "CITS1401"],
+    ["CITS1001", "CITS2005"],
+  ] as const;
+  const hdrStudents = [
+    ["Student A", "Student B"],
+    ["Student C", "Student D"],
+    ["Student E", "Student F"],
+  ] as const;
+  const [unitA, unitB] = teachingUnits[id % teachingUnits.length];
+  const [studentA, studentB] = hdrStudents[id % hdrStudents.length];
+
+  return {
+    Teaching: [
+      { name: unitA, hours: teaching1 },
+      { name: unitB, hours: teaching2 },
+    ],
+    "Assigned Roles": [
+      { name: "Program Chair", hours: role1 },
+      { name: "Outreach Chair", hours: role2 },
+    ],
+    HDR: [
+      { name: studentA, hours: hdr1 },
+      { name: studentB, hours: hdr2 },
+    ],
+    Service: [{ name: "Committee support", hours: service }],
+    "Research (residual)": [{ name: "Research (residual)", hours: 0 }],
+  };
 }
 
-function extractRequestReason(description: string) {
-  const marker = "Request reason:";
-  const idx = description.indexOf(marker);
-  if (idx === -1) return "";
-  return description.slice(idx + marker.length).trim();
+function workloadHoursForBreakdownRow(row: BreakdownEntry): number {
+  return row.excludeFromWorkloadTotal ? 0 : row.hours;
+}
+
+function sumAdminBreakdownHours(breakdown: BreakdownData): number {
+  return ADMIN_WORKLOAD_BREAKDOWN_TABS.reduce(
+    (sum, tab) => sum + breakdown[tab].reduce((s, row) => s + workloadHoursForBreakdownRow(row), 0),
+    0
+  );
+}
+
+function teachingHoursFromAdminBreakdown(breakdown: BreakdownData): number {
+  return breakdown.Teaching.reduce((s, row) => s + row.hours, 0);
+}
+
+function adminActualTeachingRatioPercent(breakdown: BreakdownData): number {
+  const totalH = sumAdminBreakdownHours(breakdown);
+  if (totalH <= 0) return 0;
+  const teachingH = teachingHoursFromAdminBreakdown(breakdown);
+  return Math.round((teachingH / totalH) * 1000) / 10;
+}
+
+function isWorkloadTeachingGapAbnormal(item: MockRequest, breakdown: BreakdownData): boolean {
+  const actualRatioPct = adminActualTeachingRatioPercent(breakdown);
+  const targetRatio = item.targetTeachingRatio;
+  if (targetRatio != null) {
+    if (actualRatioPct + 0.05 < targetRatio) return true;
+  }
+  const teachingTarget = item.teachingTargetHours;
+  if (teachingTarget != null) {
+    const teachingActual = teachingHoursFromAdminBreakdown(breakdown);
+    if (teachingActual + 0.001 < teachingTarget) return true;
+  }
+  return false;
 }
 
 function cleanDescription(description: string) {
@@ -152,6 +284,178 @@ function cleanDescription(description: string) {
   const idx = description.indexOf(marker);
   if (idx === -1) return description;
   return description.slice(0, idx).trim();
+}
+
+function roundToOneDecimal(value: number): number {
+  return Math.round(value * 10) / 10;
+}
+
+function formatOneDecimal(value: number): string {
+  return roundToOneDecimal(value).toFixed(1);
+}
+
+function displayNameWithoutComma(raw: string): string {
+  return raw.replace(/,/g, " ").replace(/\s+/g, " ").trim();
+}
+
+function normalizeBandLabel(raw?: string | null): string | null {
+  if (!raw) return null;
+  const t = raw.trim().toLowerCase();
+  if (!t) return null;
+  if (t.includes("research focused")) return "Research Focused";
+  if (t.includes("balanced")) return "Balanced Teaching & Research";
+  if (t.includes("teaching focused")) return "Teaching Focused";
+  return raw.trim();
+}
+
+function parseWorkloadTemplateNewStaff(value: unknown): boolean | undefined {
+  if (value === true || value === false) return value;
+  const s = String(value ?? "").trim().toLowerCase();
+  if (s === "true") return true;
+  if (s === "false") return false;
+  return undefined;
+}
+
+function parseWorkloadTemplateHodReview(value: unknown): "yes" | "no" | undefined {
+  const s = String(value ?? "").trim().toLowerCase();
+  if (s === "yes") return "yes";
+  if (s === "no") return "no";
+  return undefined;
+}
+
+function expectedRangeForBand(band?: string | null): string {
+  const n = normalizeBandLabel(band);
+  if (n === "Research Focused") return "<= 20.0%";
+  if (n === "Balanced Teaching & Research") return "> 20.0% and <= 79.0%";
+  if (n === "Teaching Focused") return "> 79.0% and <= 100.0%";
+  return "unknown";
+}
+
+function isPlaceholderNotesText(text: string) {
+  const t = text.trim();
+  if (!t) return true;
+  if (/^lorem ipsum\b/i.test(t)) return true;
+  return false;
+}
+
+function workloadModalNotes(row: Pick<MockRequest, "notes" | "description">) {
+  const n = row.notes?.trim();
+  const fromNotes = n ? n : "";
+  const fromDescription = !fromNotes ? cleanDescription(row.description ?? "") : "";
+  const combined = fromNotes || fromDescription;
+  if (isPlaceholderNotesText(combined)) return "";
+  return combined;
+}
+
+/** Workload detail modal header: reporting period only, e.g. "2026-S1" (no staff id). */
+function workloadDetailReportingPeriodLabel(row: MockRequest): string {
+  const period = row.periodLabel.trim();
+  const yearMatch = period.match(/(\d{4})/);
+  const year = yearMatch ? yearMatch[1] : String(new Date().getFullYear());
+
+  const semFromPeriod = period.match(/-([12])\s*$/);
+  if (semFromPeriod) {
+    return `${year}-${semFromPeriod[1] === "2" ? "S2" : "S1"}`;
+  }
+
+  const sem = row.semesterLabel.toLowerCase();
+  if (sem.includes("sem2") || sem.includes("s2")) {
+    return `${year}-S2`;
+  }
+  return `${year}-S1`;
+}
+
+function expectedHoursRangeForFte(fte: number | null) {
+  const normalizedFte = typeof fte === "number" && Number.isFinite(fte) && fte > 0 ? fte : 1;
+  return {
+    min: SEMESTER_EXPECTED_MIN_HOURS * normalizedFte,
+    max: SEMESTER_EXPECTED_MAX_HOURS * normalizedFte,
+  };
+}
+
+/** Modal badge / employment display — from imported FTE (column G): < 1 → Part-time, otherwise Full-time (= 1). */
+function employmentTypeLabelFromFte(fte: number | null): string {
+  if (typeof fte !== "number" || !Number.isFinite(fte)) return "—";
+  return fte < 1 ? "Part-time" : "Full-time";
+}
+
+/** Template column D — shown when row was imported from workload spreadsheet. */
+function templateNewStaffDisplay(value: boolean | undefined): string {
+  if (value === undefined) return "—";
+  return value ? "Yes" : "No";
+}
+
+/** Template column F — yes/no from spreadsheet. */
+function templateHodReviewDisplay(value: "yes" | "no" | undefined): string {
+  if (value === undefined) return "—";
+  return value === "yes" ? "Yes" : "No";
+}
+
+function importHoursFailStatus(
+  totalHours: number,
+  fte: number | null
+): "pending" | "rejected" {
+  const { min, max } = expectedHoursRangeForFte(fte);
+  if (typeof totalHours !== "number" || !Number.isFinite(totalHours)) return "pending";
+  return totalHours <= min || totalHours > max ? "rejected" : "pending";
+}
+
+function fteForStaffFromParsed(parsed: WorkloadImportParseResult, staffId: string): number | null {
+  for (const sh of parsed.sheets) {
+    const am = sh.anomalyMetricsByStaffId[staffId];
+    if (am?.fte != null && typeof am.fte === "number" && Number.isFinite(am.fte)) return am.fte;
+  }
+  return null;
+}
+
+/** Imported-row “Blocked” parity with workload modal: total hours vs FTE-scaled semester band. */
+function isImportedRowHoursOutOfBand(
+  row: Pick<MockRequest, "hours" | "studentId" | "importedFromTemplate">,
+  anomalyByStaffId: Record<string, { fte: number | null } | undefined>
+): boolean {
+  if (!row.importedFromTemplate) return false;
+  const sid = row.studentId.trim();
+  const { min, max } = expectedHoursRangeForFte(anomalyByStaffId[sid]?.fte ?? null);
+  const h = row.hours;
+  return typeof h === "number" && Number.isFinite(h) && (h <= min || h > max);
+}
+
+/** Mirrors School Ops «Failed» filter: rejected, hours band, teaching/HDR/service/role import conflicts. */
+function rowMatchesWorkloadFailedTab(
+  it: MockRequest,
+  anomalyByStaffId: Record<string, { fte: number | null } | undefined>,
+  roleImportByStaffId: Record<string, { hasAssignedRoleHourConflict?: boolean } | undefined>,
+  teachingLinesByStaffId: Record<string, { duplicateUnitConflict?: boolean }[] | undefined>,
+  hdrImportByStaffId: Record<string, { hasHdrFieldConflict?: boolean } | undefined>,
+  serviceImportByStaffId: Record<string, { hasServicePointsConflict?: boolean } | undefined>
+): boolean {
+  if (it.cancelled) return false;
+  if (it.status === "rejected") return true;
+  const sid = it.studentId.trim();
+  if (it.importedFromTemplate && it.status === "pending") {
+    if (isImportedRowHoursOutOfBand(it, anomalyByStaffId)) return true;
+    if (roleImportByStaffId[sid]?.hasAssignedRoleHourConflict) return true;
+    if ((teachingLinesByStaffId[sid] ?? []).some((line) => line.duplicateUnitConflict)) return true;
+    if (hdrImportByStaffId[sid]?.hasHdrFieldConflict) return true;
+    if (serviceImportByStaffId[sid]?.hasServicePointsConflict) return true;
+  }
+  return false;
+}
+
+/** Last name, first name, or full name (substring or order-independent tokens; commas as spaces). */
+function workloadNameSearchMatches(recordName: string, queryRaw: string): boolean {
+  const q = queryRaw.trim().toLowerCase();
+  if (!q) return true;
+  const norm = recordName
+    .toLowerCase()
+    .replace(/,/g, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+  if (!norm) return false;
+  if (norm.includes(q)) return true;
+  const qTokens = q.split(/\s+/).filter(Boolean);
+  const parts = norm.split(" ").filter(Boolean);
+  return qTokens.every((t) => parts.some((p) => p.includes(t)));
 }
 
 function shortDepartmentName(department: string) {
@@ -172,13 +476,7 @@ function maxValue(values: number[]) {
   return Math.max(...values);
 }
 
-export default function Admin() {
-  type ChatMessage = {
-    sender: "Sam" | "Admin";
-    message: string;
-    time: string;
-    date: string;
-  };
+export default function SchoolofOperations() {
   type AssignRole = "HoD" | "Admin";
   type AssignDepartment =
     | "Physics"
@@ -194,6 +492,8 @@ export default function Admin() {
     title: string;
     currentDepartment: string;
     isActive: boolean;
+    isNewEmployee: boolean;
+    notes: string;
   };
   type RoleAssignment = {
     id: number;
@@ -206,27 +506,13 @@ export default function Admin() {
     status: "active" | "disabled";
   };
 
-  const user = {
-    surname: "Sam",
-    firstName: "Yaka",
-    employeeId: "2345678",
-    title: "Head of School",
-    department: "School of Physics, Mathematics and Computing",
-  };
+  const user = MOCK_DASHBOARD_USER;
 
   const [hasNewMessage, setHasNewMessage] = useState(true);
   const [messagePanelOpen, setMessagePanelOpen] = useState(false);
   const [profileOpen, setProfileOpen] = useState(false);
   const [avatarSrc, setAvatarSrc] = useState<string | null>(null);
   const [chatInput, setChatInput] = useState("");
-  const [chatHistory, setChatHistory] = useState<ChatMessage[]>([
-    { sender: "Sam", message: "I have a question about workload item #11.", time: "09:10", date: "2026-04-22" },
-    { sender: "Admin", message: "Please check the teaching hours again.", time: "09:16", date: "2026-04-22" },
-    { sender: "Sam", message: "Thank you, I will update it.", time: "09:18", date: "2026-04-23" },
-  ]);
-  const [selectedChatDate, setSelectedChatDate] = useState("2026-04-23");
-  const [calendarOpen, setCalendarOpen] = useState(false);
-  const [calendarMonth, setCalendarMonth] = useState("2026-04");
   const [activeSection, setActiveSection] = useState<
     "approval" | "admin" | "visualization" | "export"
   >("approval");
@@ -236,222 +522,10 @@ export default function Admin() {
     { key: "visualization", label: "Visualization" },
     { key: "export", label: "Export Excel" },
   ];
-  const availableChatDates = useMemo(() => new Set(chatHistory.map((entry) => entry.date)), [chatHistory]);
-  const visibleChatHistory = useMemo(
-    () => chatHistory.filter((entry) => entry.date === selectedChatDate),
-    [chatHistory, selectedChatDate]
-  );
   const currentYear = useMemo(() => new Date().getFullYear(), []);
 
   const [loading] = useState(false);
-  const [pending, setPending] = useState<MockRequest[]>(() => {
-    const saved = readSupervisorState();
-    if (saved.length > 0) {
-      const drafts = consumeAcademicDrafts();
-      return mergeDraftsIntoRequests(saved, drafts);
-    }
-
-    // Fake data (plus requests submitted from Academic page via localStorage)
-    const base: MockRequest[] = [
-      {
-        id: 1,
-        studentId: "2345678",
-        semesterLabel: "Sem1",
-        periodLabel: "2025-1",
-        name: "Ann Culhane",
-        unit: "CITS 2206",
-        description:
-          "Lorem ipsum dolor sit amet, consectetur adipiscing elit. Nulla...",
-        title: "Professor",
-        department: "Computer Science",
-        rate: 70,
-        status: "pending",
-        hours: 10,
-      },
-      {
-        id: 2,
-        studentId: "2345679",
-        semesterLabel: "Sem1",
-        periodLabel: "2025-1",
-        name: "Ahmed Adhyyasar",
-        unit: "CITS 1201",
-        description:
-          "Lorem ipsum dolor sit amet, consectetur adipiscing elit. Nulla...",
-        title: "Professor",
-        department: "Computer Science",
-        rate: 70,
-        status: "pending",
-        hours: 20,
-      },
-      {
-        id: 3,
-        studentId: "2345680",
-        semesterLabel: "Sem1",
-        periodLabel: "2025-1",
-        name: "Mary Smith",
-        unit: "CITS 1302",
-        description:
-          "Lorem ipsum dolor sit amet, consectetur adipiscing elit. Nulla...",
-        title: "Professor",
-        department: "Computer Science",
-        rate: 70,
-        status: "rejected",
-        hours: 5,
-      },
-      {
-        id: 4,
-        studentId: "2345681",
-        semesterLabel: "Sem1",
-        periodLabel: "2025-1",
-        name: "John Doe",
-        unit: "CITS 2103",
-        description:
-          "Lorem ipsum dolor sit amet, consectetur adipiscing elit. Nulla...",
-        title: "Professor",
-        department: "Computer Science",
-        rate: 70,
-        status: "approved",
-        hours: 15,
-      },
-      {
-        id: 5,
-        studentId: "2345682",
-        semesterLabel: "Sem1",
-        periodLabel: "2025-1",
-        name: "Lisa Brown",
-        unit: "CITS 2304",
-        description:
-          "Lorem ipsum dolor sit amet, consectetur adipiscing elit. Nulla...",
-        title: "Professor",
-        department: "Computer Science",
-        rate: 70,
-        status: "pending",
-        hours: 8,
-      },
-      {
-        id: 6,
-        studentId: "2345683",
-        semesterLabel: "Sem1",
-        periodLabel: "2025-1",
-        name: "Chris Martin",
-        unit: "CITS 3401",
-        description:
-          "Lorem ipsum dolor sit amet, consectetur adipiscing elit. Nulla...",
-        title: "Professor",
-        department: "Computer Science",
-        rate: 70,
-        status: "pending",
-        hours: 12,
-      },
-      {
-        id: 7,
-        studentId: "2345684",
-        semesterLabel: "Sem1",
-        periodLabel: "2025-1",
-        name: "Emma Wilson",
-        unit: "CITS 3100",
-        description:
-          "Lorem ipsum dolor sit amet, consectetur adipiscing elit. Nulla...",
-        title: "Professor",
-        department: "Computer Science",
-        rate: 70,
-        status: "pending",
-        hours: 6,
-      },
-      {
-        id: 8,
-        studentId: "2345685",
-        semesterLabel: "Sem1",
-        periodLabel: "2025-1",
-        name: "Oliver Stone",
-        unit: "CITS 4202",
-        description:
-          "Lorem ipsum dolor sit amet, consectetur adipiscing elit. Nulla...",
-        title: "Professor",
-        department: "Computer Science",
-        rate: 70,
-        status: "pending",
-        hours: 18,
-      },
-      {
-        id: 9,
-        studentId: "2345686",
-        semesterLabel: "Sem1",
-        periodLabel: "2025-1",
-        name: "Sophia Lee",
-        unit: "CITS 2008",
-        description:
-          "Lorem ipsum dolor sit amet, consectetur adipiscing elit. Nulla...",
-        title: "Professor",
-        department: "Computer Science",
-        rate: 70,
-        status: "pending",
-        hours: 9,
-      },
-      {
-        id: 10,
-        studentId: "2345687",
-        semesterLabel: "Sem1",
-        periodLabel: "2025-1",
-        name: "Daniel Smith",
-        unit: "CITS 2601",
-        description:
-          "Lorem ipsum dolor sit amet, consectetur adipiscing elit. Nulla...",
-        title: "Professor",
-        department: "Computer Science",
-        rate: 70,
-        status: "pending",
-        hours: 11,
-      },
-      {
-        id: 11,
-        studentId: "2345688",
-        semesterLabel: "Sem1",
-        periodLabel: "2025-1",
-        name: "Grace Taylor",
-        unit: "CITS 2803",
-        description:
-          "Lorem ipsum dolor sit amet, consectetur adipiscing elit. Nulla...",
-        title: "Professor",
-        department: "Computer Science",
-        rate: 70,
-        status: "pending",
-        hours: 7,
-      },
-      {
-        id: 12,
-        studentId: "2345689",
-        semesterLabel: "Sem1",
-        periodLabel: "2025-1",
-        name: "Henry Clark",
-        unit: "CITS 1500",
-        description:
-          "Lorem ipsum dolor sit amet, consectetur adipiscing elit. Nulla...",
-        title: "Professor",
-        department: "Computer Science",
-        rate: 70,
-        status: "rejected",
-        hours: 14,
-      },
-      {
-        id: 13,
-        studentId: "2345690",
-        semesterLabel: "Sem1",
-        periodLabel: "2025-1",
-        name: "Ava Robinson",
-        unit: "CITS 4101",
-        description:
-          "Lorem ipsum dolor sit amet, consectetur adipiscing elit. Nulla...",
-        title: "Professor",
-        department: "Computer Science",
-        rate: 70,
-        status: "approved",
-        hours: 8,
-      },
-    ];
-    const drafts = consumeAcademicDrafts();
-    return [...drafts, ...base];
-  });
+  const [pending, setPending] = useState<MockRequest[]>([]);
 
   useEffect(() => {
     function mergeLatestDrafts() {
@@ -499,7 +573,7 @@ export default function Admin() {
   const [submitting, setSubmitting] = useState(false);
 
   const [statusFilter, setStatusFilter] = useState<
-    "all" | "pending" | "approved" | "rejected"
+    "all" | "distributed" | "failed" | "superseded"
   >("all");
 
   const [popup, setPopup] = useState<{
@@ -515,10 +589,10 @@ export default function Admin() {
   });
 
   const [detailsOpen, setDetailsOpen] = useState(false);
+  const [supersededNoticeOpen, setSupersededNoticeOpen] = useState(false);
   const [detailsItem, setDetailsItem] = useState<MockRequest | null>(null);
   const [detailsBreakdown, setDetailsBreakdown] = useState<BreakdownData | null>(null);
   const [detailsTab, setDetailsTab] = useState<BreakdownCategory>("Teaching");
-  const [descriptionExpanded, setDescriptionExpanded] = useState(false);
   const [noteModalOpen, setNoteModalOpen] = useState(false);
   const [noteDraft, setNoteDraft] = useState("");
   const [noteError, setNoteError] = useState("");
@@ -530,17 +604,13 @@ export default function Admin() {
   const [distributeError, setDistributeError] = useState("");
 
   const [searchEmployeeIdInput, setSearchEmployeeIdInput] = useState("");
-  const [searchLastNameInput, setSearchLastNameInput] = useState("");
-  const [searchFirstNameInput, setSearchFirstNameInput] = useState("");
-  const [searchTitleInput, setSearchTitleInput] = useState("");
+  const [searchNameInput, setSearchNameInput] = useState("");
   const [searchDepartmentInput, setSearchDepartmentInput] = useState("");
   const [searchYearInput, setSearchYearInput] = useState("");
   const [searchSemesterInput, setSearchSemesterInput] = useState<"" | "S1" | "S2">("");
   const [searchFilters, setSearchFilters] = useState({
     employeeId: "",
-    lastName: "",
-    firstName: "",
-    title: "",
+    name: "",
     department: "",
     year: "",
     semester: "",
@@ -600,145 +670,399 @@ export default function Admin() {
     "Senior School Coordinator",
   ];
   const availablePermissions = rolePermissionMap[assignRole];
-  const initialAssignablePeople: AssignablePerson[] = [
-    {
-      id: 1,
-      staffId: "50123451",
-      firstName: "Ann",
-      lastName: "Culhane",
-      email: "ann.culhane@uwa.edu.au",
-      title: "Professor",
-      currentDepartment: "Physics",
-      isActive: true,
-    },
-    {
-      id: 2,
-      staffId: "50123462",
-      firstName: "Oliver",
-      lastName: "Stone",
-      email: "oliver.stone@uwa.edu.au",
-      title: "Associate Professor",
-      currentDepartment: "Mathematics & Statistics",
-      isActive: true,
-    },
-    {
-      id: 3,
-      staffId: "50123473",
-      firstName: "Ahmed",
-      lastName: "Adhyyasar",
-      email: "ahmed.adhyyasar@uwa.edu.au",
-      title: "Professor",
-      currentDepartment: "Computer Science & Software Engineering",
-      isActive: true,
-    },
-    {
-      id: 4,
-      staffId: "50123484",
-      firstName: "Lisa",
-      lastName: "Brown",
-      email: "lisa.brown@uwa.edu.au",
-      title: "",
-      currentDepartment: "",
-      isActive: true,
-    },
-    {
-      id: 5,
-      staffId: "50123495",
-      firstName: "Mary",
-      lastName: "Smith",
-      email: "mary.smith@uwa.edu.au",
-      title: "Lecturer",
-      currentDepartment: "Computer Science & Software Engineering",
-      isActive: true,
-    },
-    {
-      id: 6,
-      staffId: "50123506",
-      firstName: "Chris",
-      lastName: "Martin",
-      email: "chris.martin@uwa.edu.au",
-      title: "Senior Lecturer",
-      currentDepartment: "Physics",
-      isActive: true,
-    },
-    {
-      id: 7,
-      staffId: "50123517",
-      firstName: "Tom",
-      lastName: "Lee",
-      email: "tom.lee@uwa.edu.au",
-      title: "Lecturer",
-      currentDepartment: "Mathematics & Statistics",
-      isActive: true,
-    },
-    {
-      id: 8,
-      staffId: "50123528",
-      firstName: "Rachel",
-      lastName: "Green",
-      email: "rachel.green@uwa.edu.au",
-      title: "Professor",
-      currentDepartment: "Physics",
-      isActive: true,
-    },
-    {
-      id: 9,
-      staffId: "50123539",
-      firstName: "David",
-      lastName: "Hall",
-      email: "david.hall@uwa.edu.au",
-      title: "Professor",
-      currentDepartment: "Computer Science & Software Engineering",
-      isActive: true,
-    },
-    {
-      id: 10,
-      staffId: "50123540",
-      firstName: "Emily",
-      lastName: "Wong",
-      email: "emily.wong@uwa.edu.au",
-      title: "Lecturer",
-      currentDepartment: "Physics",
-      isActive: false,
-    },
-    {
-      id: 11,
-      staffId: "50123551",
-      firstName: "Jack",
-      lastName: "Wilson",
-      email: "jack.wilson@uwa.edu.au",
-      title: "Senior Lecturer",
-      currentDepartment: "Mathematics & Statistics",
-      isActive: true,
-    },
-  ];
+  const initialAssignablePeople: AssignablePerson[] = [];
   const [assignablePeople, setAssignablePeople] = useState<AssignablePerson[]>(initialAssignablePeople);
+  const [contactRecipientQuery, setContactRecipientQuery] = useState("");
+  const [contactSelectedPerson, setContactSelectedPerson] = useState<AssignablePerson | null>(null);
   const [importMessage, setImportMessage] = useState("");
   const [staffModalOpen, setStaffModalOpen] = useState(false);
   const [staffDraft, setStaffDraft] = useState<StaffProfileDraft | null>(null);
   const [staffModalError, setStaffModalError] = useState("");
   const fileInputRef = useRef<HTMLInputElement | null>(null);
   const workloadImportInputRef = useRef<HTMLInputElement | null>(null);
+  const selectAllPendingRef = useRef<HTMLInputElement | null>(null);
+  const [workloadTeachingImportLinesByStaffId, setWorkloadTeachingImportLinesByStaffId] = useState<
+    Record<
+      string,
+      { unit: string; hours: number | null; duplicateUnitConflict?: boolean; excludeFromWorkloadTotal?: boolean }[]
+    >
+  >({});
+  const [workloadHdrImportByStaffId, setWorkloadHdrImportByStaffId] = useState<
+    Record<
+      string,
+      {
+        ftStudents: number | null;
+        ptStudents?: number | null;
+        ftHours?: number | null;
+        ptHours?: number | null;
+        totalHrs: number | null;
+        derivedHrs?: number | null;
+        hdrPoints: number | null;
+        hasHdrFieldConflict?: boolean;
+        ftStudentsConflict?: boolean;
+        totalHrsConflict?: boolean;
+        hdrPointsConflict?: boolean;
+        hdrExtraLines?: { name: string; hours: number }[];
+      }
+    >
+  >({});
+  const [workloadServiceImportByStaffId, setWorkloadServiceImportByStaffId] = useState<
+    Record<
+      string,
+      {
+        servicePoints: number | null;
+        hasServicePointsConflict?: boolean;
+        servicePointsConflict?: boolean;
+        serviceExtraLines?: { hours: number }[];
+      }
+    >
+  >({});
+  const [workloadAssignedRoleImportByStaffId, setWorkloadAssignedRoleImportByStaffId] = useState<
+    Record<
+      string,
+      {
+        roles: {
+          name: string;
+          points: number;
+          hours: number;
+          hourConflict?: boolean;
+          excludeFromWorkloadTotal?: boolean;
+        }[];
+        totalPoints: number | null;
+        totalHours: number | null;
+        hasAssignedRoleHourConflict?: boolean;
+      }
+    >
+  >({});
+  const [workloadAnomalyImportByStaffId, setWorkloadAnomalyImportByStaffId] = useState<
+    Record<
+      string,
+      {
+        targetBand: string | null;
+        calculatedBand: string | null;
+        calculatedTeachingRatio: number | null;
+        researchResidualPoints: number | null;
+        totalHoursFromPoints: number | null;
+        fte: number | null;
+      }
+    >
+  >({});
   const selectedYear = Number(searchYearInput) || currentYear;
   const yearOptions = useMemo(
     () => Array.from({ length: 11 }, (_, i) => String(selectedYear - 5 + i)),
     [selectedYear]
   );
 
+  const adminModalBreakdown = useMemo(() => {
+    if (!detailsItem) return null;
+    return detailsBreakdown ?? breakdownById(detailsItem.id, detailsItem.hours);
+  }, [detailsItem, detailsBreakdown]);
+
+  const adminModalBreakdownMerged = useMemo(() => {
+    if (!detailsItem || !adminModalBreakdown) return adminModalBreakdown;
+    const sid = detailsItem.studentId.trim();
+    let next: BreakdownData = adminModalBreakdown;
+
+    const lines = workloadTeachingImportLinesByStaffId[sid];
+    if (lines?.length) {
+      const teachingImported = lines
+        .filter((row) => String(row.unit ?? "").trim())
+        .map((row) => {
+          const hrs =
+            typeof row.hours === "number" && Number.isFinite(row.hours)
+              ? Math.round(row.hours * 1000) / 1000
+              : 0;
+          return {
+            name: String(row.unit).trim(),
+            hours: hrs,
+            teachingDuplicateUnit: row.duplicateUnitConflict,
+            excludeFromWorkloadTotal: row.excludeFromWorkloadTotal,
+          };
+        });
+      if (teachingImported.length) next = { ...next, Teaching: teachingImported };
+    }
+
+    const hdrImported = workloadHdrImportByStaffId[sid];
+    if (
+      hdrImported &&
+      (hdrImported.ftStudents != null ||
+        hdrImported.ptStudents != null ||
+        hdrImported.ftHours != null ||
+        hdrImported.ptHours != null ||
+        hdrImported.totalHrs != null ||
+        hdrImported.derivedHrs != null ||
+        hdrImported.hdrPoints != null ||
+        hdrImported.hasHdrFieldConflict)
+    ) {
+      const ftCount =
+        hdrImported.ftStudents != null && Number.isFinite(hdrImported.ftStudents)
+          ? hdrImported.ftStudents
+          : 0;
+      const ptCount =
+        hdrImported.ptStudents != null && Number.isFinite(hdrImported.ptStudents)
+          ? hdrImported.ptStudents
+          : 0;
+      const ftCountLabel = Number.isInteger(ftCount) ? String(ftCount) : formatOneDecimal(ftCount);
+      const ptCountLabel = Number.isInteger(ptCount) ? String(ptCount) : formatOneDecimal(ptCount);
+      const ftHours =
+        hdrImported.ftHours != null && Number.isFinite(hdrImported.ftHours)
+          ? Math.round(hdrImported.ftHours * 1000) / 1000
+          : 0;
+      const ptHours =
+        hdrImported.ptHours != null && Number.isFinite(hdrImported.ptHours)
+          ? Math.round(hdrImported.ptHours * 1000) / 1000
+          : 0;
+      const hdrTotalHours = Math.round((ftHours + ptHours) * 1000) / 1000;
+
+      const hdrRows: BreakdownEntry[] = [
+        {
+          name: `Full time students (${ftCountLabel})`,
+          hours: ftHours,
+          excludeFromWorkloadTotal: true,
+          roleHourConflict: Boolean(hdrImported.ftStudentsConflict),
+        },
+        {
+          name: `Part time students (${ptCountLabel})`,
+          hours: ptHours,
+          excludeFromWorkloadTotal: true,
+        },
+        {
+          name: HDR_TOTAL_ROW_LABEL,
+          hours: hdrTotalHours,
+          roleHourConflict: Boolean(hdrImported.totalHrsConflict || hdrImported.hdrPointsConflict),
+        },
+      ];
+      hdrImported.hdrExtraLines?.forEach((ex) => {
+        hdrRows.push({
+          name: ex.name,
+          hours: ex.hours,
+          excludeFromWorkloadTotal: true,
+          roleHourConflict: true,
+        });
+      });
+      next = { ...next, HDR: hdrRows };
+    }
+    const serviceImported = workloadServiceImportByStaffId[sid];
+    if (serviceImported && (serviceImported.servicePoints != null || serviceImported.hasServicePointsConflict)) {
+      const canonicalHrs =
+        serviceImported.servicePoints != null && Number.isFinite(serviceImported.servicePoints)
+          ? Math.round(serviceImported.servicePoints * TEACHING_HOURS_FACTOR * 1000) / 1000
+          : 0;
+      const svcRows: BreakdownEntry[] = [
+        {
+          name: "Self-Directed Svc Pts",
+          hours: canonicalHrs,
+          roleHourConflict: Boolean(serviceImported.servicePointsConflict),
+        },
+      ];
+      serviceImported.serviceExtraLines?.forEach((ex) => {
+        svcRows.push({
+          name: "Self-Directed Svc Pts",
+          hours: ex.hours,
+          excludeFromWorkloadTotal: true,
+          roleHourConflict: true,
+        });
+      });
+      next = { ...next, Service: svcRows };
+    }
+    const roleImported = workloadAssignedRoleImportByStaffId[sid];
+    if (roleImported && (roleImported.roles.length > 0 || roleImported.totalHours != null)) {
+      const rows =
+        roleImported.roles.length > 0
+          ? roleImported.roles.map((r) => ({
+              name: r.name,
+              hours: Math.round(r.hours * 1000) / 1000,
+              excludeFromWorkloadTotal: r.excludeFromWorkloadTotal,
+              roleHourConflict: r.hourConflict,
+            }))
+          : [
+              {
+                name: "Assigned Roles Total",
+                hours: Math.round((roleImported.totalHours ?? 0) * 1000) / 1000,
+              },
+            ];
+      next = {
+        ...next,
+        "Assigned Roles": rows,
+      };
+    }
+    const anomalyImported = workloadAnomalyImportByStaffId[sid];
+    if (anomalyImported && anomalyImported.researchResidualPoints != null) {
+      next = {
+        ...next,
+        "Research (residual)": [
+          {
+            name: "Research (residual)",
+            hours: Math.round(anomalyImported.researchResidualPoints * TEACHING_HOURS_FACTOR * 1000) / 1000,
+          },
+        ],
+      };
+    }
+
+    return next;
+  }, [
+    detailsItem,
+    adminModalBreakdown,
+    workloadTeachingImportLinesByStaffId,
+    workloadHdrImportByStaffId,
+    workloadServiceImportByStaffId,
+    workloadAssignedRoleImportByStaffId,
+    workloadAnomalyImportByStaffId,
+  ]);
+
+  const detailsComputedTotalHours = useMemo(() => {
+    const sid = detailsItem?.studentId.trim();
+    const anomalyTotalHours =
+      sid && workloadAnomalyImportByStaffId[sid]?.totalHoursFromPoints != null
+        ? workloadAnomalyImportByStaffId[sid].totalHoursFromPoints
+        : null;
+    if (anomalyTotalHours != null) {
+      return anomalyTotalHours;
+    }
+    if (!adminModalBreakdownMerged) return 0;
+    return ADMIN_WORKLOAD_BREAKDOWN_TABS.reduce(
+      (sum, tab) =>
+        sum +
+        adminModalBreakdownMerged[tab].reduce(
+          (s, row) => s + workloadHoursForBreakdownRow(row),
+          0
+        ),
+      0
+    );
+  }, [adminModalBreakdownMerged, detailsItem, workloadAnomalyImportByStaffId]);
+
+  const detailsExpectedHoursRange = useMemo(() => {
+    const sid = detailsItem?.studentId.trim();
+    const fte = sid ? workloadAnomalyImportByStaffId[sid]?.fte ?? null : null;
+    return expectedHoursRangeForFte(fte);
+  }, [detailsItem, workloadAnomalyImportByStaffId]);
+
+  const adminModalHoursAbnormal = useMemo(() => {
+    if (!adminModalBreakdownMerged) return false;
+    return (
+      detailsComputedTotalHours <= detailsExpectedHoursRange.min ||
+      detailsComputedTotalHours > detailsExpectedHoursRange.max
+    );
+  }, [adminModalBreakdownMerged, detailsComputedTotalHours, detailsExpectedHoursRange]);
+
+  const detailsAnomaly = useMemo(() => {
+    if (!detailsItem) return null;
+    return workloadAnomalyImportByStaffId[detailsItem.studentId.trim()] ?? null;
+  }, [detailsItem, workloadAnomalyImportByStaffId]);
+
+  const actualTeachingRatioPercent = useMemo(() => {
+    if (detailsAnomaly?.calculatedTeachingRatio != null) {
+      return detailsAnomaly.calculatedTeachingRatio * 100;
+    }
+    return adminModalBreakdownMerged ? adminActualTeachingRatioPercent(adminModalBreakdownMerged) : 0;
+  }, [detailsAnomaly, adminModalBreakdownMerged]);
+
+  const actualTeachingRatioDisplay = useMemo(
+    () => `${formatOneDecimal(actualTeachingRatioPercent)}%`,
+    [actualTeachingRatioPercent]
+  );
+
+  const actualTeachingRatioOutOfRange =
+    Number.isFinite(actualTeachingRatioPercent) &&
+    (actualTeachingRatioPercent < 0 || actualTeachingRatioPercent > 100);
+
+  const anomalyHoverText = useMemo(() => {
+    if (!detailsAnomaly || !detailsAnomaly.targetBand || !detailsAnomaly.calculatedBand) return "";
+    const expected = expectedRangeForBand(detailsAnomaly.targetBand);
+    const actual = detailsAnomaly.calculatedTeachingRatio != null
+      ? `${formatOneDecimal(detailsAnomaly.calculatedTeachingRatio * 100)}%`
+      : "N/A";
+    if (normalizeBandLabel(detailsAnomaly.targetBand) === normalizeBandLabel(detailsAnomaly.calculatedBand)) {
+      return "";
+    }
+    return `Calculated T:R is ${actual}, expected range for contract band "${detailsAnomaly.targetBand}" is (${expected}). Calculated band is "${detailsAnomaly.calculatedBand}", which does not match the contract band. After workload is distributed, Academic cannot self-confirm and must submit to HoD for modification review.`;
+  }, [detailsAnomaly]);
+
+  /** T:R out-of-range should be an Error; otherwise keep existing band mismatch warning. */
+  const actualRatioHoverText = useMemo(() => {
+    if (actualTeachingRatioOutOfRange) {
+      return `Error: Calculated T:R is ${actualTeachingRatioDisplay}. Valid range is 0.0% to 100.0%. Please correct the imported workload components and re-import.`;
+    }
+    if (!anomalyHoverText) return "";
+    return `Warning: ${anomalyHoverText}\n${BAND_THRESHOLDS_TOOLTIP}`;
+  }, [actualTeachingRatioOutOfRange, actualTeachingRatioDisplay, anomalyHoverText]);
+
+  const showActualTeachingRatioBandWarning = Boolean(anomalyHoverText);
+
+  const totalHoursTooltipText = useMemo(() => {
+    if (!adminModalHoursAbnormal) return "";
+    return `Error: ${formatOneDecimal(
+      detailsExpectedHoursRange.min
+    )} < expected working time <= ${formatOneDecimal(
+      detailsExpectedHoursRange.max
+    )} working hours each semester.`;
+  }, [adminModalHoursAbnormal, detailsExpectedHoursRange]);
+
+  const totalHoursWorkingDaysSuffix = useMemo(() => {
+    const dayMin = detailsExpectedHoursRange.min / 8;
+    const dayMax = detailsExpectedHoursRange.max / 8;
+    const minText = Number.isInteger(dayMin) ? String(dayMin) : formatOneDecimal(dayMin);
+    const maxText = Number.isInteger(dayMax) ? String(dayMax) : formatOneDecimal(dayMax);
+    return `(>${minText} <=${maxText} working days)`;
+  }, [detailsExpectedHoursRange]);
+
+  const totalHoursDisplay = useMemo(
+    () => `${formatOneDecimal(detailsComputedTotalHours)} ${totalHoursWorkingDaysSuffix}`,
+    [detailsComputedTotalHours, totalHoursWorkingDaysSuffix]
+  );
+
+  useEffect(() => {
+    // User-requested reset: clear current School Operations workload data and import caches.
+    setPending([]);
+    setSelectedIds(new Set());
+    setWorkloadTeachingImportLinesByStaffId({});
+    setWorkloadHdrImportByStaffId({});
+    setWorkloadServiceImportByStaffId({});
+    setWorkloadAssignedRoleImportByStaffId({});
+    setWorkloadAnomalyImportByStaffId({});
+    window.localStorage.removeItem(SUPERVISOR_STATE_KEY);
+    window.localStorage.removeItem(SUPERVISOR_DRAFT_KEY);
+  }, []);
+
+  const contactStaffMatches = useMemo(() => {
+    const q = contactRecipientQuery.trim().toLowerCase();
+    if (!q) return [];
+    return assignablePeople
+      .filter((p) => {
+        const name = `${p.firstName} ${p.lastName}`.toLowerCase();
+        return (
+          name.includes(q) ||
+          p.staffId.toLowerCase().includes(q) ||
+          p.email.toLowerCase().includes(q)
+        );
+      })
+      .slice(0, 8);
+  }, [assignablePeople, contactRecipientQuery]);
+
   const itemsForFilter = useMemo(() => {
-    const byStatus =
-      statusFilter === "all"
-        ? pending
-        : pending.filter((it) => it.status === statusFilter);
+    const byStatus = pending.filter((it) => {
+      if (statusFilter === "all") return !it.cancelled && it.status === "pending";
+      if (statusFilter === "superseded") return Boolean(it.cancelled);
+      if (statusFilter === "failed")
+        return rowMatchesWorkloadFailedTab(
+          it,
+          workloadAnomalyImportByStaffId,
+          workloadAssignedRoleImportByStaffId,
+          workloadTeachingImportLinesByStaffId,
+          workloadHdrImportByStaffId,
+          workloadServiceImportByStaffId
+        );
+      if (statusFilter === "distributed") {
+        return !it.cancelled && it.status === "approved";
+      }
+      return true;
+    });
 
     const hasSearchFilter = Object.values(searchFilters).some((value) => value);
     if (!hasSearchFilter) return byStatus;
 
     return byStatus.filter((it) => {
-      const fullName = it.name.toLowerCase();
-      const nameParts = it.name.trim().toLowerCase().split(/\s+/);
-      const firstName = nameParts[0] || "";
-      const lastName = nameParts[nameParts.length - 1] || "";
+      if (!it.name.trim()) return false;
 
       if (
         searchFilters.employeeId &&
@@ -747,15 +1071,7 @@ export default function Admin() {
         return false;
       }
 
-      if (searchFilters.firstName && !firstName.includes(searchFilters.firstName)) {
-        return false;
-      }
-
-      if (searchFilters.lastName && !lastName.includes(searchFilters.lastName)) {
-        return false;
-      }
-
-      if (searchFilters.title && !it.title.toLowerCase().includes(searchFilters.title)) {
+      if (searchFilters.name && !workloadNameSearchMatches(it.name, searchFilters.name)) {
         return false;
       }
 
@@ -788,9 +1104,146 @@ export default function Admin() {
         }
       }
 
-      return fullName.length > 0;
+      return true;
     });
-  }, [pending, statusFilter, searchFilters]);
+  }, [
+    pending,
+    statusFilter,
+    searchFilters,
+    workloadAnomalyImportByStaffId,
+    workloadAssignedRoleImportByStaffId,
+    workloadTeachingImportLinesByStaffId,
+    workloadHdrImportByStaffId,
+    workloadServiceImportByStaffId,
+  ]);
+
+  const pendingFilteredIds = useMemo(() => itemsForFilter.map((it) => it.id), [itemsForFilter]);
+  const allPendingFilteredSelected =
+    pendingFilteredIds.length > 0 && pendingFilteredIds.every((id) => selectedIds.has(id));
+  const somePendingFilteredSelected = pendingFilteredIds.some((id) => selectedIds.has(id));
+
+  useEffect(() => {
+    const el = selectAllPendingRef.current;
+    if (!el) return;
+    if (statusFilter !== "all") {
+      el.indeterminate = false;
+      return;
+    }
+    el.indeterminate = somePendingFilteredSelected && !allPendingFilteredSelected;
+  }, [statusFilter, somePendingFilteredSelected, allPendingFilteredSelected]);
+
+  const workloadPendingFilterCount = useMemo(
+    () => pending.filter((it) => !it.cancelled && it.status === "pending").length,
+    [pending]
+  );
+
+  const workloadDistributedFilterCount = useMemo(
+    () => pending.filter((it) => !it.cancelled && it.status === "approved").length,
+    [pending]
+  );
+
+  /** Same predicate as Status Filter «Failed» (rejected, hours band, duplicate teaching unit, or role hour conflict). */
+  const workloadFailedFilterCount = useMemo(
+    () =>
+      pending.filter((it) =>
+        rowMatchesWorkloadFailedTab(
+          it,
+          workloadAnomalyImportByStaffId,
+          workloadAssignedRoleImportByStaffId,
+          workloadTeachingImportLinesByStaffId,
+          workloadHdrImportByStaffId,
+          workloadServiceImportByStaffId
+        )
+      ).length,
+    [
+      pending,
+      workloadAnomalyImportByStaffId,
+      workloadAssignedRoleImportByStaffId,
+      workloadTeachingImportLinesByStaffId,
+      workloadHdrImportByStaffId,
+      workloadServiceImportByStaffId,
+    ]
+  );
+
+  function handleExportFailedWorkload() {
+    if (statusFilter !== "failed") return;
+    if (itemsForFilter.length === 0) {
+      setPopup({
+        open: true,
+        title: "Nothing to export",
+        message: "There are no failed tasks under the current Failed filter.",
+        status: "rejected",
+      });
+      return;
+    }
+    const rows = itemsForFilter.map((it) => ({
+      Name: it.name,
+      "Staff Number": it.studentId,
+      Status: it.status,
+      "Hours out of band (import)": it.importedFromTemplate
+        ? isImportedRowHoursOutOfBand(it, workloadAnomalyImportByStaffId)
+          ? "Yes"
+          : "No"
+        : "—",
+      "Role hours conflict (import)": it.importedFromTemplate
+        ? workloadAssignedRoleImportByStaffId[it.studentId.trim()]?.hasAssignedRoleHourConflict
+          ? "Yes"
+          : "No"
+        : "—",
+      "Duplicate teaching unit (import)": it.importedFromTemplate
+        ? (workloadTeachingImportLinesByStaffId[it.studentId.trim()] ?? []).some((l) => l.duplicateUnitConflict)
+          ? "Yes"
+          : "No"
+        : "—",
+      "HDR / Service field conflict (import)": it.importedFromTemplate
+        ? workloadHdrImportByStaffId[it.studentId.trim()]?.hasHdrFieldConflict ||
+          workloadServiceImportByStaffId[it.studentId.trim()]?.hasServicePointsConflict
+          ? "Yes"
+          : "No"
+        : "—",
+      "Total work hours": roundToOneDecimal(it.hours),
+      Unit: it.unit,
+      Department: it.department,
+      Notes: (it.notes ?? "").trim(),
+    }));
+    const ws = XLSX.utils.json_to_sheet(rows);
+    const wb = XLSX.utils.book_new();
+    XLSX.utils.book_append_sheet(wb, ws, "Failed");
+    const stamp = new Date().toISOString().slice(0, 10);
+    XLSX.writeFile(wb, `failed_workload_tasks_${stamp}.xlsx`);
+  }
+
+  function handleExportWorkloadForCurrentFilter() {
+    if (statusFilter !== "distributed" && statusFilter !== "superseded") return;
+    if (itemsForFilter.length === 0) {
+      setPopup({
+        open: true,
+        title: "Nothing to export",
+        message: `There are no rows under the current ${statusFilter} filter.`,
+        status: "rejected",
+      });
+      return;
+    }
+    const rows = itemsForFilter.map((it) => ({
+      Name: it.name,
+      "Staff Number": it.studentId,
+      Status: it.status,
+      Confirmation: it.status === "approved" ? "Confirmed" : "Unconfirmed",
+      "Total work hours": roundToOneDecimal(it.hours),
+      "Distributed time": submittedTimeById(it.id),
+      "Distributed by": it.operatedBy?.trim() ? it.operatedBy : "—",
+      Unit: it.unit,
+      Department: it.department,
+      Notes: (it.notes ?? "").trim(),
+    }));
+    const ws = XLSX.utils.json_to_sheet(rows);
+    const wb = XLSX.utils.book_new();
+    const sheetName = statusFilter === "distributed" ? "Distributed" : "Superseded";
+    XLSX.utils.book_append_sheet(wb, ws, sheetName);
+    const stamp = new Date().toISOString().slice(0, 10);
+    XLSX.writeFile(wb, `workload_${statusFilter}_${stamp}.xlsx`);
+  }
+
   const adminSearchResults = useMemo(() => {
     const hasFilter = Object.values(adminSearchFilters).some((value) => value);
     if (!hasFilter) return assignablePeople;
@@ -1062,15 +1515,8 @@ export default function Admin() {
     });
   }
 
-  function statusLabel(status: string) {
-    if (status === "pending") return "Pending";
-    if (status === "approved") return "Approved";
-    if (status === "rejected") return "Rejected";
-    return status;
-  }
-
   const canSubmit =
-    statusFilter === "pending" && selectedIds.size > 0 && !submitting;
+    statusFilter === "all" && selectedIds.size > 0 && !submitting;
 
   async function handleDecision(kind: "approve" | "reject") {
     if (!canSubmit) return;
@@ -1080,9 +1526,10 @@ export default function Admin() {
     const nextStatus: MockRequest["status"] =
       kind === "approve" ? "approved" : "rejected";
     const count = selectedIds.size;
+    const operatorLabel = `${user.firstName} ${user.surname}`.trim();
     const next: MockRequest[] = pending.map((it) => {
       if (!selectedIds.has(it.id)) return it;
-      return { ...it, status: nextStatus };
+      return { ...it, status: nextStatus, operatedBy: operatorLabel || "—" };
     });
 
     // Small delay to feel like a real request
@@ -1109,10 +1556,16 @@ export default function Admin() {
     try {
       const nextStatus: MockRequest["status"] =
         kind === "approve" ? "approved" : "rejected";
+      const operatorLabel = `${user.firstName} ${user.surname}`.trim();
       setPending((prev) =>
         prev.map((it) =>
           it.id === id
-            ? { ...it, status: nextStatus, supervisorNote: note.trim() }
+            ? {
+                ...it,
+                status: nextStatus,
+                supervisorNote: note.trim(),
+                operatedBy: operatorLabel || "—",
+              }
             : it
         )
       );
@@ -1164,9 +1617,7 @@ export default function Admin() {
   function handleSearch() {
     setSearchFilters({
       employeeId: searchEmployeeIdInput.trim().toLowerCase(),
-      lastName: searchLastNameInput.trim().toLowerCase(),
-      firstName: searchFirstNameInput.trim().toLowerCase(),
-      title: searchTitleInput.trim().toLowerCase(),
+      name: searchNameInput.trim().toLowerCase(),
       department: searchDepartmentInput.trim().toLowerCase(),
       year: searchYearInput.trim().toLowerCase(),
       semester: searchSemesterInput.trim().toLowerCase(),
@@ -1196,11 +1647,67 @@ export default function Admin() {
       setDistributeError("Please enter a valid year.");
       return;
     }
+    const operatorLabel = `${user.firstName} ${user.surname}`.trim() || "—";
+    setPending((prev) => {
+      const selected = prev.filter((it) => selectedIds.has(it.id) && !it.cancelled && it.status === "pending");
+      const approvedSelectedIds = new Set<number>();
+      const failedSelectedIds = new Set<number>();
+
+      selected.forEach((it) => {
+        if (isImportedRowHoursOutOfBand(it, workloadAnomalyImportByStaffId)) failedSelectedIds.add(it.id);
+        else if (
+          it.importedFromTemplate &&
+          workloadAssignedRoleImportByStaffId[it.studentId.trim()]?.hasAssignedRoleHourConflict
+        ) {
+          failedSelectedIds.add(it.id);
+        } else if (
+          it.importedFromTemplate &&
+          (workloadTeachingImportLinesByStaffId[it.studentId.trim()] ?? []).some((l) => l.duplicateUnitConflict)
+        ) {
+          failedSelectedIds.add(it.id);
+        } else if (
+          it.importedFromTemplate &&
+          workloadHdrImportByStaffId[it.studentId.trim()]?.hasHdrFieldConflict
+        ) {
+          failedSelectedIds.add(it.id);
+        } else if (
+          it.importedFromTemplate &&
+          workloadServiceImportByStaffId[it.studentId.trim()]?.hasServicePointsConflict
+        ) {
+          failedSelectedIds.add(it.id);
+        } else approvedSelectedIds.add(it.id);
+      });
+
+      return prev.map((it) => {
+        if (selectedIds.has(it.id) && !it.cancelled && it.status === "pending") {
+          const nextStatus: MockRequest["status"] = failedSelectedIds.has(it.id) ? "rejected" : "approved";
+          return {
+            ...it,
+            status: nextStatus,
+            semesterLabel: distributeSemesterInput === "S2" ? "Sem2" : "Sem1",
+            periodLabel: `${parsedYear}-${distributeSemesterInput === "S2" ? "2" : "1"}`,
+            operatedBy: operatorLabel,
+          };
+        }
+        // New distributed version supersedes previous active distributed row of the same staff.
+        if (
+          !it.cancelled &&
+          it.status === "approved" &&
+          approvedSelectedIds.size > 0 &&
+          selected.some((s) => approvedSelectedIds.has(s.id) && s.studentId.trim() === it.studentId.trim() && s.id !== it.id)
+        ) {
+          return { ...it, cancelled: true };
+        }
+        return it;
+      });
+    });
+    setSelectedIds(new Set());
+    setStatusFilter("distributed");
     setDistributeModalOpen(false);
     setPopup({
       open: true,
       title: "Workload Distributed",
-      message: `Workload distributed for ${parsedYear} ${distributeSemesterInput}.`,
+      message: `Selected pending workloads were processed for ${parsedYear} ${distributeSemesterInput}.`,
       status: "approved",
     });
   }
@@ -1243,6 +1750,8 @@ export default function Admin() {
       title: person.title,
       department: person.currentDepartment,
       isActive: person.isActive ? "Active" : "Inactive",
+      isNewEmployee: person.isNewEmployee,
+      notes: person.notes,
     });
     setStaffModalError("");
     setStaffModalOpen(true);
@@ -1293,6 +1802,8 @@ export default function Admin() {
       title: staffDraft.title.trim(),
       currentDepartment: staffDraft.department.trim(),
       isActive: staffDraft.isActive === "Active",
+      isNewEmployee: staffDraft.isNewEmployee,
+      notes: staffDraft.notes.trim(),
     };
 
     setAssignablePeople((prev) => prev.map((person) => (person.id === updatedPerson.id ? updatedPerson : person)));
@@ -1302,7 +1813,6 @@ export default function Admin() {
         setAssignDepartment(updatedPerson.currentDepartment as AssignDepartment);
       }
     }
-    setImportMessage(`Updated staff profile for ${updatedPerson.firstName} ${updatedPerson.lastName}.`);
     closeStaffModal();
   }
 
@@ -1318,6 +1828,8 @@ export default function Admin() {
       { header: "title", key: "title", width: 18 },
       { header: "department", key: "department", width: 40 },
       { header: "active_status", key: "active_status", width: 16 },
+      { header: "is_new_employee", key: "is_new_employee", width: 18 },
+      { header: "notes", key: "notes", width: 52 },
     ];
 
     const headerRow = worksheet.getRow(1);
@@ -1344,6 +1856,8 @@ export default function Admin() {
       title: "Lecturer",
       department: "Physics",
       active_status: "Active",
+      is_new_employee: "false",
+      notes: "",
     });
 
     // Apply data validation to a practical import range.
@@ -1394,10 +1908,18 @@ export default function Admin() {
       worksheet.getCell(`G${row}`).dataValidation = {
         type: "list",
         allowBlank: false,
-        formulae: ['"Yes,No"'],
+        formulae: ['"Active,Inactive"'],
         showErrorMessage: true,
         errorTitle: "Invalid Active Status",
         error: "Active Status must be Active or Inactive.",
+      };
+      worksheet.getCell(`H${row}`).dataValidation = {
+        type: "list",
+        allowBlank: true,
+        formulae: ['"true,false"'],
+        showErrorMessage: true,
+        errorTitle: "Invalid is_new_employee",
+        error: "Use true or false — leave blank for false.",
       };
     }
 
@@ -1419,27 +1941,36 @@ export default function Admin() {
     fileInputRef.current?.click();
   }
 
-  function handleDownloadWorkloadTemplate() {
-    const sheet = XLSX.utils.json_to_sheet([
-      {
-        employee_id: "",
-        name: "",
-        description: "",
-        total_work_hours: "",
-        status: "",
-      },
-    ]);
-    const workbook = XLSX.utils.book_new();
-    XLSX.utils.book_append_sheet(workbook, sheet, "workload_import_template");
-    XLSX.writeFile(workbook, "Workload_Template.xlsx");
+  async function handleDownloadWorkloadTemplate() {
+    try {
+      const prefix = process.env.PUBLIC_URL ?? "";
+      const blob = await fetchTrimmedWorkloadTemplateBlob(prefix);
+      const url = URL.createObjectURL(blob);
+      const link = document.createElement("a");
+      link.href = url;
+      link.download = WORKLOAD_TEMPLATE_FILENAME;
+      document.body.appendChild(link);
+      link.click();
+      document.body.removeChild(link);
+      URL.revokeObjectURL(url);
+    } catch (e) {
+      const msg = e instanceof Error ? e.message : "Could not build workload template download.";
+      setPopup({
+        open: true,
+        title: "Template download failed",
+        message: msg,
+        status: "rejected",
+      });
+    }
   }
 
   function handleOpenWorkloadImport() {
     workloadImportInputRef.current?.click();
   }
 
-  function handleImportWorkload(event: ChangeEvent<HTMLInputElement>) {
+  async function handleImportWorkload(event: ChangeEvent<HTMLInputElement>) {
     const file = event.target.files?.[0];
+    event.target.value = "";
     if (!file) return;
     const isXlsx =
       file.name.toLowerCase().endsWith(".xlsx") ||
@@ -1451,16 +1982,254 @@ export default function Admin() {
         message: "Please upload an .xlsx file.",
         status: "rejected",
       });
-      event.target.value = "";
       return;
     }
-    setPopup({
-      open: true,
-      title: "Import Received",
-      message: `${file.name} uploaded successfully.`,
-      status: "approved",
-    });
-    event.target.value = "";
+    try {
+      const buf = await file.arrayBuffer();
+      const parsed = parseWorkloadWorkbookArrayBuffer({ fileName: file.name, buf });
+      await postWorkloadSpreadsheetImport(parsed);
+      setWorkloadTeachingImportLinesByStaffId((prev) => {
+        const next = { ...prev };
+        for (const sh of parsed.sheets) {
+          for (const [rawStaffId, lines] of Object.entries(sh.teachingLinesByStaffId)) {
+            const key = rawStaffId.startsWith("__row:") ? rawStaffId : rawStaffId.trim();
+            const merged = [...(next[key] ?? []), ...lines];
+            next[key] = applyDuplicateTeachingUnitFlagsToLines(merged);
+          }
+        }
+        return next;
+      });
+      setWorkloadHdrImportByStaffId((prev) => {
+        const next = { ...prev };
+        for (const sh of parsed.sheets) {
+          for (const [rawId, hdr] of Object.entries(sh.hdrMetricsByStaffId)) {
+            const key = rawId.startsWith("__row:") ? rawId : rawId.trim();
+            if (key in next) continue;
+            if (
+              hdr.ftStudents != null ||
+              hdr.ptStudents != null ||
+              hdr.ftHours != null ||
+              hdr.ptHours != null ||
+              hdr.totalHrs != null ||
+              hdr.derivedHrs != null ||
+              hdr.hdrPoints != null ||
+              hdr.hasHdrFieldConflict
+            ) {
+              next[key] = hdr;
+            }
+          }
+        }
+        return next;
+      });
+      setWorkloadServiceImportByStaffId((prev) => {
+        const next = { ...prev };
+        for (const sh of parsed.sheets) {
+          for (const [rawId, svc] of Object.entries(sh.serviceMetricsByStaffId)) {
+            const key = rawId.startsWith("__row:") ? rawId : rawId.trim();
+            if (key in next) continue;
+            if (svc.servicePoints != null || svc.hasServicePointsConflict) next[key] = svc;
+          }
+        }
+        return next;
+      });
+      setWorkloadAssignedRoleImportByStaffId((prev) => {
+        const next = { ...prev };
+        for (const sh of parsed.sheets) {
+          for (const [rawId, roleMetrics] of Object.entries(sh.roleMetricsByStaffId)) {
+            const key = rawId.startsWith("__row:") ? rawId : rawId.trim();
+            if (key in next) continue;
+            if (
+              roleMetrics.roles.length > 0 ||
+              roleMetrics.totalPoints != null ||
+              roleMetrics.totalHours != null ||
+              roleMetrics.hasAssignedRoleHourConflict
+            ) {
+              next[key] = roleMetrics;
+            }
+          }
+        }
+        return next;
+      });
+      setWorkloadAnomalyImportByStaffId((prev) => {
+        const next = { ...prev };
+        for (const sh of parsed.sheets) {
+          for (const [rawId, anomaly] of Object.entries(sh.anomalyMetricsByStaffId)) {
+            const key = rawId.startsWith("__row:") ? rawId : rawId.trim();
+            if (!key || key.startsWith("__row:")) continue;
+            next[key] = {
+              targetBand: anomaly.targetBand ?? null,
+              calculatedBand: anomaly.calculatedBand ?? null,
+              calculatedTeachingRatio: anomaly.calculatedTeachingRatio ?? null,
+              researchResidualPoints: anomaly.researchResidualPoints ?? null,
+              totalHoursFromPoints: anomaly.totalHoursFromPoints ?? null,
+              fte: anomaly.fte ?? null,
+            };
+          }
+        }
+        return next;
+      });
+      setPending((prev) => {
+        const byStaffId = new Map<string, MockRequest>();
+        for (const row of prev) {
+          byStaffId.set(row.studentId.trim(), row);
+        }
+
+        const importRowsByStaff = new Map<
+          string,
+          {
+            name: string;
+            unit: string;
+            targetTeachingRatio?: number;
+            totalHours: number;
+            targetBand?: string;
+            notesFromTemplate: string;
+            workloadNewStaff?: boolean;
+            hodReview?: "yes" | "no";
+          }
+        >();
+        let nextId = prev.reduce((maxId, row) => Math.max(maxId, row.id), 0) + 1;
+        for (const sheet of parsed.sheets) {
+          for (const row of sheet.rows) {
+            const staffIdRaw = row.computed.staffIdGuess ?? row.cellsByColumn.C ?? row.cellsByColumn.A ?? "";
+            const staffId = String(staffIdRaw ?? "").trim();
+            if (!staffId || staffId.startsWith("__row:")) continue;
+            if (importRowsByStaff.has(staffId)) continue;
+
+            const nameRaw = row.cellsByColumn.B ?? row.cellsByColumn.A ?? "";
+            const name = displayNameWithoutComma(String(nameRaw ?? "").trim()) || `Staff ${staffId}`;
+            const teachingHours = sheet.teachingHoursSumByStaffId[staffId] ?? 0;
+            const hdrM = sheet.hdrMetricsByStaffId[staffId];
+            const hdrPoints = hdrM?.hdrPoints ?? 0;
+            const hdrHoursFromDerived =
+              hdrM?.derivedHrs != null && Number.isFinite(hdrM.derivedHrs) ? hdrM.derivedHrs : null;
+            const hdrHoursFromComponents =
+              (hdrM?.ftHours != null && Number.isFinite(hdrM.ftHours) ? hdrM.ftHours : 0) +
+              (hdrM?.ptHours != null && Number.isFinite(hdrM.ptHours) ? hdrM.ptHours : 0);
+            const hdrHours =
+              hdrHoursFromDerived ??
+              (hdrHoursFromComponents > 0 ? hdrHoursFromComponents : null) ??
+              (typeof hdrPoints === "number" && Number.isFinite(hdrPoints)
+                ? hdrPoints * TEACHING_HOURS_FACTOR
+                : 0);
+            const serviceHours = (sheet.serviceMetricsByStaffId[staffId]?.servicePoints ?? 0) * TEACHING_HOURS_FACTOR;
+            const roleHours = sheet.roleMetricsByStaffId[staffId]?.totalHours ?? 0;
+            const modelHours = sheet.anomalyMetricsByStaffId[staffId]?.totalHoursFromPoints;
+            const totalHours = Math.round(
+              (typeof modelHours === "number" && Number.isFinite(modelHours)
+                ? modelHours
+                : teachingHours + hdrHours + serviceHours + roleHours) * 1000
+            ) / 1000;
+            const ratioRaw = row.cellsByColumn[TARGET_TEACHING_PCT_COL];
+            const parsedRatio = Number.parseFloat(String(ratioRaw ?? "").trim());
+            const targetTeachingRatio = Number.isFinite(parsedRatio) ? parsedRatio : undefined;
+            const targetBand =
+              normalizeBandLabel(String(row.cellsByColumn[TARGET_BAND_COL] ?? "").trim()) ?? undefined;
+            const notesFromTemplate = String(row.cellsByColumn[NOTES_COL] ?? "").trim();
+            const workloadNewStaff = parseWorkloadTemplateNewStaff(row.cellsByColumn[NEW_STAFF_COL]);
+            const hodReview = parseWorkloadTemplateHodReview(row.cellsByColumn[HOD_REVIEW_COL]);
+
+            importRowsByStaff.set(staffId, {
+              name,
+              unit: String(row.cellsByColumn[TEACHING_UNIT_COL] ?? "").trim(),
+              targetTeachingRatio,
+              targetBand,
+              totalHours,
+              notesFromTemplate,
+              workloadNewStaff,
+              hodReview,
+            });
+          }
+        }
+
+        importRowsByStaff.forEach((imported, staffId) => {
+          const fteVal = fteForStaffFromParsed(parsed, staffId);
+          const roleHourConflict = parsed.sheets.some(
+            (sh) => sh.roleMetricsByStaffId[staffId]?.hasAssignedRoleHourConflict === true
+          );
+          const teachingDupUnit = parsed.sheets.some((sh) =>
+            (sh.teachingLinesByStaffId[staffId] ?? []).some((line) => line.duplicateUnitConflict)
+          );
+          const hdrFieldConflict = parsed.sheets.some(
+            (sh) => sh.hdrMetricsByStaffId[staffId]?.hasHdrFieldConflict === true
+          );
+          const servicePointsConflict = parsed.sheets.some(
+            (sh) => sh.serviceMetricsByStaffId[staffId]?.hasServicePointsConflict === true
+          );
+          const hoursRejected = importHoursFailStatus(imported.totalHours, fteVal) === "rejected";
+          const importStatus =
+            teachingDupUnit ||
+            roleHourConflict ||
+            hoursRejected ||
+            hdrFieldConflict ||
+            servicePointsConflict
+              ? "rejected"
+              : "pending";
+          const existing = byStaffId.get(staffId);
+          if (existing) {
+            byStaffId.set(staffId, {
+              ...existing,
+              name: imported.name || existing.name,
+              unit: imported.unit || existing.unit,
+              hours: imported.totalHours,
+              targetTeachingRatio: imported.targetTeachingRatio,
+              targetBand: imported.targetBand,
+              notes: imported.notesFromTemplate || existing.notes || "",
+              workloadNewStaff: imported.workloadNewStaff ?? existing.workloadNewStaff,
+              hodReview: imported.hodReview ?? existing.hodReview,
+              status: importStatus,
+              importedFromTemplate: true,
+            });
+          } else {
+            byStaffId.set(staffId, {
+              id: nextId++,
+              studentId: staffId,
+              semesterLabel: "Sem1",
+              periodLabel: `${new Date().getFullYear()}-1`,
+              name: imported.name,
+              unit: imported.unit,
+              notes: imported.notesFromTemplate,
+              title: "",
+              department: "",
+              rate: 0,
+              status: importStatus,
+              hours: imported.totalHours,
+              operatedBy: "—",
+              targetTeachingRatio: imported.targetTeachingRatio,
+              targetBand: imported.targetBand,
+              workloadNewStaff: imported.workloadNewStaff,
+              hodReview: imported.hodReview,
+              importedFromTemplate: true,
+            });
+          }
+        });
+        return Array.from(byStaffId.values());
+      });
+      const rowCount = parsed.sheets.reduce((n, sh) => n + sh.rows.length, 0);
+      setStatusFilter("all");
+      setSelectedIds(new Set());
+      setPage(1);
+      setDetailsOpen(false);
+      setDetailsItem(null);
+      setPopup({
+        open: true,
+        title: "Import complete",
+        message: `${file.name}: ${rowCount} row(s) parsed; teaching/HDR/service/assigned-role rows apply where Staff Number matches.`,
+        status: "approved",
+      });
+    } catch (e) {
+      const msg =
+        e instanceof Error
+          ? e.message
+          : typeof e === "string"
+            ? e
+            : "Could not read this workbook.";
+      setPopup({
+        open: true,
+        title: "Import Failed",
+        message: msg,
+        status: "rejected",
+      });
+    }
   }
 
   function parseActiveStatus(value: string) {
@@ -1468,6 +2237,13 @@ export default function Admin() {
     if (normalized === "active" || normalized === "yes" || normalized === "true") return true;
     if (normalized === "inactive" || normalized === "no" || normalized === "false") return false;
     return null;
+  }
+
+  function parseIsNewEmployee(value: unknown): boolean {
+    const raw = String(value ?? "").trim().toLowerCase();
+    if (!raw) return false;
+    if (raw === "false" || raw === "no" || raw === "n" || raw === "0") return false;
+    return raw === "true" || raw === "yes" || raw === "y" || raw === "1";
   }
 
   function handleImportTemplate(event: ChangeEvent<HTMLInputElement>) {
@@ -1504,6 +2280,8 @@ export default function Admin() {
           const department = String(row.department ?? "").trim();
           const isActiveRaw = String(row.active_status ?? row.is_active ?? "").trim();
           const isActive = parseActiveStatus(isActiveRaw);
+          const isNewEmployee = parseIsNewEmployee(row.is_new_employee ?? row.new_employee);
+          const notes = String(row.notes ?? "").trim();
           const rowNumber = i + 2;
 
           if (!/^\d{8}$/.test(staffId)) {
@@ -1540,12 +2318,14 @@ export default function Admin() {
             title,
             currentDepartment: department,
             isActive,
+            isNewEmployee,
+            notes,
           });
         }
 
         setAssignablePeople(parsed);
         setSelectedPerson(null);
-        setImportMessage(`Imported ${parsed.length} staff records from Staff_Template.xlsx.`);
+        setImportMessage("");
       } catch {
         setImportMessage("Import failed: please upload a valid .xlsx template file.");
       }
@@ -1605,10 +2385,13 @@ export default function Admin() {
   }
 
   function openDetails(item: MockRequest) {
+    if (item.cancelled) {
+      setSupersededNoticeOpen(true);
+      return;
+    }
     setDetailsItem(item);
-    setDetailsBreakdown(breakdownById(item.id));
+    setDetailsBreakdown(breakdownById(item.id, item.hours));
     setDetailsOpen(true);
-    setDescriptionExpanded(false);
   }
 
   function closeDetails() {
@@ -1652,22 +2435,18 @@ export default function Admin() {
   function openMessagePanel() {
     setMessagePanelOpen(true);
     setHasNewMessage(false);
+    setContactRecipientQuery("");
+    setContactSelectedPerson(assignablePeople[0] ?? null);
   }
 
   function handleSendMessage() {
     const trimmed = chatInput.trim();
-    if (!trimmed) return;
-    const now = new Date();
-    const hh = String(now.getHours()).padStart(2, "0");
-    const mm = String(now.getMinutes()).padStart(2, "0");
-    const today = now.toISOString().slice(0, 10);
-    setChatHistory((prev) => [
-      ...prev,
-      { sender: "Sam", message: trimmed, time: `${hh}:${mm}`, date: today },
-    ]);
-    setSelectedChatDate(today);
-    setCalendarMonth(today.slice(0, 7));
+    if (!trimmed || !contactSelectedPerson) return;
     setChatInput("");
+  }
+
+  function formatContactStaffRecipientLine(person: AssignablePerson) {
+    return `${person.firstName} ${person.lastName} · ${person.staffId} · ${person.currentDepartment || "—"}`;
   }
 
   function handleAvatarUpload(event: ChangeEvent<HTMLInputElement>) {
@@ -1682,19 +2461,11 @@ export default function Admin() {
     event.target.value = "";
   }
 
-  function changeCalendarMonth(offset: number) {
-    const [yearStr, monthStr] = calendarMonth.split("-");
-    const date = new Date(Number(yearStr), Number(monthStr) - 1 + offset, 1);
-    setCalendarMonth(
-      `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, "0")}`
-    );
-  }
-
   return (
     <div className="min-h-screen bg-[#f3f4f6] font-serif">
       <div className="mx-auto max-w-7xl px-3 pb-10 pt-8">
         <DashboardHeader
-          title="Admin Dashboard"
+          title="School Operations Dashboard"
           hasNewMessage={hasNewMessage}
           onMessageClick={openMessagePanel}
           onAvatarClick={() => setProfileOpen(true)}
@@ -1703,141 +2474,99 @@ export default function Admin() {
 
         {messagePanelOpen && (
           <div
-            className="fixed inset-0 z-[70] flex items-center justify-center bg-black/30 p-4"
+            className="fixed inset-0 z-[70] flex items-center justify-center bg-black/30 p-4 font-sans"
             onClick={() => setMessagePanelOpen(false)}
           >
             <div
-              className="w-full max-w-3xl rounded-2xl border border-slate-200 bg-slate-50 p-6 shadow-xl"
+              className="w-full max-w-lg rounded-xl border border-slate-200 bg-[#f8f9fb] p-6 shadow-xl"
               onClick={(e) => e.stopPropagation()}
             >
-              <div className="mb-4 flex items-center justify-between">
-                <div className="text-3xl font-semibold text-slate-800">Contact Admin</div>
+              <div className="mb-6 flex items-start justify-between">
+                <h2 className="text-lg font-semibold tracking-tight text-slate-900">Contact Staff</h2>
                 <button
                   type="button"
                   aria-label="Close"
-                  className="rounded p-1 text-slate-500 hover:bg-slate-200"
+                  className="rounded p-1 text-lg leading-none text-slate-500 hover:bg-slate-200/80"
                   onClick={() => setMessagePanelOpen(false)}
                 >
-                  ✕
+                  ×
                 </button>
               </div>
 
-              <div className="mb-4 rounded-lg border border-slate-200 bg-white p-4">
-                <div className="mb-3 flex items-center gap-3">
-                  <div className="text-sm font-semibold text-slate-700">Chat Record Date</div>
-                  <div className="relative">
-                    <button
-                      type="button"
-                      onClick={() => setCalendarOpen((v) => !v)}
-                      className="inline-flex items-center gap-2 rounded border border-slate-300 bg-white px-3 py-1 text-sm text-slate-800"
-                    >
-                      {selectedChatDate}
-                      <span aria-hidden="true">📅</span>
-                    </button>
-                    {calendarOpen && (
-                      <div className="absolute z-20 mt-2 w-72 rounded-lg border border-slate-200 bg-white p-3 shadow-lg">
-                        <div className="mb-2 flex items-center justify-between">
+              <div className="space-y-5">
+                <div>
+                  <div className="mb-1.5 text-sm font-medium text-slate-800">Recipient</div>
+                  <input
+                    type="search"
+                    value={contactRecipientQuery}
+                    onChange={(e) => setContactRecipientQuery(e.target.value)}
+                    placeholder="Search staff by name / staff ID / email"
+                    className="w-full rounded-lg border border-slate-300 bg-white px-3 py-2.5 text-sm text-slate-800 placeholder:text-slate-400 outline-none focus:border-[#2f4d9c]"
+                  />
+                  {contactStaffMatches.length > 0 && (
+                    <ul className="mt-1 max-h-40 overflow-y-auto rounded-lg border border-slate-200 bg-white py-1 shadow-sm">
+                      {contactStaffMatches.map((p) => (
+                        <li key={p.id}>
                           <button
                             type="button"
-                            onClick={() => changeCalendarMonth(-1)}
-                            className="rounded px-2 py-1 text-sm hover:bg-slate-100"
+                            className="w-full px-3 py-2 text-left text-sm text-slate-700 hover:bg-slate-50"
+                            onClick={() => {
+                              setContactSelectedPerson(p);
+                              setContactRecipientQuery("");
+                            }}
                           >
-                            ‹
+                            {formatContactStaffRecipientLine(p)}
                           </button>
-                          <div className="text-sm font-semibold text-slate-700">{calendarMonth}</div>
-                          <button
-                            type="button"
-                            onClick={() => changeCalendarMonth(1)}
-                            className="rounded px-2 py-1 text-sm hover:bg-slate-100"
-                          >
-                            ›
-                          </button>
-                        </div>
+                        </li>
+                      ))}
+                    </ul>
+                  )}
+                </div>
 
-                        <div className="mb-1 grid grid-cols-7 gap-1 text-center text-xs font-semibold text-slate-500">
-                          {["Su", "Mo", "Tu", "We", "Th", "Fr", "Sa"].map((d) => (
-                            <div key={d}>{d}</div>
-                          ))}
-                        </div>
-
-                        <div className="grid grid-cols-7 gap-1">
-                          {(() => {
-                            const [yearStr, monthStr] = calendarMonth.split("-");
-                            const year = Number(yearStr);
-                            const month = Number(monthStr) - 1;
-                            const firstDay = new Date(year, month, 1).getDay();
-                            const totalDays = new Date(year, month + 1, 0).getDate();
-                            const cells = [];
-
-                            for (let i = 0; i < firstDay; i += 1) {
-                              cells.push(<div key={`empty-${i}`} />);
-                            }
-
-                            for (let day = 1; day <= totalDays; day += 1) {
-                              const dateKey = `${year}-${String(month + 1).padStart(2, "0")}-${String(day).padStart(
-                                2,
-                                "0"
-                              )}`;
-                              const selectable = availableChatDates.has(dateKey);
-                              const isSelected = selectedChatDate === dateKey;
-
-                              cells.push(
-                                <button
-                                  key={dateKey}
-                                  type="button"
-                                  disabled={!selectable}
-                                  onClick={() => {
-                                    setSelectedChatDate(dateKey);
-                                    setCalendarOpen(false);
-                                  }}
-                                  className={`h-8 rounded text-xs ${
-                                    !selectable
-                                      ? "cursor-not-allowed bg-slate-100 text-slate-300"
-                                      : isSelected
-                                        ? "bg-[#2f4d9c] text-white"
-                                        : "text-slate-700 hover:bg-slate-100"
-                                  }`}
-                                >
-                                  {day}
-                                </button>
-                              );
-                            }
-
-                            return cells;
-                          })()}
-                        </div>
-                      </div>
+                <div>
+                  <div className="mb-1.5 text-sm font-medium text-slate-800">Selected recipient</div>
+                  <div className="rounded-lg border border-slate-300 bg-white px-3 py-2.5 text-sm text-slate-700">
+                    {contactSelectedPerson ? (
+                      formatContactStaffRecipientLine(contactSelectedPerson)
+                    ) : (
+                      <span className="text-slate-400">Select a staff member from the search results.</span>
                     )}
                   </div>
                 </div>
-                <div className="max-h-72 space-y-2 overflow-y-auto pr-1 font-mono text-[15px] leading-6 text-slate-800">
-                  {visibleChatHistory.length > 0 ? (
-                    visibleChatHistory.map((entry, idx) => (
-                      <div key={idx}>
-                        <span className="text-slate-500">[{entry.time}]</span>{" "}
-                        <span className="font-semibold">{entry.sender}:</span> {entry.message}
-                      </div>
-                    ))
-                  ) : (
-                    <div className="text-sm text-slate-500">No chat records for this date.</div>
-                  )}
-                </div>
-              </div>
 
-              <div className="flex items-end gap-3">
-                <textarea
-                  value={chatInput}
-                  onChange={(e) => setChatInput(e.target.value)}
-                  placeholder="Write your message..."
-                  className="h-16 flex-1 resize-none rounded-lg border border-slate-300 bg-white px-3 py-2 text-base text-slate-800 outline-none focus:border-[#2f4d9c]"
-                />
-                <button
-                  type="button"
-                  onClick={handleSendMessage}
-                  className="rounded-lg bg-[#2f4d9c] px-5 py-2 text-sm font-semibold text-white hover:bg-[#264183]"
-                >
-                  Send
-                </button>
+                {contactSelectedPerson?.isNewEmployee ? (
+                  <div>
+                    <div className="mb-1.5 text-sm font-medium text-slate-800">Notes</div>
+                    <textarea
+                      readOnly
+                      value={STAFF_PROFILE_NOTES_PLACEHOLDER}
+                      rows={3}
+                      className="w-full resize-none rounded-lg border border-slate-300 bg-slate-50 px-3 py-2.5 text-sm leading-relaxed text-slate-600 outline-none"
+                    />
+                  </div>
+                ) : null}
+
+                <div>
+                  <div className="mb-1.5 text-sm font-medium text-slate-800">Message</div>
+                  <textarea
+                    value={chatInput}
+                    onChange={(e) => setChatInput(e.target.value)}
+                    placeholder="Write your message..."
+                    rows={4}
+                    className="w-full resize-none rounded-lg border border-slate-300 bg-white px-3 py-2.5 text-sm text-slate-800 placeholder:text-slate-400 outline-none focus:border-[#2f4d9c]"
+                  />
+                </div>
+
+                <div className="flex justify-center pt-1">
+                  <button
+                    type="button"
+                    onClick={handleSendMessage}
+                    disabled={!contactSelectedPerson || !chatInput.trim()}
+                    className="rounded-lg bg-[#2f4d9c] px-6 py-2.5 text-sm font-semibold text-white hover:bg-[#264183] disabled:cursor-not-allowed disabled:opacity-50"
+                  >
+                    Send
+                  </button>
+                </div>
               </div>
             </div>
           </div>
@@ -1849,10 +2578,6 @@ export default function Admin() {
           avatarSrc={avatarSrc}
           onAvatarUpload={handleAvatarUpload}
           user={user}
-          departmentLabel="School"
-          titleLabel="Role"
-          titleBeforeDepartment
-          departmentFullWidth
         />
 
         <div className="mt-6 rounded-md bg-white p-4 shadow-sm">
@@ -1918,22 +2643,14 @@ export default function Admin() {
               )}
 
               <div className="mt-4 rounded-md bg-[#f4f7ff] p-4">
-                <div className="grid grid-cols-3 gap-6">
+                <div className="grid grid-cols-1 gap-6 md:grid-cols-[minmax(0,1.6fr)_minmax(0,0.8fr)_minmax(0,1.2fr)]">
                   <div className="flex flex-col gap-1">
-                    <div className="w-fit rounded bg-[#2f4d9c] px-3 py-1 text-xs font-bold text-white">First name</div>
+                    <div className="w-fit rounded bg-[#2f4d9c] px-3 py-1 text-xs font-bold text-white">Name</div>
                     <input
-                      value={searchFirstNameInput}
-                      onChange={(e) => setSearchFirstNameInput(e.target.value)}
+                      value={searchNameInput}
+                      onChange={(e) => setSearchNameInput(e.target.value)}
                       onKeyDown={handleSearchKeyDown}
-                      className="rounded border border-slate-300 px-3 py-2 text-sm"
-                    />
-                  </div>
-                  <div className="flex flex-col gap-1">
-                    <div className="w-fit rounded bg-[#2f4d9c] px-3 py-1 text-xs font-bold text-white">Last name</div>
-                    <input
-                      value={searchLastNameInput}
-                      onChange={(e) => setSearchLastNameInput(e.target.value)}
-                      onKeyDown={handleSearchKeyDown}
+                      placeholder="Last name, first name, or full name"
                       className="rounded border border-slate-300 px-3 py-2 text-sm"
                     />
                   </div>
@@ -1947,62 +2664,62 @@ export default function Admin() {
                     />
                   </div>
                   <div className="flex flex-col gap-1">
-                    <div className="w-fit rounded bg-[#2f4d9c] px-3 py-1 text-xs font-bold text-white">Title</div>
-                    <input
-                      value={searchTitleInput}
-                      onChange={(e) => setSearchTitleInput(e.target.value)}
-                      onKeyDown={handleSearchKeyDown}
-                      className="rounded border border-slate-300 px-3 py-2 text-sm"
-                    />
-                  </div>
-                  <div className="flex flex-col gap-1">
-                    <div className="w-fit rounded bg-[#2f4d9c] px-3 py-1 text-xs font-bold text-white">
-                      Department / School
-                    </div>
-                    <input
+                    <div className="w-fit rounded bg-[#2f4d9c] px-3 py-1 text-xs font-bold text-white">Department</div>
+                    <select
                       value={searchDepartmentInput}
                       onChange={(e) => setSearchDepartmentInput(e.target.value)}
                       onKeyDown={handleSearchKeyDown}
                       className="rounded border border-slate-300 px-3 py-2 text-sm"
-                    />
+                    >
+                      <option value="">All departments</option>
+                      {WORKLOAD_SEARCH_DEPARTMENT_OPTIONS.map((dept) => (
+                        <option key={dept} value={dept}>
+                          {dept}
+                        </option>
+                      ))}
+                    </select>
                   </div>
+                </div>
+                <div className="mt-4 grid grid-cols-1 items-end gap-6 md:grid-cols-[1fr_auto_1fr]">
                   <div className="flex flex-col gap-1">
                     <div className="w-fit rounded bg-[#2f4d9c] px-3 py-1 text-xs font-bold text-white">Year & Semester</div>
-                    <div className="flex items-center gap-2">
-                      <select
+                    <div className="flex w-full min-w-0 items-center gap-2">
+                      <input
+                        type="text"
+                        inputMode="numeric"
+                        list="workload-year-options"
                         value={searchYearInput}
                         onChange={(e) => setSearchYearInput(e.target.value)}
                         onKeyDown={handleSearchKeyDown}
-                        onWheel={handleYearWheel}
-                        className="w-full rounded border border-slate-300 px-2 py-2 text-sm"
-                      >
-                        <option value="">Year</option>
+                        className="min-w-0 flex-1 rounded border border-slate-300 px-2 py-2 text-sm"
+                        placeholder="Year"
+                      />
+                      <datalist id="workload-year-options">
                         {yearOptions.map((year) => (
-                          <option key={year} value={year}>
-                            {year}
-                          </option>
+                          <option key={year} value={year} />
                         ))}
-                      </select>
+                      </datalist>
                       <select
                         value={searchSemesterInput}
                         onChange={(e) => setSearchSemesterInput(e.target.value as "" | "S1" | "S2")}
                         onKeyDown={handleSearchKeyDown}
-                        className="w-full rounded border border-slate-300 px-2 py-2 text-sm"
+                        className="min-w-0 flex-1 rounded border border-slate-300 px-2 py-2 text-sm"
                       >
-                        <option value="">Semester</option>
+                        <option value="">All semesters</option>
                         <option value="S1">S1</option>
                         <option value="S2">S2</option>
                       </select>
                     </div>
                   </div>
-                </div>
-                <div className="mt-4 flex justify-center">
-                  <SearchButton onClick={handleSearch} />
+                  <div className="flex justify-center md:justify-self-center">
+                    <SearchButton onClick={handleSearch} />
+                  </div>
+                  <span className="hidden md:block" aria-hidden />
                 </div>
               </div>
 
               <div className="mt-6 flex items-center justify-between gap-3">
-                <div className="text-lg font-semibold text-slate-700">Workload Report Sem 1 - 2025</div>
+                <div className="text-lg font-semibold text-slate-700">{`Workload Report ${WORKLOAD_REPORT_SEMESTER_LABEL}`}</div>
                 <div className="flex items-center gap-3">
                   <button
                     type="button"
@@ -2028,6 +2745,81 @@ export default function Admin() {
                 </div>
               </div>
               <div className="mt-6 rounded-md bg-[#f4f7ff] p-4">
+                <div className="mb-4 flex w-full min-w-0 items-center gap-3">
+                  <div className="flex min-w-0 flex-1 flex-wrap items-center gap-5">
+                    <div className="text-base font-semibold text-[#2f4d9c]">Status Filter:</div>
+                    <div className="flex flex-wrap items-center justify-start gap-4">
+                      <button
+                        type="button"
+                        onClick={() => {
+                          setStatusFilter("all");
+                          setSelectedIds(new Set());
+                          setPage(1);
+                          setDetailsOpen(false);
+                          setDetailsItem(null);
+                        }}
+                        className={`rounded-md border px-5 py-2 text-base font-semibold ${
+                          statusFilter === "all"
+                            ? "border-[#2f4d9c] bg-[#2f4d9c] text-white"
+                            : "border-[#2f4d9c] bg-white text-[#2f4d9c]"
+                        }`}
+                      >
+                        Pending Distribution ({workloadPendingFilterCount})
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => {
+                          setStatusFilter("distributed");
+                          setSelectedIds(new Set());
+                          setPage(1);
+                          setDetailsOpen(false);
+                          setDetailsItem(null);
+                        }}
+                        className={`rounded-md border px-5 py-2 text-base font-semibold ${
+                          statusFilter === "distributed"
+                            ? "border-[#16a34a] bg-[#16a34a] text-white"
+                            : "border-[#2f4d9c] bg-white text-[#2f4d9c]"
+                        }`}
+                      >
+                        Distributed ({workloadDistributedFilterCount})
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => {
+                          setStatusFilter("failed");
+                          setSelectedIds(new Set());
+                          setPage(1);
+                          setDetailsOpen(false);
+                          setDetailsItem(null);
+                        }}
+                        className={`rounded-md border px-5 py-2 text-base font-semibold ${
+                          statusFilter === "failed"
+                            ? "border-[#dc2626] bg-[#dc2626] text-white"
+                            : "border-[#2f4d9c] bg-white text-[#2f4d9c]"
+                        }`}
+                      >
+                        Failed ({workloadFailedFilterCount})
+                      </button>
+                    </div>
+                  </div>
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setStatusFilter("superseded");
+                      setSelectedIds(new Set());
+                      setPage(1);
+                      setDetailsOpen(false);
+                      setDetailsItem(null);
+                    }}
+                    className={`shrink-0 rounded-md border px-5 py-2 text-base font-semibold ${
+                      statusFilter === "superseded"
+                        ? "border-[#2f4d9c] bg-[#2f4d9c] text-white"
+                        : "border-[#2f4d9c] bg-white text-[#2f4d9c] hover:bg-[#eef2ff]"
+                    }`}
+                  >
+                    View history
+                  </button>
+                </div>
                 <div className="max-h-[460px] overflow-x-auto overflow-y-auto pr-1">
                   <table className="min-w-full border-separate border-spacing-y-0">
                     <thead>
@@ -2035,11 +2827,11 @@ export default function Admin() {
                         <th className="w-10 px-2 py-2"></th>
                         <th className="w-14 px-2 py-2">#</th>
                         <th className="px-3 py-2">NAME</th>
-                        <th className="px-3 py-2">DESCRIPTION</th>
                         <th className="px-3 py-2 text-center">STATUS</th>
                         <th className="px-3 py-2 text-center whitespace-nowrap">TOTAL WORK HOURS</th>
                         <th className="px-3 py-2">CONFIRMATION</th>
-                        <th className="px-3 py-2 text-right whitespace-nowrap">PUSHED TIME</th>
+                        <th className="px-3 py-2 text-right whitespace-nowrap">DISTRIBUTED TIME</th>
+                        <th className="px-3 py-2 text-right whitespace-nowrap">DISTRIBUTED BY</th>
                       </tr>
                     </thead>
                     <tbody className="divide-y divide-slate-200 bg-white">
@@ -2053,24 +2845,29 @@ export default function Admin() {
                       {!loading && pageItems.length === 0 && (
                         <tr>
                           <td colSpan={8} className="px-3 py-6 text-center text-sm text-slate-500">
-                            {statusFilter === "pending" ? "No pending requests" : "No items found"}
+                            {statusFilter === "all" ? "No pending items" : "No items found"}
                           </td>
                         </tr>
                       )}
                       {!loading &&
                         pageItems.map((item, idx) => {
                           const isSelected = selectedIds.has(item.id);
+                          const rowCancelled = Boolean(item.cancelled);
                           const rowIndex = (page - 1) * pageSize + idx + 1;
                           return (
                             <tr
                               key={item.id}
-                              className={`cursor-pointer text-sm hover:bg-slate-50 ${
-                                isSelected ? "border-l-4 border-[#2f4d9c] bg-[#e9f2ff]" : ""
+                              className={`text-sm ${
+                                rowCancelled
+                                  ? "cursor-not-allowed bg-slate-100 text-slate-400 opacity-80"
+                                  : `cursor-pointer hover:bg-slate-50 ${
+                                      isSelected ? "border-l-4 border-[#2f4d9c] bg-[#e9f2ff]" : ""
+                                    }`
                               }`}
                               onClick={() => openDetails(item)}
                             >
                               <td className="px-2 py-3">
-                                {statusFilter === "pending" ? (
+                                {statusFilter === "all" ? (
                                   <input
                                     type="checkbox"
                                     checked={isSelected}
@@ -2093,18 +2890,21 @@ export default function Admin() {
                                 {rowIndex}
                               </td>
                               <td className="px-3 py-3 font-medium text-slate-700">
-                                <div>{item.name}</div>
+                                <div>{displayNameWithoutComma(item.name)}</div>
                                 <div className="text-xs text-slate-400">{item.studentId}</div>
                               </td>
-                              <td className="px-3 py-3 text-slate-600">{item.description}</td>
                               <td className="px-3 py-3 text-center">
-                                <StatusPill status={item.status} variant="supervisor" />
+                                {item.importedFromTemplate ? (
+                                  <span className="text-sm font-semibold text-slate-500">-</span>
+                                ) : (
+                                  <StatusPill status={item.status} variant="supervisor" />
+                                )}
                               </td>
                               <td className="px-3 py-3 text-center">
-                                <WorkHoursBadge hours={item.hours} />
+                                <WorkHoursBadge hours={roundToOneDecimal(item.hours)} />
                               </td>
                               <td className="px-3 py-3">
-                                {item.status === "approved" ? (
+                                {!item.importedFromTemplate && item.status === "approved" ? (
                                   <span className="inline-flex items-center gap-2 text-xs font-semibold text-[#15803d]">
                                     <span className="inline-flex h-4 w-4 items-center justify-center rounded-full border border-[#15803d] bg-[#15803d] text-[10px] text-white">
                                       ✓
@@ -2123,6 +2923,9 @@ export default function Admin() {
                               <td className="px-3 py-3 text-right tabular-nums font-sans font-semibold text-slate-800">
                                 {submittedTimeById(item.id)}
                               </td>
+                              <td className="px-3 py-3 text-right text-sm text-slate-700">
+                                {item.operatedBy?.trim() ? item.operatedBy : "—"}
+                              </td>
                             </tr>
                           );
                         })}
@@ -2137,14 +2940,70 @@ export default function Admin() {
                   disablePrev={page <= 1 || submitting}
                   disableNext={page >= totalPages || submitting}
                 />
-                <div className="mt-3 flex justify-end">
-                  <button
-                    type="button"
-                    onClick={openDistributeModal}
-                    className="rounded bg-[#2f4d9c] px-4 py-2 text-sm font-semibold text-white hover:bg-[#264183]"
-                  >
-                    Distribute Workload
-                  </button>
+                <div className="mt-3 flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
+                  {statusFilter === "failed" ? (
+                    <p className="max-w-xl text-sm font-bold leading-relaxed text-[#dc2626]">
+                      Export failed records for academics to review and fix, then import again.
+                    </p>
+                  ) : (
+                    <span className="hidden sm:block" aria-hidden />
+                  )}
+                  <div className="flex shrink-0 justify-end">
+                    {statusFilter === "failed" ? (
+                      <button
+                        type="button"
+                        onClick={handleExportFailedWorkload}
+                        disabled={submitting || itemsForFilter.length === 0}
+                        className="rounded bg-[#2f4d9c] px-4 py-2 text-sm font-semibold text-white hover:bg-[#264183] disabled:cursor-not-allowed disabled:bg-slate-400"
+                      >
+                        Export failed tasks
+                      </button>
+                    ) : statusFilter === "distributed" || statusFilter === "superseded" ? (
+                      <button
+                        type="button"
+                        onClick={handleExportWorkloadForCurrentFilter}
+                        disabled={submitting || itemsForFilter.length === 0}
+                        className="rounded bg-[#2f4d9c] px-4 py-2 text-sm font-semibold text-white hover:bg-[#264183] disabled:cursor-not-allowed disabled:bg-slate-400"
+                      >
+                        Export Workload
+                      </button>
+                    ) : (
+                      <div className="flex flex-col items-end gap-2">
+                        <label className="flex cursor-pointer select-none items-center gap-2 text-sm font-semibold text-slate-700">
+                          <input
+                            ref={selectAllPendingRef}
+                            type="checkbox"
+                            className="h-4 w-4 accent-[#2f4d9c]"
+                            checked={allPendingFilteredSelected}
+                            disabled={pendingFilteredIds.length === 0 || submitting}
+                            onChange={() => {
+                              if (allPendingFilteredSelected) {
+                                setSelectedIds((prev) => {
+                                  const next = new Set(prev);
+                                  pendingFilteredIds.forEach((id) => next.delete(id));
+                                  return next;
+                                });
+                              } else {
+                                setSelectedIds((prev) => {
+                                  const next = new Set(prev);
+                                  pendingFilteredIds.forEach((id) => next.add(id));
+                                  return next;
+                                });
+                              }
+                            }}
+                          />
+                          <span>Select all pending</span>
+                        </label>
+                        <button
+                          type="button"
+                          onClick={openDistributeModal}
+                          className="rounded bg-[#2f4d9c] px-4 py-2 text-sm font-semibold text-white hover:bg-[#264183]"
+                        >
+                          Distribute Workload
+                        </button>
+                      </div>
+                    )}
+                  </div>
                 </div>
               </div>
 
@@ -2160,11 +3019,9 @@ export default function Admin() {
                     <div className="rounded-sm border border-black">
                       <div className="flex items-center justify-between gap-4 border-b border-black/30 bg-white px-5 py-3">
                         <div className="rounded-sm bg-[#2f4d9c] px-4 py-2 text-sm font-bold text-white tabular-nums font-sans">
-                          {detailsItem.studentId}-{detailsItem.semesterLabel}
-                          {detailsItem.periodLabel}
+                          {workloadDetailReportingPeriodLabel(detailsItem)}
                         </div>
                         <div className="flex items-center gap-3 text-sm font-semibold text-slate-800">
-                          <span className="text-base">{statusLabel(detailsItem.status)}</span>
                           <button
                             type="button"
                             onClick={closeDetails}
@@ -2176,28 +3033,72 @@ export default function Admin() {
                       </div>
 
                       <div className="space-y-4 px-5 py-4">
-                        <div className="grid grid-cols-2 gap-4">
-                          <InfoField label="Name" value={detailsItem.name} />
-                          <InfoField label="Employee ID" value={detailsItem.studentId} />
+                        <div className="grid grid-cols-1 gap-4 sm:grid-cols-2">
+                          <InfoField label="Name" value={displayNameWithoutComma(detailsItem.name)} />
+                          <InfoField label="Staff ID" value={detailsItem.studentId} />
+                        </div>
+                        <div className="grid grid-cols-1 gap-4 sm:grid-cols-2">
                           <InfoField
-                            label="Total Work Hours"
-                            value={String(
-                              detailsBreakdown
-                                ? (["Teaching", "Assigned Roles", "HDR", "Service"] as BreakdownCategory[]).reduce(
-                                    (tabSum, tab) => tabSum + detailsBreakdown[tab].reduce((sum, row) => sum + row.hours, 0),
-                                    0
-                                  )
-                                : detailsItem.hours
-                            )}
-                            className="tabular-nums font-sans"
+                            label="Target teaching ratio"
+                            value={
+                              detailsItem.targetTeachingRatio != null
+                                ? `${formatOneDecimal(detailsItem.targetTeachingRatio)}%`
+                                : "—"
+                            }
                           />
-                          <InfoField label="Status" value={statusLabel(detailsItem.status)} />
+                          <InfoField
+                            label="Actual teaching ratio"
+                            value={actualTeachingRatioDisplay}
+                            className="tabular-nums font-sans"
+                            inputClassName={
+                              actualTeachingRatioOutOfRange
+                                ? "border-red-500 ring-1 ring-red-300 bg-red-50/60 text-red-900"
+                                : showActualTeachingRatioBandWarning
+                                  ? "border-yellow-500 ring-1 ring-yellow-300 bg-yellow-50/60 text-amber-900"
+                                  : ""
+                            }
+                            tooltipText={actualRatioHoverText}
+                            tooltipClassName={
+                              actualTeachingRatioOutOfRange
+                                ? "border-red-300 bg-red-50 text-red-900"
+                                : "border-yellow-300 bg-yellow-50 text-amber-900"
+                            }
+                          />
+                          <InfoField
+                            label="Total work hours"
+                            value={totalHoursDisplay}
+                            className="tabular-nums font-sans"
+                            inputClassName={
+                              adminModalHoursAbnormal
+                                ? "border-red-500 ring-1 ring-red-300 bg-red-50/40 text-red-900 text-xs sm:text-sm"
+                                : "text-xs sm:text-sm"
+                            }
+                            tooltipText={totalHoursTooltipText}
+                          />
+                          <InfoField
+                            label="Employment type"
+                            value={employmentTypeLabelFromFte(detailsAnomaly?.fte ?? null)}
+                            className="font-sans"
+                            inputClassName="text-slate-800"
+                          />
+                          <InfoField
+                            label="New Staff"
+                            value={templateNewStaffDisplay(detailsItem.workloadNewStaff)}
+                            className="font-sans"
+                            inputClassName="text-slate-800"
+                          />
+                          <InfoField
+                            label="HoD Review"
+                            value={templateHodReviewDisplay(detailsItem.hodReview)}
+                            className="font-sans"
+                            inputClassName="text-slate-800"
+                          />
                         </div>
                         <div>
                           <div className="text-xs font-semibold uppercase text-slate-500">Workload Breakdown</div>
                           <div className="mt-1 overflow-hidden rounded border border-slate-300">
                             <div className="flex flex-wrap gap-2 border-b border-slate-200 bg-slate-50 px-3 py-2">
-                              {(["Teaching", "Assigned Roles", "HDR", "Service"] as BreakdownCategory[]).map((tab) => (
+                              {ADMIN_WORKLOAD_BREAKDOWN_TABS.map((tab) => (
                                 <button
                                   key={tab}
                                   type="button"
@@ -2220,46 +3121,70 @@ export default function Admin() {
                                 </tr>
                               </thead>
                               <tbody className="divide-y divide-slate-200 bg-white text-sm text-slate-700">
-                                {(detailsBreakdown?.[detailsTab] ?? breakdownById(detailsItem.id)[detailsTab]).map((row, idx) => (
-                                  <tr key={`${detailsItem.id}-${detailsTab}-${idx}`}>
-                                    <td className="px-3 py-2">{row.name}</td>
-                                    <td className="px-3 py-2 text-right tabular-nums font-sans">{row.hours}</td>
+                                {(adminModalBreakdownMerged?.[detailsTab] ?? []).map((row, idx) => {
+                                  const isHdrSummaryRow =
+                                    detailsTab === "HDR" && row.name === HDR_TOTAL_ROW_LABEL;
+                                  const conflictHighlightRow = Boolean(
+                                    row.roleHourConflict || row.teachingDuplicateUnit
+                                  );
+                                  return (
+                                    <tr
+                                      key={`${detailsItem.id}-${detailsTab}-${idx}`}
+                                      className={
+                                        conflictHighlightRow
+                                          ? "bg-red-50"
+                                          : isHdrSummaryRow
+                                            ? "bg-slate-50"
+                                            : undefined
+                                      }
+                                    >
+                                      <td
+                                        className={`px-3 py-2 ${
+                                          isHdrSummaryRow ? "font-bold text-slate-800" : ""
+                                        } ${conflictHighlightRow ? "font-semibold text-red-900" : ""}`}
+                                      >
+                                        {row.name}
+                                      </td>
+                                      <td
+                                        className={`px-3 py-2 text-right tabular-nums font-sans ${
+                                          isHdrSummaryRow ? "font-bold text-slate-800" : ""
+                                        } ${conflictHighlightRow ? "font-semibold text-red-900" : ""}`}
+                                      >
+                                        {formatOneDecimal(row.hours)}
+                                      </td>
+                                    </tr>
+                                  );
+                                })}
+                                {detailsTab !== "HDR" && (
+                                  <tr className="bg-slate-50">
+                                    <td className="px-3 py-2 font-bold text-slate-800">
+                                      {workloadBreakdownTotalLabel(detailsTab)}
+                                    </td>
+                                    <td className="px-3 py-2 text-right font-bold tabular-nums font-sans text-slate-800">
+                                      {formatOneDecimal(
+                                        (adminModalBreakdownMerged?.[detailsTab] ?? []).reduce(
+                                          (sum, row) => sum + workloadHoursForBreakdownRow(row),
+                                          0
+                                        )
+                                      )}
+                                    </td>
                                   </tr>
-                                ))}
-                                <tr className="bg-slate-50">
-                                  <td className="px-3 py-2 font-semibold">Total</td>
-                                  <td className="px-3 py-2 text-right font-semibold tabular-nums font-sans">
-                                    {(detailsBreakdown?.[detailsTab] ?? breakdownById(detailsItem.id)[detailsTab]).reduce(
-                                      (sum, row) => sum + row.hours,
-                                      0
-                                    )}
-                                  </td>
-                                </tr>
+                                )}
                               </tbody>
                             </table>
                           </div>
                         </div>
                         <div>
-                          <div className="text-xs font-semibold uppercase text-slate-500">Description</div>
+                          <div className="mb-1 text-xs font-semibold text-slate-500">NOTES</div>
                           <textarea
                             readOnly
-                            value={cleanDescription(detailsItem.description)}
-                            className="mt-1 h-24 w-full resize-none rounded border border-slate-300 px-3 py-2 text-sm"
+                            value={workloadModalNotes(detailsItem).trim()}
+                            placeholder={STAFF_PROFILE_NOTES_PLACEHOLDER}
+                            rows={4}
+                            className="w-full resize-y rounded border border-slate-300 bg-white px-3 py-2 text-sm text-slate-700 outline-none placeholder:text-slate-500 read-only:bg-slate-50"
                           />
                         </div>
-                        <div className="flex items-center justify-center pt-1">
-                          <button
-                            type="button"
-                            onClick={closeDetails}
-                            className={`rounded-md px-6 py-2 text-sm font-semibold ${
-                              detailsItem.status === "approved"
-                                ? "bg-[#16a34a] text-white"
-                                : "bg-[#2f4d9c] text-white hover:bg-[#29458c]"
-                            }`}
-                          >
-                            Confirmed
-                          </button>
-                        </div>
+                        <div className="h-2" />
                       </div>
                     </div>
                   </div>
@@ -2297,9 +3222,12 @@ export default function Admin() {
                           onChange={(e) => setDistributeSemesterInput(e.target.value as "S1" | "S2")}
                           className="w-full rounded border border-slate-300 px-3 py-2 text-sm"
                         >
-                          <option value="S1">S1</option>
-                          <option value="S2">S2</option>
+                          <option value="S1">S1 (1 January - 30 June)</option>
+                          <option value="S2">S2 (1 July - 31 December)</option>
                         </select>
+                      </div>
+                      <div className="text-xs font-semibold text-[#dc2626]">
+                        DDL is the final day for academics to confirm their workload.
                       </div>
                       {distributeError && <div className="text-sm font-semibold text-[#dc2626]">{distributeError}</div>}
                       <div className="flex items-center justify-end gap-3 pt-1">
@@ -2387,18 +3315,22 @@ export default function Admin() {
                   />
                 }
               />
-              {importMessage && <div className="mt-3 text-sm font-semibold text-[#2f4d9c]">{importMessage}</div>}
+              {importMessage.startsWith("Import failed") ? (
+                <div className="mt-3 rounded border border-red-200 bg-red-50 px-3 py-2 text-sm font-semibold text-red-800">
+                  {importMessage}
+                </div>
+              ) : null}
 
               <div className="mt-6 rounded-md border border-slate-200 bg-slate-50 p-4">
                 <FilterFormRow
                   fields={[
                     {
-                      key: "firstName",
-                      label: "First name",
+                      key: "lastName",
+                      label: "Last name",
                       input: (
                         <input
-                          value={adminSearchFirstNameInput}
-                          onChange={(e) => setAdminSearchFirstNameInput(e.target.value)}
+                          value={adminSearchLastNameInput}
+                          onChange={(e) => setAdminSearchLastNameInput(e.target.value)}
                           className="rounded border border-slate-300 bg-white px-3 py-2 text-sm"
                           onKeyDown={(e) => {
                             if (e.key === "Enter") {
@@ -2410,12 +3342,12 @@ export default function Admin() {
                       ),
                     },
                     {
-                      key: "lastName",
-                      label: "Last name",
+                      key: "firstName",
+                      label: "First name",
                       input: (
                         <input
-                          value={adminSearchLastNameInput}
-                          onChange={(e) => setAdminSearchLastNameInput(e.target.value)}
+                          value={adminSearchFirstNameInput}
+                          onChange={(e) => setAdminSearchFirstNameInput(e.target.value)}
                           className="rounded border border-slate-300 bg-white px-3 py-2 text-sm"
                           onKeyDown={(e) => {
                             if (e.key === "Enter") {
@@ -2463,7 +3395,7 @@ export default function Admin() {
                         <th className="px-3 py-2 text-left">Name</th>
                         <th className="px-3 py-2 text-left">Title</th>
                         <th className="px-3 py-2 text-left">Department</th>
-                        <th className="px-3 py-2 text-right">Modified Time</th>
+                        <th className="px-3 py-2 text-right">Updated Time</th>
                       </tr>
                     </thead>
                     <tbody>
@@ -3030,6 +3962,12 @@ export default function Admin() {
           )}
         </div>
       </div>
+
+      <ThemedNoticeModal
+        open={supersededNoticeOpen}
+        onClose={() => setSupersededNoticeOpen(false)}
+        message={SUPERSEDED_RECORD_MESSAGE}
+      />
     </div>
   );
 }
