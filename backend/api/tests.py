@@ -6,7 +6,7 @@ from django.utils import timezone
 from rest_framework.test import APITestCase, APIClient
 from rest_framework_simplejwt.tokens import RefreshToken
 
-from .models import AuditLog, Department, Staff, WorkloadItem, WorkloadReport, WorkloadDistributionJob
+from .models import AuditLog, Department, OTPToken, Staff, WorkloadItem, WorkloadReport, WorkloadDistributionJob
 
 
 # ─── Shared test fixture ──────────────────────────────────────────────────────
@@ -82,6 +82,25 @@ class BaseTestCase(APITestCase):
         client = APIClient()
         client.credentials(HTTP_AUTHORIZATION=f'Bearer {token}')
         return client
+
+
+class TestOTPTokenModel(APITestCase):
+    """Minimal structural coverage for the OTP persistence layer added in PR #38."""
+
+    def test_otptoken_can_be_created_and_marked_used(self):
+        token = OTPToken.objects.create(
+            email='staff@example.com',
+            code_hash='a' * 64,
+            salt='b' * 32,
+            expires_at=timezone.now() + timedelta(minutes=5),
+        )
+        self.assertIsNone(token.used_at)
+        self.assertEqual(token.email, 'staff@example.com')
+
+        token.used_at = timezone.now()
+        token.save(update_fields=['used_at'])
+        token.refresh_from_db()
+        self.assertIsNotNone(token.used_at)
 
     def _item_ids(self, res):
         """Extract report id list from a paginated workload list response."""
