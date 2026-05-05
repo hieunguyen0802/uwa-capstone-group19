@@ -63,7 +63,6 @@ urlpatterns = [
     # Auth — password-based (legacy, kept for admin/superuser use)
     path('login/', login_view),
 
-<<<<<<< HEAD
     # Auth — OTP passwordless login
     path('login/request-otp/', otp_request_view),
     path('login/verify-otp/', otp_verify_view),
@@ -71,8 +70,6 @@ urlpatterns = [
     # Import (SCHOOL_OPS only)
     path('import/workload/', import_workload_view),
 
-    # Supervisor / Manager APIs
-=======
     # Supervisor — new contract (8.2–8.8)
     # batch-decision must come before <str:id>/ to avoid routing conflict
     path('supervisor/workload-requests/', supervisor_workload_requests),
@@ -83,7 +80,7 @@ urlpatterns = [
     path('supervisor/export/', supervisor_export),
 
     # Supervisor — legacy endpoints
->>>>>>> origin/main
+
     path('supervisor/requests/', supervisor_requests),
     path('supervisor/approve/<str:id>/', approve_request),
     path('supervisor/reject/<str:id>/', reject_request),
