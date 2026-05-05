@@ -1348,6 +1348,7 @@ export default function HeadofSchool() {
           title="HoS Dashboard"
           hasNewMessage={hasNewMessage}
           onMessageClick={openMessagePanel}
+          greetingName={user.surname}
           onAvatarClick={() => setProfileOpen(true)}
           avatarSrc={avatarSrc}
         />

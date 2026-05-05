@@ -87,6 +87,8 @@ type MockRequest = {
   workloadNewStaff?: boolean;
   /** Workload template column F — HoD Review (yes/no). */
   hodReview?: "yes" | "no";
+  /** Snapshot copied to Academic detail modal (keeps Ops/Academic detail consistent). */
+  detailSnapshot?: WorkloadDetailSnapshot;
 };
 
 type BreakdownCategory = "Teaching" | "Assigned Roles" | "HDR" | "Service" | "Research (residual)";
@@ -101,6 +103,18 @@ type BreakdownEntry = {
   teachingDuplicateUnit?: boolean;
 };
 type BreakdownData = Record<BreakdownCategory, BreakdownEntry[]>;
+
+type WorkloadDetailSnapshot = {
+  breakdown: BreakdownData;
+  actualTeachingRatioDisplay: string;
+  actualTeachingRatioOutOfRange: boolean;
+  showActualTeachingRatioBandWarning: boolean;
+  actualRatioHoverText: string;
+  totalHoursDisplay: string;
+  adminModalHoursAbnormal: boolean;
+  totalHoursTooltipText: string;
+  employmentType: string;
+};
 
 /** HDR tab: imported summary row label (must match merged HDR breakdown). */
 const HDR_TOTAL_ROW_LABEL = "HDR Total";
@@ -136,6 +150,8 @@ const ACADEMIC_STATUS_SYNC_KEY = "academic_status_sync_v1";
 const ACADEMIC_NOTES_SYNC_KEY = "academic_notes_sync_v1";
 const SUPERVISOR_SYNC_EVENT = "supervisor-status-updated";
 const ACADEMIC_DRAFT_EVENT = "academic-drafts-updated";
+const OPS_ACADEMIC_NOTIFICATION_KEY = "ops_to_academic_notifications_v1";
+const OPS_ACADEMIC_DISTRIBUTED_KEY = "ops_academic_distributed_workloads_v1";
 const SEMESTER_EXPECTED_MIN_HOURS = 856;
 const SEMESTER_EXPECTED_MAX_HOURS = 864;
 const WORKLOAD_REPORT_SEMESTER_LABEL = "2025-S1";
@@ -147,6 +163,44 @@ const WORKLOAD_SEARCH_DEPARTMENT_OPTIONS = [
 ] as const;
 const BAND_THRESHOLDS_TOOLTIP =
   "Band thresholds: (Calculated T:R <= 0.20 is Research Focused); (Calculated T:R > 0.20 and <= 0.79 is Balanced Teaching & Research); (Calculated T:R > 0.79 and <= 1.00 is Teaching Focused)";
+
+type AcademicNotification = {
+  id: string;
+  recipientStaffId: string;
+  recipientName: string;
+  recipientEmail: string;
+  fromName: string;
+  fromEmail: string;
+  subject: string;
+  body: string;
+  sentAt: string;
+  readAt?: string;
+};
+
+function formatOpsDistributionDdl(semester: "S1" | "S2") {
+  if (semester === "S1") return "S1 (1 January - 30 June)";
+  return "S2 (1 July - 31 December)";
+}
+
+function createOpsDistributionMailBody(year: number, semester: "S1" | "S2") {
+  const ddlLabel = formatOpsDistributionDdl(semester);
+  return `Your workload for ${year} ${semester} has been distributed. Please complete confirmation by the DDL (${ddlLabel}).
+
+If there are work-hour issues or you cannot self-confirm, please submit to your leader for manual modification review, then complete confirmation.
+
+For other questions, please contact yaka.bronte@uwa.edu.au.`;
+}
+
+function appendAcademicNotifications(nextNotifications: AcademicNotification[]) {
+  if (typeof window === "undefined" || nextNotifications.length === 0) return;
+  try {
+    const raw = window.localStorage.getItem(OPS_ACADEMIC_NOTIFICATION_KEY);
+    const existing = raw ? (JSON.parse(raw) as AcademicNotification[]) : [];
+    window.localStorage.setItem(OPS_ACADEMIC_NOTIFICATION_KEY, JSON.stringify([...nextNotifications, ...existing]));
+  } catch {
+    window.localStorage.setItem(OPS_ACADEMIC_NOTIFICATION_KEY, JSON.stringify(nextNotifications));
+  }
+}
 
 function submittedTimeById(id: number) {
   const day = ((id - 1) % 28) + 1;
@@ -391,6 +445,289 @@ function templateHodReviewDisplay(value: "yes" | "no" | undefined): string {
   return value === "yes" ? "Yes" : "No";
 }
 
+function mergeAdminBreakdownWithImportedData(
+  item: Pick<MockRequest, "id" | "studentId" | "hours">,
+  teachingLinesByStaffId: Record<
+    string,
+    { unit?: string; hours?: number | null; duplicateUnitConflict?: boolean; excludeFromWorkloadTotal?: boolean }[] | undefined
+  >,
+  hdrImportByStaffId: Record<
+    string,
+    | {
+        ftStudents?: number | null;
+        ptStudents?: number | null;
+        ftHours?: number | null;
+        ptHours?: number | null;
+        totalHrs?: number | null;
+        derivedHrs?: number | null;
+        hdrPoints?: number | null;
+        hasHdrFieldConflict?: boolean;
+        ftStudentsConflict?: boolean;
+        totalHrsConflict?: boolean;
+        hdrPointsConflict?: boolean;
+        hdrExtraLines?: Array<{ name: string; hours: number }>;
+      }
+    | undefined
+  >,
+  serviceImportByStaffId: Record<
+    string,
+    | {
+        servicePoints?: number | null;
+        hasServicePointsConflict?: boolean;
+        servicePointsConflict?: boolean;
+        serviceExtraLines?: Array<{ hours: number }>;
+      }
+    | undefined
+  >,
+  roleImportByStaffId: Record<
+    string,
+    | {
+        roles: Array<{ name: string; hours: number; excludeFromWorkloadTotal?: boolean; hourConflict?: boolean }>;
+        totalHours: number | null;
+      }
+    | undefined
+  >,
+  anomalyByStaffId: Record<string, { researchResidualPoints: number | null } | undefined>
+): BreakdownData {
+  const sid = item.studentId.trim();
+  let next: BreakdownData = breakdownById(item.id, item.hours);
+
+  const lines = teachingLinesByStaffId[sid];
+  if (lines?.length) {
+    const teachingImported = lines
+      .filter((row) => String(row.unit ?? "").trim())
+      .map((row) => ({
+        name: String(row.unit).trim(),
+        hours:
+          typeof row.hours === "number" && Number.isFinite(row.hours) ? Math.round(row.hours * 1000) / 1000 : 0,
+        teachingDuplicateUnit: row.duplicateUnitConflict,
+        excludeFromWorkloadTotal: row.excludeFromWorkloadTotal,
+      }));
+    if (teachingImported.length) next = { ...next, Teaching: teachingImported };
+  }
+
+  const hdrImported = hdrImportByStaffId[sid];
+  if (
+    hdrImported &&
+    (hdrImported.ftStudents != null ||
+      hdrImported.ptStudents != null ||
+      hdrImported.ftHours != null ||
+      hdrImported.ptHours != null ||
+      hdrImported.totalHrs != null ||
+      hdrImported.derivedHrs != null ||
+      hdrImported.hdrPoints != null ||
+      hdrImported.hasHdrFieldConflict)
+  ) {
+    const ftCount =
+      hdrImported.ftStudents != null && Number.isFinite(hdrImported.ftStudents) ? hdrImported.ftStudents : 0;
+    const ptCount =
+      hdrImported.ptStudents != null && Number.isFinite(hdrImported.ptStudents) ? hdrImported.ptStudents : 0;
+    const ftCountLabel = Number.isInteger(ftCount) ? String(ftCount) : formatOneDecimal(ftCount);
+    const ptCountLabel = Number.isInteger(ptCount) ? String(ptCount) : formatOneDecimal(ptCount);
+    const ftHours =
+      hdrImported.ftHours != null && Number.isFinite(hdrImported.ftHours)
+        ? Math.round(hdrImported.ftHours * 1000) / 1000
+        : 0;
+    const ptHours =
+      hdrImported.ptHours != null && Number.isFinite(hdrImported.ptHours)
+        ? Math.round(hdrImported.ptHours * 1000) / 1000
+        : 0;
+    const hdrTotalHours = Math.round((ftHours + ptHours) * 1000) / 1000;
+    const hdrRows: BreakdownEntry[] = [
+      {
+        name: `Full time students (${ftCountLabel})`,
+        hours: ftHours,
+        excludeFromWorkloadTotal: true,
+        roleHourConflict: Boolean(hdrImported.ftStudentsConflict),
+      },
+      {
+        name: `Part time students (${ptCountLabel})`,
+        hours: ptHours,
+        excludeFromWorkloadTotal: true,
+      },
+      {
+        name: HDR_TOTAL_ROW_LABEL,
+        hours: hdrTotalHours,
+        roleHourConflict: Boolean(hdrImported.totalHrsConflict || hdrImported.hdrPointsConflict),
+      },
+    ];
+    hdrImported.hdrExtraLines?.forEach((ex) => {
+      hdrRows.push({
+        name: ex.name,
+        hours: ex.hours,
+        excludeFromWorkloadTotal: true,
+        roleHourConflict: true,
+      });
+    });
+    next = { ...next, HDR: hdrRows };
+  }
+
+  const serviceImported = serviceImportByStaffId[sid];
+  if (serviceImported && (serviceImported.servicePoints != null || serviceImported.hasServicePointsConflict)) {
+    const canonicalHrs =
+      serviceImported.servicePoints != null && Number.isFinite(serviceImported.servicePoints)
+        ? Math.round(serviceImported.servicePoints * TEACHING_HOURS_FACTOR * 1000) / 1000
+        : 0;
+    const svcRows: BreakdownEntry[] = [
+      {
+        name: "Self-Directed Svc Pts",
+        hours: canonicalHrs,
+        roleHourConflict: Boolean(serviceImported.servicePointsConflict),
+      },
+    ];
+    serviceImported.serviceExtraLines?.forEach((ex) => {
+      svcRows.push({
+        name: "Self-Directed Svc Pts",
+        hours: ex.hours,
+        excludeFromWorkloadTotal: true,
+        roleHourConflict: true,
+      });
+    });
+    next = { ...next, Service: svcRows };
+  }
+
+  const roleImported = roleImportByStaffId[sid];
+  if (roleImported && (roleImported.roles.length > 0 || roleImported.totalHours != null)) {
+    const rows =
+      roleImported.roles.length > 0
+        ? roleImported.roles.map((r) => ({
+            name: r.name,
+            hours: Math.round(r.hours * 1000) / 1000,
+            excludeFromWorkloadTotal: r.excludeFromWorkloadTotal,
+            roleHourConflict: r.hourConflict,
+          }))
+        : [{ name: "Assigned Roles Total", hours: Math.round((roleImported.totalHours ?? 0) * 1000) / 1000 }];
+    next = { ...next, "Assigned Roles": rows };
+  }
+
+  const anomalyImported = anomalyByStaffId[sid];
+  if (anomalyImported && anomalyImported.researchResidualPoints != null) {
+    next = {
+      ...next,
+      "Research (residual)": [
+        {
+          name: "Research (residual)",
+          hours: Math.round(anomalyImported.researchResidualPoints * TEACHING_HOURS_FACTOR * 1000) / 1000,
+        },
+      ],
+    };
+  }
+
+  return next;
+}
+
+function buildWorkloadDetailSnapshot(
+  item: Pick<MockRequest, "id" | "studentId" | "hours" | "targetTeachingRatio">,
+  teachingLinesByStaffId: Record<
+    string,
+    { unit?: string; hours?: number | null; duplicateUnitConflict?: boolean; excludeFromWorkloadTotal?: boolean }[] | undefined
+  >,
+  hdrImportByStaffId: Record<
+    string,
+    | {
+        ftStudents?: number | null;
+        ptStudents?: number | null;
+        ftHours?: number | null;
+        ptHours?: number | null;
+        totalHrs?: number | null;
+        derivedHrs?: number | null;
+        hdrPoints?: number | null;
+        hasHdrFieldConflict?: boolean;
+        ftStudentsConflict?: boolean;
+        totalHrsConflict?: boolean;
+        hdrPointsConflict?: boolean;
+        hdrExtraLines?: Array<{ name: string; hours: number }>;
+      }
+    | undefined
+  >,
+  serviceImportByStaffId: Record<
+    string,
+    | {
+        servicePoints?: number | null;
+        hasServicePointsConflict?: boolean;
+        servicePointsConflict?: boolean;
+        serviceExtraLines?: Array<{ hours: number }>;
+      }
+    | undefined
+  >,
+  roleImportByStaffId: Record<
+    string,
+    | {
+        roles: Array<{ name: string; hours: number; excludeFromWorkloadTotal?: boolean; hourConflict?: boolean }>;
+        totalHours: number | null;
+      }
+    | undefined
+  >,
+  anomalyByStaffId: Record<
+    string,
+    | {
+        targetBand: string | null;
+        calculatedBand: string | null;
+        calculatedTeachingRatio: number | null;
+        researchResidualPoints: number | null;
+        totalHoursFromPoints: number | null;
+        fte: number | null;
+      }
+    | undefined
+  >
+): WorkloadDetailSnapshot {
+  const breakdown = mergeAdminBreakdownWithImportedData(
+    item,
+    teachingLinesByStaffId,
+    hdrImportByStaffId,
+    serviceImportByStaffId,
+    roleImportByStaffId,
+    anomalyByStaffId
+  );
+  const detailsComputedTotalHours = sumAdminBreakdownHours(breakdown);
+  const actualTeachingRatioPct = adminActualTeachingRatioPercent(breakdown);
+  const actualTeachingRatioDisplay = `${formatOneDecimal(actualTeachingRatioPct)}%`;
+  const actualTeachingRatioOutOfRange = actualTeachingRatioPct < 0 || actualTeachingRatioPct > 100;
+
+  const detailAnomaly = anomalyByStaffId[item.studentId.trim()];
+  let anomalyHoverText = "";
+  if (detailAnomaly?.targetBand && detailAnomaly.calculatedBand) {
+    const expected = expectedRangeForBand(detailAnomaly.targetBand);
+    const actual =
+      detailAnomaly.calculatedTeachingRatio != null && Number.isFinite(detailAnomaly.calculatedTeachingRatio)
+        ? `${formatOneDecimal(detailAnomaly.calculatedTeachingRatio * 100)}%`
+        : actualTeachingRatioDisplay;
+    if (normalizeBandLabel(detailAnomaly.targetBand) !== normalizeBandLabel(detailAnomaly.calculatedBand)) {
+      anomalyHoverText = `Calculated T:R is ${actual}, expected range for contract band "${detailAnomaly.targetBand}" is (${expected}). Calculated band is "${detailAnomaly.calculatedBand}", which does not match the contract band. After workload is distributed, Academic cannot self-confirm and must submit to HoD for modification review.`;
+    }
+  }
+  const showActualTeachingRatioBandWarning = Boolean(anomalyHoverText);
+  const actualRatioHoverText = actualTeachingRatioOutOfRange
+    ? `Error: Calculated T:R is ${actualTeachingRatioDisplay}. Valid range is 0.0% to 100.0%. Please correct the imported workload components and re-import.`
+    : anomalyHoverText
+      ? `Warning: ${anomalyHoverText}\n${BAND_THRESHOLDS_TOOLTIP}`
+      : "";
+
+  const expectedRange = expectedHoursRangeForFte(detailAnomaly?.fte ?? null);
+  const adminModalHoursAbnormal =
+    detailsComputedTotalHours <= expectedRange.min || detailsComputedTotalHours > expectedRange.max;
+  const totalHoursTooltipText = adminModalHoursAbnormal
+    ? `Error: ${formatOneDecimal(expectedRange.min)} < expected working time <= ${formatOneDecimal(
+        expectedRange.max
+      )} working hours each semester.`
+    : "";
+  const minDays = Math.ceil(expectedRange.min / 8);
+  const maxDays = Math.ceil(expectedRange.max / 8);
+  const totalHoursDisplay = `${formatOneDecimal(detailsComputedTotalHours)} (>${minDays} & <=${maxDays} working days)`;
+
+  return {
+    breakdown,
+    actualTeachingRatioDisplay,
+    actualTeachingRatioOutOfRange,
+    showActualTeachingRatioBandWarning,
+    actualRatioHoverText,
+    totalHoursDisplay,
+    adminModalHoursAbnormal,
+    totalHoursTooltipText,
+    employmentType: employmentTypeLabelFromFte(detailAnomaly?.fte ?? null),
+  };
+}
+
 function importHoursFailStatus(
   totalHours: number,
   fte: number | null
@@ -508,11 +845,8 @@ export default function SchoolofOperations() {
 
   const user = MOCK_DASHBOARD_USER;
 
-  const [hasNewMessage, setHasNewMessage] = useState(true);
-  const [messagePanelOpen, setMessagePanelOpen] = useState(false);
   const [profileOpen, setProfileOpen] = useState(false);
   const [avatarSrc, setAvatarSrc] = useState<string | null>(null);
-  const [chatInput, setChatInput] = useState("");
   const [activeSection, setActiveSection] = useState<
     "approval" | "admin" | "visualization" | "export"
   >("approval");
@@ -581,12 +915,57 @@ export default function SchoolofOperations() {
     title: string;
     message: string;
     status: "pending" | "approved" | "rejected";
+    importSummary?: {
+      total: number;
+      success: number;
+      failed: number;
+      failedRows?: number[];
+    };
   }>({
     open: false,
     title: "",
     message: "",
     status: "pending",
+    importSummary: undefined,
   });
+  const [popupDragOffset, setPopupDragOffset] = useState({ x: 0, y: 0 });
+  const popupDragRef = useRef({
+    dragging: false,
+    startX: 0,
+    startY: 0,
+    originX: 0,
+    originY: 0,
+  });
+
+  useEffect(() => {
+    function onMouseMove(event: MouseEvent) {
+      if (!popupDragRef.current.dragging) return;
+      const dx = event.clientX - popupDragRef.current.startX;
+      const dy = event.clientY - popupDragRef.current.startY;
+      setPopupDragOffset({
+        x: popupDragRef.current.originX + dx,
+        y: popupDragRef.current.originY + dy,
+      });
+    }
+
+    function onMouseUp() {
+      popupDragRef.current.dragging = false;
+    }
+
+    window.addEventListener("mousemove", onMouseMove);
+    window.addEventListener("mouseup", onMouseUp);
+    return () => {
+      window.removeEventListener("mousemove", onMouseMove);
+      window.removeEventListener("mouseup", onMouseUp);
+    };
+  }, []);
+
+  useEffect(() => {
+    if (!popup.open) {
+      setPopupDragOffset({ x: 0, y: 0 });
+      popupDragRef.current.dragging = false;
+    }
+  }, [popup.open]);
 
   const [detailsOpen, setDetailsOpen] = useState(false);
   const [supersededNoticeOpen, setSupersededNoticeOpen] = useState(false);
@@ -670,10 +1049,57 @@ export default function SchoolofOperations() {
     "Senior School Coordinator",
   ];
   const availablePermissions = rolePermissionMap[assignRole];
-  const initialAssignablePeople: AssignablePerson[] = [];
+  const initialAssignablePeople: AssignablePerson[] = [
+    {
+      id: 1,
+      staffId: "12345678",
+      firstName: "John",
+      lastName: "Doe",
+      email: "john.doe@uwa.edu.au",
+      title: "Lecturer",
+      currentDepartment: "Computer Science & Software Engineering",
+      isActive: true,
+      isNewEmployee: false,
+      notes: "",
+    },
+    {
+      id: 2,
+      staffId: "12345745",
+      firstName: "Marcelina",
+      lastName: "Amina",
+      email: "marcelina.amina@uwa.edu.au",
+      title: "Senior Lecturer",
+      currentDepartment: "Computer Science & Software Engineering",
+      isActive: false,
+      isNewEmployee: false,
+      notes: "",
+    },
+    {
+      id: 4,
+      staffId: "12345931",
+      firstName: "John",
+      lastName: "Dias",
+      email: "john.dias@uwa.edu.au",
+      title: "Lecturer",
+      currentDepartment: "Physics",
+      isActive: true,
+      isNewEmployee: false,
+      notes: "",
+    },
+    {
+      id: 5,
+      staffId: "12346060",
+      firstName: "Lina",
+      lastName: "Patel",
+      email: "lina.patel@uwa.edu.au",
+      title: "Lecturer",
+      currentDepartment: "Computer Science & Software Engineering",
+      isActive: true,
+      isNewEmployee: false,
+      notes: "",
+    },
+  ];
   const [assignablePeople, setAssignablePeople] = useState<AssignablePerson[]>(initialAssignablePeople);
-  const [contactRecipientQuery, setContactRecipientQuery] = useState("");
-  const [contactSelectedPerson, setContactSelectedPerson] = useState<AssignablePerson | null>(null);
   const [importMessage, setImportMessage] = useState("");
   const [staffModalOpen, setStaffModalOpen] = useState(false);
   const [staffDraft, setStaffDraft] = useState<StaffProfileDraft | null>(null);
@@ -1001,9 +1427,9 @@ export default function SchoolofOperations() {
   const totalHoursWorkingDaysSuffix = useMemo(() => {
     const dayMin = detailsExpectedHoursRange.min / 8;
     const dayMax = detailsExpectedHoursRange.max / 8;
-    const minText = Number.isInteger(dayMin) ? String(dayMin) : formatOneDecimal(dayMin);
-    const maxText = Number.isInteger(dayMax) ? String(dayMax) : formatOneDecimal(dayMax);
-    return `(>${minText} <=${maxText} working days)`;
+    const minDays = Math.ceil(dayMin);
+    const maxDays = Math.ceil(dayMax);
+    return `(>${minDays} & <=${maxDays} working days)`;
   }, [detailsExpectedHoursRange]);
 
   const totalHoursDisplay = useMemo(
@@ -1023,21 +1449,6 @@ export default function SchoolofOperations() {
     window.localStorage.removeItem(SUPERVISOR_STATE_KEY);
     window.localStorage.removeItem(SUPERVISOR_DRAFT_KEY);
   }, []);
-
-  const contactStaffMatches = useMemo(() => {
-    const q = contactRecipientQuery.trim().toLowerCase();
-    if (!q) return [];
-    return assignablePeople
-      .filter((p) => {
-        const name = `${p.firstName} ${p.lastName}`.toLowerCase();
-        return (
-          name.includes(q) ||
-          p.staffId.toLowerCase().includes(q) ||
-          p.email.toLowerCase().includes(q)
-        );
-      })
-      .slice(0, 8);
-  }, [assignablePeople, contactRecipientQuery]);
 
   const itemsForFilter = useMemo(() => {
     const byStatus = pending.filter((it) => {
@@ -1121,6 +1532,10 @@ export default function SchoolofOperations() {
   const allPendingFilteredSelected =
     pendingFilteredIds.length > 0 && pendingFilteredIds.every((id) => selectedIds.has(id));
   const somePendingFilteredSelected = pendingFilteredIds.some((id) => selectedIds.has(id));
+  const hasSelectedPendingForDistribution = useMemo(
+    () => pending.some((it) => selectedIds.has(it.id) && !it.cancelled && it.status === "pending"),
+    [pending, selectedIds]
+  );
 
   useEffect(() => {
     const el = selectAllPendingRef.current;
@@ -1630,6 +2045,7 @@ export default function SchoolofOperations() {
   }
 
   function openDistributeModal() {
+    if (!hasSelectedPendingForDistribution) return;
     setDistributeYearInput(String(currentYear));
     setDistributeSemesterInput("S1");
     setDistributeError("");
@@ -1647,38 +2063,38 @@ export default function SchoolofOperations() {
       setDistributeError("Please enter a valid year.");
       return;
     }
+    const selectedPendingRows = pending.filter(
+      (it) => selectedIds.has(it.id) && !it.cancelled && it.status === "pending"
+    );
+    if (!selectedPendingRows.length) {
+      setDistributeError("Please select at least one pending workload.");
+      return;
+    }
     const operatorLabel = `${user.firstName} ${user.surname}`.trim() || "—";
+    const approvedSelectedIds = new Set<number>();
+    const failedSelectedIds = new Set<number>();
+
+    selectedPendingRows.forEach((it) => {
+      if (isImportedRowHoursOutOfBand(it, workloadAnomalyImportByStaffId)) failedSelectedIds.add(it.id);
+      else approvedSelectedIds.add(it.id);
+    });
+    const detailSnapshotById = new Map<number, WorkloadDetailSnapshot>();
+    selectedPendingRows.forEach((row) => {
+      detailSnapshotById.set(
+        row.id,
+        buildWorkloadDetailSnapshot(
+          row,
+          workloadTeachingImportLinesByStaffId,
+          workloadHdrImportByStaffId,
+          workloadServiceImportByStaffId,
+          workloadAssignedRoleImportByStaffId,
+          workloadAnomalyImportByStaffId
+        )
+      );
+    });
+
     setPending((prev) => {
-      const selected = prev.filter((it) => selectedIds.has(it.id) && !it.cancelled && it.status === "pending");
-      const approvedSelectedIds = new Set<number>();
-      const failedSelectedIds = new Set<number>();
-
-      selected.forEach((it) => {
-        if (isImportedRowHoursOutOfBand(it, workloadAnomalyImportByStaffId)) failedSelectedIds.add(it.id);
-        else if (
-          it.importedFromTemplate &&
-          workloadAssignedRoleImportByStaffId[it.studentId.trim()]?.hasAssignedRoleHourConflict
-        ) {
-          failedSelectedIds.add(it.id);
-        } else if (
-          it.importedFromTemplate &&
-          (workloadTeachingImportLinesByStaffId[it.studentId.trim()] ?? []).some((l) => l.duplicateUnitConflict)
-        ) {
-          failedSelectedIds.add(it.id);
-        } else if (
-          it.importedFromTemplate &&
-          workloadHdrImportByStaffId[it.studentId.trim()]?.hasHdrFieldConflict
-        ) {
-          failedSelectedIds.add(it.id);
-        } else if (
-          it.importedFromTemplate &&
-          workloadServiceImportByStaffId[it.studentId.trim()]?.hasServicePointsConflict
-        ) {
-          failedSelectedIds.add(it.id);
-        } else approvedSelectedIds.add(it.id);
-      });
-
-      return prev.map((it) => {
+      const next = prev.map((it) => {
         if (selectedIds.has(it.id) && !it.cancelled && it.status === "pending") {
           const nextStatus: MockRequest["status"] = failedSelectedIds.has(it.id) ? "rejected" : "approved";
           return {
@@ -1687,6 +2103,7 @@ export default function SchoolofOperations() {
             semesterLabel: distributeSemesterInput === "S2" ? "Sem2" : "Sem1",
             periodLabel: `${parsedYear}-${distributeSemesterInput === "S2" ? "2" : "1"}`,
             operatedBy: operatorLabel,
+            detailSnapshot: detailSnapshotById.get(it.id) ?? it.detailSnapshot,
           };
         }
         // New distributed version supersedes previous active distributed row of the same staff.
@@ -1694,20 +2111,51 @@ export default function SchoolofOperations() {
           !it.cancelled &&
           it.status === "approved" &&
           approvedSelectedIds.size > 0 &&
-          selected.some((s) => approvedSelectedIds.has(s.id) && s.studentId.trim() === it.studentId.trim() && s.id !== it.id)
+          selectedPendingRows.some(
+            (s) => approvedSelectedIds.has(s.id) && s.studentId.trim() === it.studentId.trim() && s.id !== it.id
+          )
         ) {
           return { ...it, cancelled: true };
         }
         return it;
       });
+      if (typeof window !== "undefined") {
+        window.localStorage.setItem(OPS_ACADEMIC_DISTRIBUTED_KEY, JSON.stringify(next));
+      }
+      return next;
     });
+
+    const mailBody = createOpsDistributionMailBody(parsedYear, distributeSemesterInput);
+    const mailedStaffIds = new Set<string>();
+    const notifications: AcademicNotification[] = selectedPendingRows
+      .filter((row) => approvedSelectedIds.has(row.id))
+      .map((row) => {
+        const sid = row.studentId.trim();
+        if (!sid || mailedStaffIds.has(sid)) return null;
+        mailedStaffIds.add(sid);
+        const matched = assignablePeople.find((p) => p.staffId.trim() === sid);
+        return {
+          id: `ops-dist-${Date.now()}-${sid}`,
+          recipientStaffId: sid,
+          recipientName: matched ? `${matched.firstName} ${matched.lastName}`.trim() : row.name,
+          recipientEmail: matched?.email ?? "",
+          fromName: `${user.firstName} ${user.surname}`.trim() || "School Operations",
+          fromEmail: user.email,
+          subject: `Workload distributed for ${parsedYear} ${distributeSemesterInput}`,
+          body: mailBody,
+          sentAt: new Date().toISOString(),
+        };
+      })
+      .filter((item): item is AcademicNotification => item !== null);
+    appendAcademicNotifications(notifications);
+
     setSelectedIds(new Set());
     setStatusFilter("distributed");
     setDistributeModalOpen(false);
     setPopup({
       open: true,
       title: "Workload Distributed",
-      message: `Selected pending workloads were processed for ${parsedYear} ${distributeSemesterInput}.`,
+      message: `Selected pending workloads were processed for ${parsedYear} ${distributeSemesterInput}. Email notifications were sent to ${notifications.length} academic(s).`,
       status: "approved",
     });
   }
@@ -2068,103 +2516,127 @@ export default function SchoolofOperations() {
         }
         return next;
       });
+      const importRowsByStaff = new Map<
+        string,
+        {
+          name: string;
+          unit: string;
+          targetTeachingRatio?: number;
+          totalHours: number;
+          targetBand?: string;
+          notesFromTemplate: string;
+          workloadNewStaff?: boolean;
+          hodReview?: "yes" | "no";
+          rowIndices: number[];
+        }
+      >();
+      for (const sheet of parsed.sheets) {
+        for (const row of sheet.rows) {
+          const staffIdRaw = row.computed.staffIdGuess ?? row.cellsByColumn.C ?? row.cellsByColumn.A ?? "";
+          const staffId = String(staffIdRaw ?? "").trim();
+          if (!staffId || staffId.startsWith("__row:")) continue;
+
+          const existing = importRowsByStaff.get(staffId);
+          const rowIndex = row.rowIndex;
+          if (existing) {
+            if (!existing.rowIndices.includes(rowIndex)) existing.rowIndices.push(rowIndex);
+            continue;
+          }
+
+          const nameRaw = row.cellsByColumn.B ?? row.cellsByColumn.A ?? "";
+          const name = displayNameWithoutComma(String(nameRaw ?? "").trim()) || `Staff ${staffId}`;
+          const teachingHours = sheet.teachingHoursSumByStaffId[staffId] ?? 0;
+          const hdrM = sheet.hdrMetricsByStaffId[staffId];
+          const hdrPoints = hdrM?.hdrPoints ?? 0;
+          const hdrHoursFromDerived =
+            hdrM?.derivedHrs != null && Number.isFinite(hdrM.derivedHrs) ? hdrM.derivedHrs : null;
+          const hdrHoursFromComponents =
+            (hdrM?.ftHours != null && Number.isFinite(hdrM.ftHours) ? hdrM.ftHours : 0) +
+            (hdrM?.ptHours != null && Number.isFinite(hdrM.ptHours) ? hdrM.ptHours : 0);
+          const hdrHours =
+            hdrHoursFromDerived ??
+            (hdrHoursFromComponents > 0 ? hdrHoursFromComponents : null) ??
+            (typeof hdrPoints === "number" && Number.isFinite(hdrPoints) ? hdrPoints * TEACHING_HOURS_FACTOR : 0);
+          const serviceHours = (sheet.serviceMetricsByStaffId[staffId]?.servicePoints ?? 0) * TEACHING_HOURS_FACTOR;
+          const roleHours = sheet.roleMetricsByStaffId[staffId]?.totalHours ?? 0;
+          const modelHours = sheet.anomalyMetricsByStaffId[staffId]?.totalHoursFromPoints;
+          const totalHours = Math.round(
+            (typeof modelHours === "number" && Number.isFinite(modelHours)
+              ? modelHours
+              : teachingHours + hdrHours + serviceHours + roleHours) * 1000
+          ) / 1000;
+          const ratioRaw = row.cellsByColumn[TARGET_TEACHING_PCT_COL];
+          const parsedRatio = Number.parseFloat(String(ratioRaw ?? "").trim());
+          const targetTeachingRatio = Number.isFinite(parsedRatio) ? parsedRatio : undefined;
+          const targetBand = normalizeBandLabel(String(row.cellsByColumn[TARGET_BAND_COL] ?? "").trim()) ?? undefined;
+          const notesFromTemplate = String(row.cellsByColumn[NOTES_COL] ?? "").trim();
+          const workloadNewStaff = parseWorkloadTemplateNewStaff(row.cellsByColumn[NEW_STAFF_COL]);
+          const hodReview = parseWorkloadTemplateHodReview(row.cellsByColumn[HOD_REVIEW_COL]);
+
+          importRowsByStaff.set(staffId, {
+            name,
+            unit: String(row.cellsByColumn[TEACHING_UNIT_COL] ?? "").trim(),
+            targetTeachingRatio,
+            targetBand,
+            totalHours,
+            notesFromTemplate,
+            workloadNewStaff,
+            hodReview,
+            rowIndices: [rowIndex],
+          });
+        }
+      }
+
+      const importStatusByStaffId = new Map<string, "pending" | "rejected">();
+      const failedRowSet = new Set<number>();
+      const employeeByStaffId = new Map(assignablePeople.map((person) => [person.staffId.trim(), person]));
+      const ineligibleStaffIds = new Set<string>();
+      importRowsByStaff.forEach((imported, staffId) => {
+        const matchedEmployee = employeeByStaffId.get(staffId);
+        const employeeEligible = Boolean(matchedEmployee && matchedEmployee.isActive);
+        if (!employeeEligible) {
+          ineligibleStaffIds.add(staffId);
+          importStatusByStaffId.set(staffId, "rejected");
+          imported.rowIndices.forEach((idx) => failedRowSet.add(idx));
+          return;
+        }
+        const fteVal = fteForStaffFromParsed(parsed, staffId);
+        const roleHourConflict = parsed.sheets.some(
+          (sh) => sh.roleMetricsByStaffId[staffId]?.hasAssignedRoleHourConflict === true
+        );
+        const teachingDupUnit = parsed.sheets.some((sh) =>
+          (sh.teachingLinesByStaffId[staffId] ?? []).some((line) => line.duplicateUnitConflict)
+        );
+        const hdrFieldConflict = parsed.sheets.some((sh) => sh.hdrMetricsByStaffId[staffId]?.hasHdrFieldConflict === true);
+        const servicePointsConflict = parsed.sheets.some(
+          (sh) => sh.serviceMetricsByStaffId[staffId]?.hasServicePointsConflict === true
+        );
+        const hoursRejected = importHoursFailStatus(imported.totalHours, fteVal) === "rejected";
+        const importStatus =
+          teachingDupUnit || roleHourConflict || hoursRejected || hdrFieldConflict || servicePointsConflict
+            ? "rejected"
+            : "pending";
+        importStatusByStaffId.set(staffId, importStatus);
+        if (importStatus === "rejected") {
+          imported.rowIndices.forEach((idx) => failedRowSet.add(idx));
+        }
+      });
+      const importedTotal = importRowsByStaff.size;
+      const importedFailed = Array.from(importStatusByStaffId.values()).filter((s) => s === "rejected").length;
+      const importedSuccess = Math.max(0, importedTotal - importedFailed);
+      const failedRows = Array.from(failedRowSet).sort((a, b) => a - b);
+
       setPending((prev) => {
         const byStaffId = new Map<string, MockRequest>();
         for (const row of prev) {
           byStaffId.set(row.studentId.trim(), row);
         }
-
-        const importRowsByStaff = new Map<
-          string,
-          {
-            name: string;
-            unit: string;
-            targetTeachingRatio?: number;
-            totalHours: number;
-            targetBand?: string;
-            notesFromTemplate: string;
-            workloadNewStaff?: boolean;
-            hodReview?: "yes" | "no";
-          }
-        >();
         let nextId = prev.reduce((maxId, row) => Math.max(maxId, row.id), 0) + 1;
-        for (const sheet of parsed.sheets) {
-          for (const row of sheet.rows) {
-            const staffIdRaw = row.computed.staffIdGuess ?? row.cellsByColumn.C ?? row.cellsByColumn.A ?? "";
-            const staffId = String(staffIdRaw ?? "").trim();
-            if (!staffId || staffId.startsWith("__row:")) continue;
-            if (importRowsByStaff.has(staffId)) continue;
-
-            const nameRaw = row.cellsByColumn.B ?? row.cellsByColumn.A ?? "";
-            const name = displayNameWithoutComma(String(nameRaw ?? "").trim()) || `Staff ${staffId}`;
-            const teachingHours = sheet.teachingHoursSumByStaffId[staffId] ?? 0;
-            const hdrM = sheet.hdrMetricsByStaffId[staffId];
-            const hdrPoints = hdrM?.hdrPoints ?? 0;
-            const hdrHoursFromDerived =
-              hdrM?.derivedHrs != null && Number.isFinite(hdrM.derivedHrs) ? hdrM.derivedHrs : null;
-            const hdrHoursFromComponents =
-              (hdrM?.ftHours != null && Number.isFinite(hdrM.ftHours) ? hdrM.ftHours : 0) +
-              (hdrM?.ptHours != null && Number.isFinite(hdrM.ptHours) ? hdrM.ptHours : 0);
-            const hdrHours =
-              hdrHoursFromDerived ??
-              (hdrHoursFromComponents > 0 ? hdrHoursFromComponents : null) ??
-              (typeof hdrPoints === "number" && Number.isFinite(hdrPoints)
-                ? hdrPoints * TEACHING_HOURS_FACTOR
-                : 0);
-            const serviceHours = (sheet.serviceMetricsByStaffId[staffId]?.servicePoints ?? 0) * TEACHING_HOURS_FACTOR;
-            const roleHours = sheet.roleMetricsByStaffId[staffId]?.totalHours ?? 0;
-            const modelHours = sheet.anomalyMetricsByStaffId[staffId]?.totalHoursFromPoints;
-            const totalHours = Math.round(
-              (typeof modelHours === "number" && Number.isFinite(modelHours)
-                ? modelHours
-                : teachingHours + hdrHours + serviceHours + roleHours) * 1000
-            ) / 1000;
-            const ratioRaw = row.cellsByColumn[TARGET_TEACHING_PCT_COL];
-            const parsedRatio = Number.parseFloat(String(ratioRaw ?? "").trim());
-            const targetTeachingRatio = Number.isFinite(parsedRatio) ? parsedRatio : undefined;
-            const targetBand =
-              normalizeBandLabel(String(row.cellsByColumn[TARGET_BAND_COL] ?? "").trim()) ?? undefined;
-            const notesFromTemplate = String(row.cellsByColumn[NOTES_COL] ?? "").trim();
-            const workloadNewStaff = parseWorkloadTemplateNewStaff(row.cellsByColumn[NEW_STAFF_COL]);
-            const hodReview = parseWorkloadTemplateHodReview(row.cellsByColumn[HOD_REVIEW_COL]);
-
-            importRowsByStaff.set(staffId, {
-              name,
-              unit: String(row.cellsByColumn[TEACHING_UNIT_COL] ?? "").trim(),
-              targetTeachingRatio,
-              targetBand,
-              totalHours,
-              notesFromTemplate,
-              workloadNewStaff,
-              hodReview,
-            });
-          }
-        }
-
         importRowsByStaff.forEach((imported, staffId) => {
-          const fteVal = fteForStaffFromParsed(parsed, staffId);
-          const roleHourConflict = parsed.sheets.some(
-            (sh) => sh.roleMetricsByStaffId[staffId]?.hasAssignedRoleHourConflict === true
-          );
-          const teachingDupUnit = parsed.sheets.some((sh) =>
-            (sh.teachingLinesByStaffId[staffId] ?? []).some((line) => line.duplicateUnitConflict)
-          );
-          const hdrFieldConflict = parsed.sheets.some(
-            (sh) => sh.hdrMetricsByStaffId[staffId]?.hasHdrFieldConflict === true
-          );
-          const servicePointsConflict = parsed.sheets.some(
-            (sh) => sh.serviceMetricsByStaffId[staffId]?.hasServicePointsConflict === true
-          );
-          const hoursRejected = importHoursFailStatus(imported.totalHours, fteVal) === "rejected";
-          const importStatus =
-            teachingDupUnit ||
-            roleHourConflict ||
-            hoursRejected ||
-            hdrFieldConflict ||
-            servicePointsConflict
-              ? "rejected"
-              : "pending";
+          if (ineligibleStaffIds.has(staffId)) return;
+          const importStatus = importStatusByStaffId.get(staffId) ?? "pending";
           const existing = byStaffId.get(staffId);
+          const matchedEmployee = employeeByStaffId.get(staffId);
           if (existing) {
             byStaffId.set(staffId, {
               ...existing,
@@ -2176,6 +2648,8 @@ export default function SchoolofOperations() {
               notes: imported.notesFromTemplate || existing.notes || "",
               workloadNewStaff: imported.workloadNewStaff ?? existing.workloadNewStaff,
               hodReview: imported.hodReview ?? existing.hodReview,
+              title: matchedEmployee?.title?.trim() || existing.title,
+              department: matchedEmployee?.currentDepartment?.trim() || existing.department,
               status: importStatus,
               importedFromTemplate: true,
             });
@@ -2188,8 +2662,8 @@ export default function SchoolofOperations() {
               name: imported.name,
               unit: imported.unit,
               notes: imported.notesFromTemplate,
-              title: "",
-              department: "",
+              title: matchedEmployee?.title?.trim() || "",
+              department: matchedEmployee?.currentDepartment?.trim() || "",
               rate: 0,
               status: importStatus,
               hours: imported.totalHours,
@@ -2204,7 +2678,6 @@ export default function SchoolofOperations() {
         });
         return Array.from(byStaffId.values());
       });
-      const rowCount = parsed.sheets.reduce((n, sh) => n + sh.rows.length, 0);
       setStatusFilter("all");
       setSelectedIds(new Set());
       setPage(1);
@@ -2212,9 +2685,16 @@ export default function SchoolofOperations() {
       setDetailsItem(null);
       setPopup({
         open: true,
-        title: "Import complete",
-        message: `${file.name}: ${rowCount} row(s) parsed; teaching/HDR/service/assigned-role rows apply where Staff Number matches.`,
+        title: "Import Excel",
+        message:
+          "For failed rows, please check whether the employee is not in the system or is inactive.",
         status: "approved",
+        importSummary: {
+          total: importedTotal,
+          success: importedSuccess,
+          failed: importedFailed,
+          failedRows,
+        },
       });
     } catch (e) {
       const msg =
@@ -2228,6 +2708,7 @@ export default function SchoolofOperations() {
         title: "Import Failed",
         message: msg,
         status: "rejected",
+        importSummary: undefined,
       });
     }
   }
@@ -2389,7 +2870,14 @@ export default function SchoolofOperations() {
       setSupersededNoticeOpen(true);
       return;
     }
-    setDetailsItem(item);
+    const matchedEmployee = assignablePeople.find((person) => person.staffId.trim() === item.studentId.trim());
+    const resolvedDepartment = matchedEmployee?.currentDepartment?.trim() || item.department?.trim() || "";
+    const resolvedTitle = matchedEmployee?.title?.trim() || item.title?.trim() || "";
+    setDetailsItem({
+      ...item,
+      department: resolvedDepartment,
+      title: resolvedTitle,
+    });
     setDetailsBreakdown(breakdownById(item.id, item.hours));
     setDetailsOpen(true);
   }
@@ -2432,22 +2920,21 @@ export default function SchoolofOperations() {
     }
   }
 
-  function openMessagePanel() {
-    setMessagePanelOpen(true);
-    setHasNewMessage(false);
-    setContactRecipientQuery("");
-    setContactSelectedPerson(assignablePeople[0] ?? null);
+  function handlePopupDragStart(event: React.MouseEvent<HTMLDivElement>) {
+    if ((event.target as HTMLElement).closest("button")) return;
+    popupDragRef.current.dragging = true;
+    popupDragRef.current.startX = event.clientX;
+    popupDragRef.current.startY = event.clientY;
+    popupDragRef.current.originX = popupDragOffset.x;
+    popupDragRef.current.originY = popupDragOffset.y;
+    event.preventDefault();
   }
 
-  function handleSendMessage() {
-    const trimmed = chatInput.trim();
-    if (!trimmed || !contactSelectedPerson) return;
-    setChatInput("");
-  }
-
-  function formatContactStaffRecipientLine(person: AssignablePerson) {
-    return `${person.firstName} ${person.lastName} · ${person.staffId} · ${person.currentDepartment || "—"}`;
-  }
+  const popupImportRatePercent = popup.importSummary
+    ? popup.importSummary.total > 0
+      ? Math.round((popup.importSummary.success / popup.importSummary.total) * 100)
+      : 0
+    : 0;
 
   function handleAvatarUpload(event: ChangeEvent<HTMLInputElement>) {
     const file = event.target.files?.[0];
@@ -2466,111 +2953,11 @@ export default function SchoolofOperations() {
       <div className="mx-auto max-w-7xl px-3 pb-10 pt-8">
         <DashboardHeader
           title="School Operations Dashboard"
-          hasNewMessage={hasNewMessage}
-          onMessageClick={openMessagePanel}
+          showMessageButton={false}
+          greetingName={user.surname}
           onAvatarClick={() => setProfileOpen(true)}
           avatarSrc={avatarSrc}
         />
-
-        {messagePanelOpen && (
-          <div
-            className="fixed inset-0 z-[70] flex items-center justify-center bg-black/30 p-4 font-sans"
-            onClick={() => setMessagePanelOpen(false)}
-          >
-            <div
-              className="w-full max-w-lg rounded-xl border border-slate-200 bg-[#f8f9fb] p-6 shadow-xl"
-              onClick={(e) => e.stopPropagation()}
-            >
-              <div className="mb-6 flex items-start justify-between">
-                <h2 className="text-lg font-semibold tracking-tight text-slate-900">Contact Staff</h2>
-                <button
-                  type="button"
-                  aria-label="Close"
-                  className="rounded p-1 text-lg leading-none text-slate-500 hover:bg-slate-200/80"
-                  onClick={() => setMessagePanelOpen(false)}
-                >
-                  ×
-                </button>
-              </div>
-
-              <div className="space-y-5">
-                <div>
-                  <div className="mb-1.5 text-sm font-medium text-slate-800">Recipient</div>
-                  <input
-                    type="search"
-                    value={contactRecipientQuery}
-                    onChange={(e) => setContactRecipientQuery(e.target.value)}
-                    placeholder="Search staff by name / staff ID / email"
-                    className="w-full rounded-lg border border-slate-300 bg-white px-3 py-2.5 text-sm text-slate-800 placeholder:text-slate-400 outline-none focus:border-[#2f4d9c]"
-                  />
-                  {contactStaffMatches.length > 0 && (
-                    <ul className="mt-1 max-h-40 overflow-y-auto rounded-lg border border-slate-200 bg-white py-1 shadow-sm">
-                      {contactStaffMatches.map((p) => (
-                        <li key={p.id}>
-                          <button
-                            type="button"
-                            className="w-full px-3 py-2 text-left text-sm text-slate-700 hover:bg-slate-50"
-                            onClick={() => {
-                              setContactSelectedPerson(p);
-                              setContactRecipientQuery("");
-                            }}
-                          >
-                            {formatContactStaffRecipientLine(p)}
-                          </button>
-                        </li>
-                      ))}
-                    </ul>
-                  )}
-                </div>
-
-                <div>
-                  <div className="mb-1.5 text-sm font-medium text-slate-800">Selected recipient</div>
-                  <div className="rounded-lg border border-slate-300 bg-white px-3 py-2.5 text-sm text-slate-700">
-                    {contactSelectedPerson ? (
-                      formatContactStaffRecipientLine(contactSelectedPerson)
-                    ) : (
-                      <span className="text-slate-400">Select a staff member from the search results.</span>
-                    )}
-                  </div>
-                </div>
-
-                {contactSelectedPerson?.isNewEmployee ? (
-                  <div>
-                    <div className="mb-1.5 text-sm font-medium text-slate-800">Notes</div>
-                    <textarea
-                      readOnly
-                      value={STAFF_PROFILE_NOTES_PLACEHOLDER}
-                      rows={3}
-                      className="w-full resize-none rounded-lg border border-slate-300 bg-slate-50 px-3 py-2.5 text-sm leading-relaxed text-slate-600 outline-none"
-                    />
-                  </div>
-                ) : null}
-
-                <div>
-                  <div className="mb-1.5 text-sm font-medium text-slate-800">Message</div>
-                  <textarea
-                    value={chatInput}
-                    onChange={(e) => setChatInput(e.target.value)}
-                    placeholder="Write your message..."
-                    rows={4}
-                    className="w-full resize-none rounded-lg border border-slate-300 bg-white px-3 py-2.5 text-sm text-slate-800 placeholder:text-slate-400 outline-none focus:border-[#2f4d9c]"
-                  />
-                </div>
-
-                <div className="flex justify-center pt-1">
-                  <button
-                    type="button"
-                    onClick={handleSendMessage}
-                    disabled={!contactSelectedPerson || !chatInput.trim()}
-                    className="rounded-lg bg-[#2f4d9c] px-6 py-2.5 text-sm font-semibold text-white hover:bg-[#264183] disabled:cursor-not-allowed disabled:opacity-50"
-                  >
-                    Send
-                  </button>
-                </div>
-              </div>
-            </div>
-          </div>
-        )}
 
         <ProfileModal
           open={profileOpen}
@@ -2596,9 +2983,13 @@ export default function SchoolofOperations() {
                 >
                   <div
                     className="w-full max-w-lg overflow-hidden rounded-lg bg-white shadow-lg"
+                    style={{ transform: `translate(${popupDragOffset.x}px, ${popupDragOffset.y}px)` }}
                     onClick={(e) => e.stopPropagation()}
                   >
-                    <div className="flex items-center justify-between bg-[#2f4d9c] px-5 py-3 text-white">
+                    <div
+                      className="flex cursor-move items-center justify-between bg-[#2f4d9c] px-5 py-3 text-white"
+                      onMouseDown={handlePopupDragStart}
+                    >
                       <div className="text-lg font-extrabold">{popup.title}</div>
                       <button
                         type="button"
@@ -2610,7 +3001,31 @@ export default function SchoolofOperations() {
                       </button>
                     </div>
                     <div className="px-5 py-4">
-                      <div className="text-base text-slate-800">{popup.message}</div>
+                      {popup.importSummary ? (
+                        <div className="space-y-2 text-base text-slate-800">
+                          <div>{`Imported Excel workloads: ${popup.importSummary.total}.`}</div>
+                          <div>{`Successful: ${popup.importSummary.success}.`}</div>
+                          <div>{`Failed: ${popup.importSummary.failed}${
+                            popup.importSummary.failed > 0 && (popup.importSummary.failedRows?.length ?? 0) > 0
+                              ? ` (Excel rows: ${popup.importSummary.failedRows?.join(", ")})`
+                              : ""
+                          }.`}</div>
+                          <div className="pt-1">
+                            <div className="mb-1.5 text-sm font-semibold text-slate-700">
+                              {`Success ratio: ${popup.importSummary.success}/${popup.importSummary.total} (${popupImportRatePercent}%)`}
+                            </div>
+                            <div className="h-2.5 w-full overflow-hidden rounded-full bg-slate-200">
+                              <div
+                                className="h-full rounded-full bg-[#2f4d9c] transition-all"
+                                style={{ width: `${popupImportRatePercent}%` }}
+                              />
+                            </div>
+                          </div>
+                          <div className="pt-1 text-base text-slate-800">{popup.message}</div>
+                        </div>
+                      ) : (
+                        <div className="text-base text-slate-800">{popup.message}</div>
+                      )}
                       <div className="mt-4 flex justify-center">
                         <button
                           type="button"
@@ -2622,15 +3037,19 @@ export default function SchoolofOperations() {
                             setPopup((p) => ({ ...p, open: false }));
                           }}
                           className={`rounded-md px-5 py-2 text-sm font-semibold text-white hover:brightness-95 ${
-                            popup.status === "approved"
+                            popup.importSummary
+                              ? "bg-[#2f4d9c]"
+                              : popup.status === "approved"
                               ? "bg-[#16a34a]"
                               : popup.status === "rejected"
                                 ? "bg-[#dc2626]"
                                 : "bg-[#d97706]"
                           }`}
                         >
-                          {popup.status === "approved"
-                            ? "Approval Completed"
+                          {popup.importSummary
+                            ? "Confirm"
+                            : popup.status === "approved"
+                              ? "Approval Completed"
                             : popup.status === "rejected"
                               ? "Rejection Completed"
                               : "Back to Pending List"}
@@ -2871,6 +3290,7 @@ export default function SchoolofOperations() {
                                   <input
                                     type="checkbox"
                                     checked={isSelected}
+                                    onClick={(e) => e.stopPropagation()}
                                     onChange={(e) => {
                                       e.stopPropagation();
                                       toggleSelected(item.id);
@@ -2997,7 +3417,8 @@ export default function SchoolofOperations() {
                         <button
                           type="button"
                           onClick={openDistributeModal}
-                          className="rounded bg-[#2f4d9c] px-4 py-2 text-sm font-semibold text-white hover:bg-[#264183]"
+                          disabled={!hasSelectedPendingForDistribution}
+                          className="rounded bg-[#2f4d9c] px-4 py-2 text-sm font-semibold text-white hover:bg-[#264183] disabled:cursor-not-allowed disabled:bg-slate-400"
                         >
                           Distribute Workload
                         </button>
@@ -3018,8 +3439,13 @@ export default function SchoolofOperations() {
                   >
                     <div className="rounded-sm border border-black">
                       <div className="flex items-center justify-between gap-4 border-b border-black/30 bg-white px-5 py-3">
-                        <div className="rounded-sm bg-[#2f4d9c] px-4 py-2 text-sm font-bold text-white tabular-nums font-sans">
-                          {workloadDetailReportingPeriodLabel(detailsItem)}
+                        <div className="flex items-center gap-3">
+                          <div className="rounded-sm bg-[#2f4d9c] px-4 py-2 text-sm font-bold text-white tabular-nums font-sans">
+                            {workloadDetailReportingPeriodLabel(detailsItem)}
+                          </div>
+                          <div className="rounded-sm bg-slate-100 px-3 py-1 text-xs font-semibold text-slate-700">
+                            {detailsItem.department?.trim() || "Department N/A"}
+                          </div>
                         </div>
                         <div className="flex items-center gap-3 text-sm font-semibold text-slate-800">
                           <button
