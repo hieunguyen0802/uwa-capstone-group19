@@ -1162,7 +1162,11 @@ class TestAdminOpsContract(BaseTestCase):
     def test_distribute_creates_job_record(self):
         client = self._auth_client(self.ops)
         before = WorkloadDistributionJob.objects.count()
-        res = client.post('/api/admin/workloads/distribute/', {'year': 2026, 'semester': 'S1'}, format='json')
+        res = client.post('/api/admin/workloads/distribute/', {
+            'workloadIds': [str(self.report.report_id)],
+            'academicYear': 2026,
+            'semester': 'S1',
+        }, format='json')
         self.assertEqual(res.status_code, 201)
         self.assertEqual(WorkloadDistributionJob.objects.count(), before + 1)
         self.assertTrue(res.data['success'])

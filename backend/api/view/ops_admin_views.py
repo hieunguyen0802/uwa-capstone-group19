@@ -1,11 +1,10 @@
 """
-School Operations (/admin contract) endpoints.
+School Operations endpoints.
 
-Authenticated roles: SCHOOL_OPS, HOS (school-wide visibility, aligns with Supervisor ops usage).
+Authenticated roles: SCHOOL_OPS, HOS (school-wide visibility).
 
-Export contract note (frontend_api_contract_cn.md §10.9):
-First response returns JSON metadata; binaries are streamed from /export/download/.
-This separation is deliberate so we can swap in async export / signed URLs later.
+Routes are registered under both /api/school-operations/* (new contract) and
+/api/admin/* (legacy alias kept for backward compatibility).
 Comments are English-only per project guideline.
 """
 
@@ -16,11 +15,10 @@ from decimal import Decimal
 from pathlib import Path
 
 from django.conf import settings
-
 from django.core.cache import cache
 from django.core.paginator import Paginator
 from django.db import models, transaction
-from django.http import FileResponse, HttpResponse
+from django.http import HttpResponse
 from django.shortcuts import get_object_or_404
 from django.utils import timezone
 from rest_framework import status as http_status
@@ -44,13 +42,12 @@ from api.services.workload_service import (
     _filter_reports_by_range,
     _parse_year_range,
     persist_report_anomaly,
+    evaluate_mvp_anomaly,
 )
 from api.view.supervisor_views import (
     _get_request_reason,
     _get_supervisor_note,
     _parse_breakdown_data,
-    _serialize_breakdown,
-    _serialize_report_row,
     _to_decimal_hours,
 )
 
@@ -114,23 +111,135 @@ def _normalize_front_status(value: str):
 
 def _serialize_staff_row(staff_row: Staff):
     user_obj = staff_row.user
-    name = user_obj.get_full_name().strip() or user_obj.username
     return {
-        'staff_id': staff_row.staff_number,
-        'employee_id': staff_row.staff_number,
-        'first_name': user_obj.first_name or '',
-        'last_name': user_obj.last_name or '',
+        'id': str(staff_row.staff_id),
+        'staffId': staff_row.staff_number,
+        'firstName': user_obj.first_name or '',
+        'lastName': user_obj.last_name or '',
         'email': user_obj.email or '',
-        'full_name': name,
-        'title': '',
-        'department': staff_row.department.name,
-        'active_status': 'Active' if staff_row.is_active else 'Inactive',
-        'canonical_role': staff_row.role,
+        'title': staff_row.title or '',
+        'currentDepartment': staff_row.department.name,
+        'isActive': staff_row.is_active,
+        'isNewEmployee': staff_row.is_new_employee,
+        'notes': staff_row.notes or '',
+        'updatedAt': staff_row.updated_at.strftime('%Y-%m-%d %H:%M'),
     }
 
 
-def _serialize_assignment_row(obj: StaffRoleAssignment):
+def _get_distributed_time(report):
+    """Return the timestamp when this report was distributed (status set to APPROVED)."""
+    log = AuditLog.objects.filter(report=report, action_type='APPROVE').order_by('-created_at').first()
+    return log.created_at.strftime('%Y-%m-%d %H:%M') if log else ''
+
+
+def _get_operated_by(report):
+    """Return the name of the staff who last approved/rejected this report."""
+    log = AuditLog.objects.filter(
+        report=report, action_type__in=['APPROVE', 'REJECT']
+    ).select_related('action_by__user').order_by('-created_at').first()
+    if not log or not log.action_by:
+        return ''
+    return log.action_by.user.get_full_name().strip() or log.action_by.user.username
+
+
+def _serialize_workload_row(report, items):
+    """Serialize a WorkloadReport to the school-operations contract list shape."""
+    staff_user = report.staff.user
+    full_name = staff_user.get_full_name().strip() or staff_user.username
+    total_hours = sum((i.allocated_hours for i in items), Decimal('0.00'))
+    first_teaching = next((i for i in items if i.category == 'TEACHING' and i.unit_code), None)
+    sem = report.semester
+    sem_label = f"Sem{sem[-1]}" if sem.startswith('S') else sem
+    period_label = f"{report.academic_year}-{sem[-1]}" if sem.startswith('S') else str(report.academic_year)
+
     return {
+        'id': str(report.report_id),
+        'studentId': report.staff.staff_number,
+        'semesterLabel': sem_label,
+        'periodLabel': period_label,
+        'name': full_name,
+        'unit': first_teaching.unit_code if first_teaching else '',
+        'notes': _get_request_reason(report),
+        'requestReason': _get_request_reason(report),
+        'title': report.staff.title or '',
+        'department': report.snapshot_department.name,
+        'rate': int(float(report.snapshot_fte) * 100),
+        'status': report.status.lower(),
+        'hours': _to_decimal_hours(total_hours),
+        'supervisorNote': _get_supervisor_note(report),
+        'operatedBy': _get_operated_by(report),
+        'targetTeachingRatio': None,
+        'teachingTargetHours': None,
+        'cancelled': False,
+        'importedFromTemplate': report.import_batch_id is not None,
+        'targetBand': None,
+        'workloadNewStaff': report.staff.is_new_employee,
+        'hodReview': 'no',
+        'distributedTime': _get_distributed_time(report),
+    }
+
+
+def _serialize_workload_detail(report, items):
+    """Serialize a WorkloadReport to the school-operations contract detail shape."""
+    staff_user = report.staff.user
+    full_name = staff_user.get_full_name().strip() or staff_user.username
+    total_hours = sum((i.allocated_hours for i in items), Decimal('0.00'))
+
+    anomaly_result = evaluate_mvp_anomaly(report)
+    metrics = anomaly_result['metrics']
+    calc_tr = float(metrics['calc_tr'])
+    calculated_band = metrics['calculated_band']
+
+    # Build breakdown grouped by category with conflict flags
+    CATEGORY_LABELS = {
+        'TEACHING': 'Teaching',
+        'ASSIGNED_ROLE': 'Assigned Roles',
+        'HDR_SUPERVISION': 'HDR',
+        'SERVICE': 'Service',
+    }
+    breakdown = {'Teaching': [], 'HDR': [], 'Service': [], 'Assigned Roles': [], 'Research (residual)': []}
+    for item in items:
+        label = CATEGORY_LABELS.get(item.category)
+        if label:
+            breakdown[label].append({
+                'name': item.unit_code or item.description or item.category,
+                'hours': _to_decimal_hours(item.allocated_hours),
+            })
+
+    research_hrs = float(metrics['research_pts']) * 17.25
+    if research_hrs > 0:
+        breakdown['Research (residual)'].append({
+            'name': 'Research (residual)',
+            'hours': round(research_hrs, 2),
+        })
+
+    failed_reasons = anomaly_result['reasons']
+    return {
+        'id': str(report.report_id),
+        'studentId': report.staff.staff_number,
+        'name': full_name,
+        'department': report.snapshot_department.name,
+        'status': report.status.lower(),
+        'hours': _to_decimal_hours(total_hours),
+        'targetTeachingRatio': None,
+        'actualTeachingRatio': round(calc_tr * 100, 1),
+        'targetBand': None,
+        'calculatedBand': calculated_band,
+        'fte': float(report.snapshot_fte),
+        'workloadNewStaff': report.staff.is_new_employee,
+        'hodReview': 'no',
+        'cancelled': False,
+        'notes': _get_request_reason(report),
+        'validation': {
+            'hoursAbnormal': report.is_anomaly,
+            'teachingRatioWarning': 'tr_discrepancy' in failed_reasons,
+            'failedReasons': failed_reasons,
+        },
+        'breakdown': breakdown,
+    }
+
+
+def _serialize_assignment_row(obj: StaffRoleAssignment):    return {
         'id': obj.assignment_id,
         'staff_id': obj.staff.staff_number,
         'role': obj.role_code,
@@ -219,18 +328,18 @@ def _build_visualization_payload(reports_queryset, year_from, year_to, semester_
     scope_label = dept_label_scope or 'All Departments'
 
     return {
-        'reporting_period_label': reporting_period_label,
-        'scope_label': scope_label,
+        'reportingPeriodLabel': reporting_period_label,
+        'scopeLabel': scope_label,
         'summary': {
-            'total_departments': len(departments),
-            'total_academics': len(academics_union),
-            'total_work_hours': float(round(total_hours_all, 2)),
-            'pending_requests': pending_total,
-            'approved_requests': approved_total,
-            'rejected_requests': rejected_total,
+            'totalDepartments': len(departments),
+            'totalAcademics': len(academics_union),
+            'totalWorkHours': float(round(total_hours_all, 2)),
+            'pendingRequests': pending_total,
+            'approvedRequests': approved_total,
+            'rejectedRequests': rejected_total,
         },
-        'department_stats': department_stats,
-        'workload_trend': workload_trend,
+        'departmentStats': department_stats,
+        'trend': workload_trend,
     }
 
 
@@ -243,53 +352,61 @@ def _staff_from_body_or_path(request, lookup_id: str):
 @permission_classes([IsAuthenticated])
 @require_role(*ADMIN_ROLES)
 def admin_workload_requests(request):
-    """GET /api/admin/workload-requests/"""
+    """GET /api/school-operations/workloads  (also /api/admin/workload-requests/)"""
     base_qs = _admin_reports_qs(request.staff).prefetch_related('items').select_related(
-        'staff__user', 'snapshot_department'
+        'staff__user', 'staff__department', 'snapshot_department'
     )
 
     qs = base_qs
-    status_filter = (request.GET.get('status') or 'all').lower()
-    if status_filter == 'initial':
+
+    # New contract uses status_filter; legacy used status — accept both.
+    status_filter = (request.GET.get('status_filter') or request.GET.get('status') or 'all').lower()
+    if status_filter == 'pending':
+        qs = qs.filter(status='PENDING')
+    elif status_filter == 'distributed':
+        qs = qs.filter(status='APPROVED')
+    elif status_filter == 'failed':
+        qs = qs.filter(status='REJECTED')
+    elif status_filter == 'superseded':
+        # superseded = non-current; override base_qs which already filters is_current=True
+        qs = get_workload_queryset(request.staff).filter(is_current=False).prefetch_related('items').select_related(
+            'staff__user', 'staff__department', 'snapshot_department'
+        )
+    elif status_filter == 'initial':
         qs = qs.filter(status='INITIAL')
-    elif status_filter != 'all':
-        qs = qs.filter(status=status_filter.upper())
+    # 'all' → no additional filter
 
-    employee_id = request.GET.get('employee_id', '').strip()
-    if employee_id:
-        qs = qs.filter(staff__staff_number=employee_id)
+    # New contract query params
+    staff_id = request.GET.get('staff_id', '').strip()
+    if staff_id:
+        qs = qs.filter(staff__staff_number=staff_id)
 
-    first_name = request.GET.get('first_name', '').strip()
-    if first_name:
-        qs = qs.filter(staff__user__first_name__icontains=first_name)
-
-    last_name = request.GET.get('last_name', '').strip()
-    if last_name:
-        qs = qs.filter(staff__user__last_name__icontains=last_name)
+    name = request.GET.get('name', '').strip()
+    if name:
+        qs = qs.filter(
+            models.Q(staff__user__first_name__icontains=name)
+            | models.Q(staff__user__last_name__icontains=name)
+        )
 
     dept_name = _parse_department_filter(request)
     if dept_name:
         qs = qs.filter(snapshot_department__name=dept_name)
-
-    title = request.GET.get('title', '').strip()
-    if title:
-        # Staff profile has no title column yet — ignore silently to avoid wiping the grid.
-        pass
 
     year = request.GET.get('year', '').strip()
     if year:
         qs = qs.filter(academic_year=year)
 
     semester = request.GET.get('semester', '').strip()
-    if semester:
+    if semester and semester.upper() != 'ALL':
         qs = qs.filter(semester=semester.upper())
 
     qs = qs.order_by('-updated_at')
 
-    summary = {
+    counts = {
         'pending': base_qs.filter(status='PENDING').count(),
-        'approved': base_qs.filter(status='APPROVED').count(),
-        'rejected': base_qs.filter(status='REJECTED').count(),
+        'distributed': base_qs.filter(status='APPROVED').count(),
+        'failed': base_qs.filter(status='REJECTED').count(),
+        'superseded': get_workload_queryset(request.staff).filter(is_current=False).count(),
     }
 
     try:
@@ -301,19 +418,22 @@ def admin_workload_requests(request):
             status=http_status.HTTP_400_BAD_REQUEST,
         )
 
-    rows = [_serialize_report_row(r, list(r.items.all())) for r in qs]
+    rows = [_serialize_workload_row(r, list(r.items.all())) for r in qs]
     paginator = Paginator(rows, page_size)
     current_page = paginator.get_page(page)
 
     return Response({
         'success': True,
-        'message': 'Admin workload requests loaded',
+        'message': 'Workload list loaded',
         'data': {
-            'summary': summary,
-            'page': current_page.number,
-            'page_size': page_size,
-            'total': paginator.count,
             'items': list(current_page.object_list),
+            'pagination': {
+                'page': current_page.number,
+                'pageSize': page_size,
+                'totalItems': paginator.count,
+                'totalPages': paginator.num_pages,
+            },
+            'counts': counts,
         },
     })
 
@@ -322,36 +442,19 @@ def admin_workload_requests(request):
 @permission_classes([IsAuthenticated])
 @require_role(*ADMIN_ROLES)
 def admin_workload_request_detail(request, id):
-    """GET /api/admin/workload-requests/{id}/"""
+    """GET /api/school-operations/workloads/{id}  (also /api/admin/workload-requests/{id}/)"""
     qs = (
         _admin_reports_qs(request.staff)
         .prefetch_related('items')
-        .select_related('staff__user', 'snapshot_department')
+        .select_related('staff__user', 'staff__department', 'snapshot_department')
     )
     report = get_object_or_404(qs, report_id=id)
     items = list(report.items.all())
-    staff_user = report.staff.user
-    full_name = staff_user.get_full_name().strip() or staff_user.username
-    total_hours = sum((i.allocated_hours for i in items), Decimal('0.00'))
-    first_desc = next((i for i in items if i.description), None)
 
     return Response({
         'success': True,
-        'message': 'Request detail loaded',
-        'data': {
-            'id': str(report.report_id),
-            'employee_id': report.staff.staff_number,
-            'name': full_name,
-            'title': '',
-            'department': report.snapshot_department.name,
-            'status': report.status.lower(),
-            'total_hours': _to_decimal_hours(total_hours),
-            'request_reason': _get_request_reason(report),
-            'description': first_desc.description if first_desc else '',
-            'supervisor_note': _get_supervisor_note(report),
-            'is_anomaly': report.is_anomaly,
-            'breakdown': _serialize_breakdown(items),
-        },
+        'message': 'Workload detail loaded',
+        'data': _serialize_workload_detail(report, items),
     })
 
 
@@ -495,21 +598,23 @@ def admin_single_decision(request, id):
 @require_role(*ADMIN_ROLES)
 @transaction.atomic
 def admin_distribute_workloads(request):
-    """POST /api/admin/workloads/distribute/ — persists audit metadata for later automation."""
-    year = request.data.get('year')
+    """POST /api/school-operations/workloads/distribute  (also /api/admin/workloads/distribute/)"""
+    # New contract: workloadIds + academicYear + semester
+    workload_ids = request.data.get('workloadIds') or []
+    year = request.data.get('academicYear') or request.data.get('year')
     semester = (request.data.get('semester') or '').strip().upper()
 
     try:
         year_int = int(year)
     except (TypeError, ValueError):
         return Response(
-            {'success': False, 'message': 'year must be a valid integer'},
+            {'success': False, 'message': 'academicYear must be a valid integer'},
             status=http_status.HTTP_400_BAD_REQUEST,
         )
 
     if not _distribution_year_bounds(year_int):
         return Response(
-            {'success': False, 'message': 'year outside allowed range (2000-2100)'},
+            {'success': False, 'message': 'academicYear outside allowed range (2000-2100)'},
             status=http_status.HTTP_400_BAD_REQUEST,
         )
 
@@ -519,20 +624,52 @@ def admin_distribute_workloads(request):
             status=http_status.HTTP_400_BAD_REQUEST,
         )
 
+    if not isinstance(workload_ids, list) or not workload_ids:
+        return Response(
+            {'success': False, 'message': 'workloadIds must be a non-empty list'},
+            status=http_status.HTTP_400_BAD_REQUEST,
+        )
+
+    if len(workload_ids) > 200:
+        return Response(
+            {'success': False, 'message': 'Cannot distribute more than 200 workloads at once'},
+            status=http_status.HTTP_400_BAD_REQUEST,
+        )
+
+    qs = _admin_reports_qs(request.staff).select_related('staff__user')
+    reports = list(qs.filter(report_id__in=workload_ids))
+
+    if len(reports) != len(workload_ids):
+        return Response(
+            {'success': False, 'message': 'One or more workloadIds are invalid or not accessible'},
+            status=http_status.HTTP_400_BAD_REQUEST,
+        )
+
     job = WorkloadDistributionJob.objects.create(
         academic_year=year_int,
         semester=semester,
         triggered_by=request.staff,
-        notes='Queued via admin portal',
+        notes=f'Distributed {len(reports)} workloads via school-operations portal',
     )
+
+    now_str = timezone.now().strftime('%Y-%m-%d %H:%M')
+    operated_by = request.staff.user.get_full_name().strip() or request.staff.user.username
+    items_out = []
+    for report in reports:
+        items_out.append({
+            'workloadId': str(report.report_id),
+            'status': report.status.lower(),
+            'distributedTime': now_str,
+            'operatedBy': operated_by,
+        })
 
     return Response({
         'success': True,
-        'message': 'Workload distributed successfully',
+        'message': 'Workload distribution job created',
         'data': {
-            'year': year_int,
-            'semester': semester,
-            'job_id': job.job_id,
+            'processedCount': len(reports),
+            'jobId': job.job_id,
+            'items': items_out,
         },
     }, status=http_status.HTTP_201_CREATED)
 
@@ -595,8 +732,9 @@ def _dispatch_template_download(request, filename: str):
     if not target.exists():
         return Response({'success': False, 'message': 'Template missing; regenerate listing first.'}, status=404)
     safe_name = re.sub(r'[^A-Za-z0-9_.-]', '_', filename)
-    handle = target.open('rb')
-    response = FileResponse(handle, content_type='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet')
+    # Read into memory first to avoid Windows file-handle lock (WinError 32).
+    payload = target.read_bytes()
+    response = HttpResponse(payload, content_type='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet')
     response['Content-Disposition'] = f'attachment; filename="{safe_name}"'
     return response
 
@@ -637,172 +775,178 @@ def admin_staff_import_template_download(request):
 @throttle_classes([AdminImportThrottle])
 @transaction.atomic
 def admin_workload_import(request):
-    """POST /api/admin/workloads/import/ — MVP row-level validation with capped uploads."""
-    try:
-        import openpyxl
-    except ImportError:
-        return Response(
-            {'success': False, 'message': 'Import unavailable: openpyxl not installed'},
-            status=http_status.HTTP_503_SERVICE_UNAVAILABLE,
-        )
+    """POST /api/school-operations/workloads/import  (also /api/admin/workloads/import/)
 
-    uploaded = request.FILES.get('file')
-    if not uploaded:
+    Accepts JSON body from the frontend (browser-parsed workbook data).
+    The old Excel file-upload path is no longer the primary interface.
+    """
+    body = request.data or {}
+    sheets = body.get('sheets')
+    if not isinstance(sheets, list) or not sheets:
         return Response(
-            {'success': False, 'message': 'file field is required'},
+            {'success': False, 'message': 'sheets must be a non-empty list'},
             status=http_status.HTTP_400_BAD_REQUEST,
         )
-
-    if uploaded.size > MAX_EXCEL_UPLOAD_BYTES:
-        return Response(
-            {'success': False, 'message': 'file exceeds maximum allowed size'},
-            status=http_status.HTTP_400_BAD_REQUEST,
-        )
-
-    year_raw = request.POST.get('year') or request.POST.get('academic_year')
-    semester = (request.POST.get('semester') or '').strip().upper()
-    try:
-        year_val = int(year_raw)
-    except (TypeError, ValueError):
-        return Response(
-            {'success': False, 'message': 'academic_year and semester are required and must be valid'},
-            status=http_status.HTTP_400_BAD_REQUEST,
-        )
-
-    if semester not in dict(WorkloadReport.SEMESTER_CHOICES):
-        return Response(
-            {'success': False, 'message': 'semester must be S1, S2, or FULL_YEAR'},
-            status=http_status.HTTP_400_BAD_REQUEST,
-        )
-
-    workbook = openpyxl.load_workbook(filename=io.BytesIO(uploaded.read()), read_only=True, data_only=True)
-    sheet = workbook.active
-
-    rows_iter = sheet.iter_rows(values_only=True)
-    header_row = next(rows_iter, None)
-    if not header_row:
-        return Response({'success': False, 'message': 'empty workbook'}, status=400)
-
-    header_map = {}
-    for idx, cell in enumerate(header_row):
-        if cell:
-            header_map[str(cell).strip().lower()] = idx
-
-    required_cols = {'employee_id', 'total_work_hours'}
-    missing = required_cols - set(header_map.keys())
-    if missing:
-        return Response(
-            {'success': False, 'message': 'workbook headers invalid', 'errors': sorted(missing)},
-            status=http_status.HTTP_400_BAD_REQUEST,
-        )
-
-    imported_count = 0
-    failures = []
 
     batch_id = uuid.uuid4()
+    created_count = 0
+    updated_count = 0
+    failed_count = 0
+    failures = []
 
-    def col(row_tuple, header_name):
-        idx = header_map.get(header_name)
-        if idx is None or idx >= len(row_tuple):
-            return ''
-        val = row_tuple[idx]
-        if val is None:
-            return ''
-        return str(val).strip()
+    for sheet in sheets:
+        sheet_name = sheet.get('sheetName', '')
+        # Infer semester from sheet name: "Sem1" → S1, "Sem2" → S2
+        sem_raw = str(sheet_name).strip()
+        if '1' in sem_raw:
+            semester = 'S1'
+        elif '2' in sem_raw:
+            semester = 'S2'
+        else:
+            semester = 'S1'
 
-    for offset, cells in enumerate(rows_iter, start=2):
-        employee_id = col(cells, 'employee_id')
-        hours_raw = col(cells, 'total_work_hours')
-        description = col(cells, 'description')
-        # Always force INITIAL — spreadsheet status column must never bypass the approval workflow.
-        norm_status = 'INITIAL'
+        anomaly_metrics = sheet.get('anomalyMetricsByStaffId') or {}
+        teaching_lines = sheet.get('teachingLinesByStaffId') or {}
+        hdr_metrics = sheet.get('hdrMetricsByStaffId') or {}
+        service_metrics = sheet.get('serviceMetricsByStaffId') or {}
+        role_metrics = sheet.get('roleMetricsByStaffId') or {}
 
-        if not employee_id:
-            failures.append({'row': offset, 'field': 'employee_id', 'message': 'employee_id is required'})
-            continue
+        # Collect all staff IDs from this sheet
+        all_staff_ids = set(anomaly_metrics.keys()) | set(teaching_lines.keys())
 
-        try:
-            hours_val = Decimal(str(hours_raw or '0'))
-        except Exception:
-            failures.append({'row': offset, 'field': 'total_work_hours', 'message': 'invalid decimal'})
-            continue
+        for staff_number in all_staff_ids:
+            staff_row = Staff.objects.select_related('department', 'user').filter(
+                staff_number=staff_number
+            ).first()
+            if not staff_row:
+                failures.append({'staffId': staff_number, 'sheet': sheet_name, 'message': 'Staff not found'})
+                failed_count += 1
+                continue
 
-        if hours_val < 0:
-            failures.append({'row': offset, 'field': 'total_work_hours', 'message': 'total_work_hours must be non-negative'})
-            continue
+            metrics = anomaly_metrics.get(staff_number) or {}
+            year_val = body.get('importedAtIso', '')[:4]
+            try:
+                year_int = int(year_val)
+            except (ValueError, TypeError):
+                year_int = timezone.now().year
 
-        staff_row = Staff.objects.select_related('department', 'user').filter(staff_number=employee_id).first()
-        if not staff_row:
-            failures.append({'row': offset, 'field': 'employee_id', 'message': 'Employee not found'})
-            continue
+            # Block re-import if a non-INITIAL/REJECTED report already exists
+            conflicts = WorkloadReport.objects.filter(
+                staff=staff_row,
+                academic_year=year_int,
+                semester=semester,
+                is_current=True,
+            ).exclude(status__in=['INITIAL', 'REJECTED'])
+            if conflicts.exists():
+                failures.append({'staffId': staff_number, 'sheet': sheet_name, 'message': 'Report locked; rollback required'})
+                failed_count += 1
+                continue
 
-        conflicts = WorkloadReport.objects.filter(
-            staff=staff_row,
-            academic_year=year_val,
-            semester=semester,
-            is_current=True,
-        ).exclude(status__in=['INITIAL', 'REJECTED'])
-        if conflicts.exists():
-            failures.append({'row': offset, 'field': 'status', 'message': 'Report locked; rollback required'})
-            continue
+            orphan_reports = list(WorkloadReport.objects.select_for_update().filter(
+                staff=staff_row,
+                academic_year=year_int,
+                semester=semester,
+                is_current=True,
+            ))
 
-        superseded_reports = []
-        orphan_reports = WorkloadReport.objects.select_for_update().filter(
-            staff=staff_row,
-            academic_year=year_val,
-            semester=semester,
-            is_current=True,
-        )
-        superseded_reports = list(orphan_reports)
-
-        report = WorkloadReport.objects.create(
-            staff=staff_row,
-            academic_year=year_val,
-            semester=semester,
-            snapshot_fte=staff_row.fte,
-            snapshot_department=staff_row.department,
-            status=norm_status,
-            import_batch_id=batch_id,
-            is_anomaly=False,
-            is_current=True,
-        )
-
-        for old in superseded_reports:
-            old.is_current = False
-            old.superseded_by = report
-            old.save(update_fields=['is_current', 'superseded_by', 'updated_at'])
-            AuditLog.objects.create(
-                report=old,
-                action_by=request.staff,
-                action_type='MODIFIED_BY_REIMPORT',
-                changes={'superseded_by': str(report.report_id), 'batch': str(batch_id)},
+            # Always force INITIAL — import must never bypass the approval workflow.
+            report = WorkloadReport.objects.create(
+                staff=staff_row,
+                academic_year=year_int,
+                semester=semester,
+                snapshot_fte=staff_row.fte,
+                snapshot_department=staff_row.department,
+                status='INITIAL',
+                import_batch_id=batch_id,
+                is_anomaly=False,
+                is_current=True,
             )
 
-        AuditLog.objects.create(
-            report=report,
-            action_by=request.staff,
-            action_type='IMPORTED',
-            changes={'batch': str(batch_id), 'kind': 'ADMIN_WORKLOAD_IMPORT', 'superseded': [str(r.report_id) for r in superseded_reports]},
-        )
+            for old in orphan_reports:
+                old.is_current = False
+                old.superseded_by = report
+                old.save(update_fields=['is_current', 'superseded_by', 'updated_at'])
+                AuditLog.objects.create(
+                    report=old,
+                    action_by=request.staff,
+                    action_type='MODIFIED_BY_REIMPORT',
+                    changes={'superseded_by': str(report.report_id), 'batch': str(batch_id)},
+                )
 
-        WorkloadItem.objects.create(
-            report=report,
-            category='ASSIGNED_ROLE',
-            unit_code=None,
-            description=description[:500] if description else 'Imported workload totals',
-            allocated_hours=hours_val,
-        )
-        persist_report_anomaly(report, department_conflict=False)
-        imported_count += 1
+            AuditLog.objects.create(
+                report=report,
+                action_by=request.staff,
+                action_type='IMPORTED',
+                changes={'batch': str(batch_id), 'kind': 'JSON_WORKLOAD_IMPORT',
+                         'superseded': [str(r.report_id) for r in orphan_reports]},
+            )
+
+            # Create WorkloadItems from the parsed sheet data
+            items_to_create = []
+
+            for line in (teaching_lines.get(staff_number) or []):
+                hrs = Decimal(str(line.get('hours', 0) or 0))
+                if hrs < 0:
+                    continue
+                items_to_create.append(WorkloadItem(
+                    report=report,
+                    category='TEACHING',
+                    unit_code=str(line.get('unit', ''))[:50] or None,
+                    description='Teaching',
+                    allocated_hours=hrs,
+                ))
+
+            hdr = hdr_metrics.get(staff_number) or {}
+            hdr_hrs = Decimal(str(hdr.get('totalHrs', 0) or 0))
+            if hdr_hrs > 0:
+                items_to_create.append(WorkloadItem(
+                    report=report,
+                    category='HDR_SUPERVISION',
+                    unit_code=None,
+                    description='HDR Supervision',
+                    allocated_hours=hdr_hrs,
+                ))
+
+            svc = service_metrics.get(staff_number) or {}
+            svc_pts = Decimal(str(svc.get('servicePoints', 0) or 0))
+            svc_hrs = svc_pts * Decimal('17.25')
+            if svc_hrs > 0:
+                items_to_create.append(WorkloadItem(
+                    report=report,
+                    category='SERVICE',
+                    unit_code=None,
+                    description='Service',
+                    allocated_hours=svc_hrs,
+                ))
+
+            for role in (role_metrics.get(staff_number) or {}).get('roles', []):
+                role_hrs = Decimal(str(role.get('hours', 0) or 0))
+                if role_hrs > 0:
+                    items_to_create.append(WorkloadItem(
+                        report=report,
+                        category='ASSIGNED_ROLE',
+                        unit_code=None,
+                        description=str(role.get('name', 'Role'))[:500],
+                        allocated_hours=role_hrs,
+                    ))
+
+            if items_to_create:
+                WorkloadItem.objects.bulk_create(items_to_create)
+
+            persist_report_anomaly(report, department_conflict=False)
+
+            if orphan_reports:
+                updated_count += 1
+            else:
+                created_count += 1
 
     return Response({
-        'success': True,
-        'message': 'Workload import completed',
-        'data': {
-            'imported_count': imported_count,
-            'failed_count': len(failures),
-            'errors': failures,
-        },
+        'ok': True,
+        'referenceId': str(batch_id),
+        'created': created_count,
+        'updated': updated_count,
+        'failed': failed_count,
+        'errors': failures,
     })
 
 
@@ -812,86 +956,102 @@ def admin_workload_import(request):
 @throttle_classes([AdminImportThrottle])
 @transaction.atomic
 def admin_staff_import(request):
-    """POST /api/admin/staff/import/ — updates existing Staff members only (creates no phantom users)."""
-    try:
-        import openpyxl
-    except ImportError:
+    """POST /api/school-operations/staff/import  (also /api/admin/staff/import/)
+
+    Accepts JSON body: { "rows": [ { staffId, firstName, lastName, email, title,
+    department, isActive, isNewEmployee, notes } ] }
+    Updates existing Staff only — never creates phantom users.
+    """
+    body = request.data or {}
+    rows = body.get('rows')
+    if not isinstance(rows, list) or not rows:
         return Response(
-            {'success': False, 'message': 'Import unavailable: openpyxl not installed'},
-            status=http_status.HTTP_503_SERVICE_UNAVAILABLE,
+            {'success': False, 'message': 'rows must be a non-empty list'},
+            status=http_status.HTTP_400_BAD_REQUEST,
         )
 
-    uploaded = request.FILES.get('file')
-    if not uploaded:
-        return Response({'success': False, 'message': 'file field is required'}, status=http_status.HTTP_400_BAD_REQUEST)
-
-    if uploaded.size > MAX_EXCEL_UPLOAD_BYTES:
-        return Response({'success': False, 'message': 'file exceeds maximum allowed size'}, status=http_status.HTTP_400_BAD_REQUEST)
-
-    workbook = openpyxl.load_workbook(filename=io.BytesIO(uploaded.read()), read_only=True, data_only=True)
-    sheet = workbook.active
-
-    iterator = sheet.iter_rows(values_only=True)
-    header_cells = next(iterator, [])
-    mapping = {}
-    for idx, value in enumerate(header_cells):
-        if value:
-            mapping[str(value).strip().lower()] = idx
-
-    required = {'employee_id', 'first_name', 'last_name', 'email', 'department', 'active_status'}
-    missing = required - set(mapping.keys())
-    if missing:
-        return Response({'success': False, 'message': 'staff template malformed', 'errors': sorted(missing)}, status=400)
-
-    successes = []
+    created_count = 0
+    updated_count = 0
     failures = []
 
-    def cell(row_vals, header_name):
-        idx = mapping[header_name]
-        if idx >= len(row_vals):
-            return ''
-        val = row_vals[idx]
-        return '' if val is None else str(val).strip()
-
-    for seq, row_vals in enumerate(iterator, start=2):
-        emp_id = cell(row_vals, 'employee_id')
-        if not emp_id:
-            failures.append({'row': seq, 'field': 'employee_id', 'message': 'employee_id required'})
+    for idx, row in enumerate(rows):
+        staff_number = str(row.get('staffId', '')).strip()
+        if not staff_number:
+            failures.append({'index': idx, 'message': 'staffId is required'})
             continue
 
-        staff_row = Staff.objects.select_related('user', 'department').filter(staff_number=emp_id).first()
+        staff_row = Staff.objects.select_related('user', 'department').filter(staff_number=staff_number).first()
         if not staff_row:
-            failures.append({'row': seq, 'field': 'employee_id', 'message': 'Employee not found'})
+            failures.append({'index': idx, 'staffId': staff_number, 'message': 'Staff not found'})
             continue
-
-        dept_name = cell(row_vals, 'department')
-        dept = staff_row.department
-
-        if dept_name:
-            resolved = Department.objects.filter(name__iexact=dept_name).first()
-            if not resolved:
-                failures.append({'row': seq, 'field': 'department', 'message': 'Department not found'})
-                continue
-            dept = resolved
-
-        active_cell = cell(row_vals, 'active_status').lower()
-        is_active = active_cell != 'inactive'
 
         user_obj = staff_row.user
-        user_obj.first_name = cell(row_vals, 'first_name') or user_obj.first_name
-        user_obj.last_name = cell(row_vals, 'last_name') or user_obj.last_name
-        user_obj.email = cell(row_vals, 'email') or user_obj.email
-        user_obj.save(update_fields=['first_name', 'last_name', 'email'])
+        user_fields = []
 
-        staff_row.department = dept
-        staff_row.is_active = is_active
-        staff_row.save(update_fields=['department', 'is_active', 'updated_at'])
-        successes.append(emp_id)
+        first_name = row.get('firstName')
+        if first_name is not None:
+            user_obj.first_name = str(first_name).strip()[:150]
+            user_fields.append('first_name')
+
+        last_name = row.get('lastName')
+        if last_name is not None:
+            user_obj.last_name = str(last_name).strip()[:150]
+            user_fields.append('last_name')
+
+        email = row.get('email')
+        if email is not None:
+            email_clean = str(email).strip().lower()
+            if email_clean and not re.match(r'^[^@\s]+@[^@\s]+\.[^@\s]+$', email_clean):
+                failures.append({'index': idx, 'staffId': staff_number, 'message': 'invalid email'})
+                continue
+            user_obj.email = email_clean
+            user_fields.append('email')
+
+        if user_fields:
+            user_obj.save(update_fields=list(set(user_fields)))
+
+        staff_fields = []
+
+        dept_name = row.get('department')
+        if dept_name:
+            dept = Department.objects.filter(name__iexact=str(dept_name).strip()).first()
+            if not dept:
+                failures.append({'index': idx, 'staffId': staff_number, 'message': 'department not found'})
+                continue
+            staff_row.department = dept
+            staff_fields.append('department')
+
+        title = row.get('title')
+        if title is not None:
+            staff_row.title = str(title).strip()[:100]
+            staff_fields.append('title')
+
+        is_active = row.get('isActive')
+        if is_active is not None:
+            staff_row.is_active = bool(is_active)
+            staff_fields.append('is_active')
+
+        is_new = row.get('isNewEmployee')
+        if is_new is not None:
+            staff_row.is_new_employee = bool(is_new)
+            staff_fields.append('is_new_employee')
+
+        notes = row.get('notes')
+        if notes is not None:
+            staff_row.notes = str(notes)
+            staff_fields.append('notes')
+
+        if staff_fields:
+            staff_fields.append('updated_at')
+            staff_row.save(update_fields=staff_fields)
+
+        updated_count += 1
 
     return Response({
-        'success': True,
-        'message': 'Staff import processed',
-        'data': {'imported_count': len(successes), 'failed_count': len(failures), 'errors': failures},
+        'ok': True,
+        'created': created_count,
+        'updated': updated_count,
+        'errors': failures,
     })
 
 
@@ -899,12 +1059,23 @@ def admin_staff_import(request):
 @permission_classes([IsAuthenticated])
 @require_role(*ADMIN_ROLES)
 def admin_staff_list(request):
+    """GET /api/school-operations/staff  (also /api/admin/staff/)"""
     queryset = Staff.objects.select_related('user', 'department').order_by('staff_number')
 
-    dept_filter = request.GET.get('department', '').strip()
-    if dept_filter and dept_filter.lower() not in {'all departments', 'all'}:
-        queryset = queryset.filter(department__name__iexact=dept_filter)
+    # New contract query params
+    staff_id = request.GET.get('staff_id', '').strip()
+    if staff_id:
+        queryset = queryset.filter(staff_number=staff_id)
 
+    first_name = request.GET.get('first_name', '').strip()
+    if first_name:
+        queryset = queryset.filter(user__first_name__icontains=first_name)
+
+    last_name = request.GET.get('last_name', '').strip()
+    if last_name:
+        queryset = queryset.filter(user__last_name__icontains=last_name)
+
+    # Legacy search param
     search_term = request.GET.get('query', '').strip()
     if search_term:
         queryset = queryset.filter(
@@ -915,7 +1086,7 @@ def admin_staff_list(request):
 
     try:
         page = max(1, int(request.GET.get('page', 1)))
-        page_size = max(1, min(100, int(request.GET.get('page_size', 25))))
+        page_size = max(1, min(100, int(request.GET.get('page_size', 10))))
     except (ValueError, TypeError):
         return Response({'success': False, 'message': 'invalid pagination'}, status=400)
 
@@ -926,72 +1097,96 @@ def admin_staff_list(request):
         'success': True,
         'message': 'Staff roster loaded',
         'data': {
-            'total': paginator.count,
-            'page': page_obj.number,
-            'page_size': page_size,
             'items': [_serialize_staff_row(s) for s in page_obj.object_list],
+            'pagination': {
+                'page': page_obj.number,
+                'pageSize': page_size,
+                'totalItems': paginator.count,
+                'totalPages': paginator.num_pages,
+            },
         },
     })
 
 
-@api_view(['PATCH'])
+@api_view(['GET', 'PATCH'])
 @permission_classes([IsAuthenticated])
 @require_role(*ADMIN_ROLES)
 @transaction.atomic
 def admin_staff_patch(request, staff_id):
-    """PATCH /api/admin/staff/{staff_id}/"""
-    payload = request.data or {}
+    """GET /api/school-operations/staff/{staffId}  or  PATCH /api/school-operations/staff/{staffId}"""
     staff_row = _staff_from_body_or_path(request, staff_id)
 
-    first_name = payload.get('first_name')
-    last_name = payload.get('last_name')
+    if request.method == 'GET':
+        return Response({
+            'success': True,
+            'message': 'Staff detail loaded',
+            'data': _serialize_staff_row(staff_row),
+        })
+
+    # PATCH — accept both camelCase (new contract) and snake_case (legacy)
+    payload = request.data or {}
+
+    first_name = payload.get('firstName') if 'firstName' in payload else payload.get('first_name')
+    last_name = payload.get('lastName') if 'lastName' in payload else payload.get('last_name')
     email = payload.get('email')
     dept_name = payload.get('department')
-    active_state = payload.get('active_status')
+    title = payload.get('title')
+    is_active = payload.get('isActive') if 'isActive' in payload else (
+        None if 'active_status' not in payload else (payload.get('active_status', '').lower() != 'inactive')
+    )
+    is_new_employee = payload.get('isNewEmployee')
+    notes = payload.get('notes')
 
     user_obj = staff_row.user
-    updated_fields_user = []
+    user_fields = []
 
     if first_name is not None:
         user_obj.first_name = str(first_name).strip()[:150]
-        updated_fields_user.append('first_name')
+        user_fields.append('first_name')
     if last_name is not None:
         user_obj.last_name = str(last_name).strip()[:150]
-        updated_fields_user.append('last_name')
+        user_fields.append('last_name')
     if email is not None:
         email_clean = str(email).strip().lower()
-        email_pattern = r'^[^@\s]+@[^@\s]+\.[^@\s]+$'
-        if not re.match(email_pattern, email_clean):
+        if not re.match(r'^[^@\s]+@[^@\s]+\.[^@\s]+$', email_clean):
             return Response({'success': False, 'message': 'invalid email'}, status=http_status.HTTP_400_BAD_REQUEST)
         user_obj.email = email_clean
-        updated_fields_user.append('email')
+        user_fields.append('email')
 
-    if updated_fields_user:
-        user_obj.save(update_fields=list(set(updated_fields_user)))
+    if user_fields:
+        user_obj.save(update_fields=list(set(user_fields)))
 
-    staff_update_fields = []
+    staff_fields = []
     if dept_name:
         department = Department.objects.filter(name__iexact=str(dept_name).strip()).first()
         if not department:
             return Response({'success': False, 'message': 'department not found'}, status=http_status.HTTP_400_BAD_REQUEST)
         staff_row.department = department
-        staff_update_fields.append('department')
+        staff_fields.append('department')
 
-    if active_state is not None:
-        lowered = str(active_state).strip().lower()
-        if lowered not in {'active', 'inactive'}:
-            return Response({'success': False, 'message': 'active_status invalid'}, status=http_status.HTTP_400_BAD_REQUEST)
-        staff_row.is_active = lowered != 'inactive'
-        staff_update_fields.append('is_active')
+    if title is not None:
+        staff_row.title = str(title).strip()[:100]
+        staff_fields.append('title')
 
-    if staff_update_fields:
-        staff_update_fields.append('updated_at')
-        staff_row.save(update_fields=staff_update_fields)
+    if is_active is not None:
+        staff_row.is_active = bool(is_active)
+        staff_fields.append('is_active')
+
+    if is_new_employee is not None:
+        staff_row.is_new_employee = bool(is_new_employee)
+        staff_fields.append('is_new_employee')
+
+    if notes is not None:
+        staff_row.notes = str(notes)
+        staff_fields.append('notes')
+
+    if staff_fields:
+        staff_fields.append('updated_at')
+        staff_row.save(update_fields=staff_fields)
 
     return Response({
-        'success': True,
-        'message': 'Staff profile updated',
-        'data': _serialize_staff_row(staff_row),
+        'ok': True,
+        'staff': _serialize_staff_row(staff_row),
     })
 
 
@@ -1223,3 +1418,151 @@ def admin_export_download(request):
     )
     response['Content-Disposition'] = 'attachment; filename="Admin_Workload.xlsx"'
     return response
+
+
+def _build_workload_export_workbook(qs):
+    """Build an in-memory Excel workbook from a WorkloadReport queryset."""
+    try:
+        import openpyxl
+    except ImportError:
+        return None
+    wb = openpyxl.Workbook()
+    ws = wb.active
+    ws.title = 'Workloads'
+    ws.append(['Staff ID', 'Name', 'Department', 'Year', 'Semester', 'Status', 'Hours', 'Category', 'Detail'])
+    for report in qs:
+        staff_user = report.staff.user
+        name = staff_user.get_full_name().strip() or staff_user.username
+        for item in report.items.all():
+            ws.append([
+                report.staff.staff_number,
+                name,
+                report.snapshot_department.name,
+                report.academic_year,
+                report.semester,
+                report.status.lower(),
+                float(item.allocated_hours),
+                item.category,
+                item.unit_code or item.description or '',
+            ])
+    buf = io.BytesIO()
+    wb.save(buf)
+    buf.seek(0)
+    return buf.getvalue()
+
+
+@api_view(['GET'])
+@permission_classes([IsAuthenticated])
+@require_role(*ADMIN_ROLES)
+@throttle_classes([AdminExportThrottle])
+def admin_workload_export(request):
+    """GET /api/school-operations/workloads/export — direct file stream filtered by status/staff/dept/year/semester."""
+    status_filter = (request.GET.get('status_filter') or '').lower()
+    qs = (
+        _admin_reports_qs(request.staff)
+        .prefetch_related('items')
+        .select_related('staff__user', 'snapshot_department')
+    )
+    if status_filter == 'distributed':
+        qs = qs.filter(status='APPROVED')
+    elif status_filter == 'failed':
+        qs = qs.filter(status='REJECTED')
+    elif status_filter == 'superseded':
+        qs = get_workload_queryset(request.staff).filter(is_current=False).prefetch_related('items').select_related(
+            'staff__user', 'snapshot_department'
+        )
+
+    staff_id = request.GET.get('staff_id', '').strip()
+    if staff_id:
+        qs = qs.filter(staff__staff_number=staff_id)
+
+    name = request.GET.get('name', '').strip()
+    if name:
+        qs = qs.filter(
+            models.Q(staff__user__first_name__icontains=name)
+            | models.Q(staff__user__last_name__icontains=name)
+        )
+
+    dept_name = _parse_department_filter(request)
+    if dept_name:
+        qs = qs.filter(snapshot_department__name=dept_name)
+
+    year = request.GET.get('year', '').strip()
+    if year:
+        qs = qs.filter(academic_year=year)
+
+    semester = request.GET.get('semester', '').strip()
+    if semester and semester.upper() != 'ALL':
+        qs = qs.filter(semester=semester.upper())
+
+    payload = _build_workload_export_workbook(qs)
+    if payload is None:
+        return Response({'success': False, 'message': 'Export unavailable: openpyxl not installed'}, status=503)
+
+    response = HttpResponse(payload, content_type='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet')
+    response['Content-Disposition'] = 'attachment; filename="Workloads_Export.xlsx"'
+    return response
+
+
+@api_view(['GET'])
+@permission_classes([IsAuthenticated])
+@require_role(*ADMIN_ROLES)
+@throttle_classes([AdminExportThrottle])
+def admin_school_export(request):
+    """GET /api/school-operations/export — school-level history Excel, direct file stream."""
+    year_from, year_to = _parse_year_range(request)
+    semester_filter = _parse_semester_filter(request)
+    dept_scope = _parse_department_filter(request)
+
+    qs = (
+        _admin_reports_qs(request.staff)
+        .prefetch_related('items')
+        .select_related('staff__user', 'snapshot_department')
+        .order_by('snapshot_department__name', 'staff__staff_number', 'academic_year', 'semester')
+    )
+    qs = _filter_reports_by_range(qs, year_from, year_to, semester_filter)
+    if dept_scope:
+        qs = qs.filter(snapshot_department__name=dept_scope)
+
+    payload = _build_workload_export_workbook(qs)
+    if payload is None:
+        return Response({'success': False, 'message': 'Export unavailable: openpyxl not installed'}, status=503)
+
+    response = HttpResponse(payload, content_type='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet')
+    response['Content-Disposition'] = 'attachment; filename="School_Workload_History.xlsx"'
+    return response
+
+
+@api_view(['POST'])
+@permission_classes([IsAuthenticated])
+@require_role(*ADMIN_ROLES)
+def admin_contact_staff(request):
+    """POST /api/school-operations/contact-staff — stub; stores message as AuditLog comment."""
+    body = request.data or {}
+    recipient_id = str(body.get('recipientStaffId', '')).strip()
+    message_body = str(body.get('messageBody', '')).strip()
+
+    if not recipient_id:
+        return Response({'success': False, 'message': 'recipientStaffId is required'}, status=http_status.HTTP_400_BAD_REQUEST)
+    if not message_body:
+        return Response({'success': False, 'message': 'messageBody is required'}, status=http_status.HTTP_400_BAD_REQUEST)
+    if len(message_body) > 2000:
+        return Response({'success': False, 'message': 'messageBody must be <= 2000 characters'}, status=http_status.HTTP_400_BAD_REQUEST)
+
+    recipient = Staff.objects.filter(staff_number=recipient_id).first()
+    if not recipient:
+        return Response({'success': False, 'message': 'Recipient staff not found'}, status=http_status.HTTP_404_NOT_FOUND)
+
+    ref_id = f'msg_{uuid.uuid4().hex[:8]}'
+    # Store as an audit entry on the recipient's most recent current report (best-effort).
+    latest_report = WorkloadReport.objects.filter(staff=recipient, is_current=True).order_by('-updated_at').first()
+    if latest_report:
+        AuditLog.objects.create(
+            report=latest_report,
+            action_by=request.staff,
+            action_type='CONTACT_STAFF',
+            comment=message_body,
+            changes={'referenceId': ref_id, 'recipientStaffId': recipient_id},
+        )
+
+    return Response({'ok': True, 'referenceId': ref_id})

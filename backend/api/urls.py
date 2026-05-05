@@ -32,6 +32,7 @@ from api.view.ops_admin_views import (
     admin_workload_import_template,
     admin_workload_import_template_download,
     admin_workload_import,
+    admin_workload_export,
     admin_staff_import_template,
     admin_staff_import_template_download,
     admin_staff_import,
@@ -42,6 +43,8 @@ from api.view.ops_admin_views import (
     admin_visualization,
     admin_export_manifest,
     admin_export_download,
+    admin_school_export,
+    admin_contact_staff,
 )
 
 urlpatterns = [
@@ -96,4 +99,18 @@ urlpatterns = [
     path('admin/visualization/', admin_visualization),
     path('admin/export/', admin_export_manifest),
     path('admin/export/download/', admin_export_download),
+
+    # School Operations — new contract (/api/school-operations/*)
+    # Literal paths before parameterised catch-alls to avoid shadowing (same lesson as /admin/staff/).
+    path('school-operations/workloads/import', admin_workload_import),
+    path('school-operations/workloads/distribute', admin_distribute_workloads),
+    path('school-operations/workloads/export', admin_workload_export),
+    path('school-operations/workloads/<str:id>', admin_workload_request_detail),
+    path('school-operations/workloads', admin_workload_requests),
+    path('school-operations/staff/import', admin_staff_import),
+    path('school-operations/staff/<str:staff_id>', admin_staff_patch),
+    path('school-operations/staff', admin_staff_list),
+    path('school-operations/visualization', admin_visualization),
+    path('school-operations/export', admin_school_export),
+    path('school-operations/contact-staff', admin_contact_staff),
 ]

@@ -116,6 +116,16 @@ class Staff(models.Model):
     # Soft-delete flag. Set to False for departed staff instead of deleting the row,
     # so historical workload records remain intact.
     is_active = models.BooleanField(default=True)
+
+    # Academic title (e.g. "Lecturer", "Associate Professor") — display only, not used for RBAC.
+    title = models.CharField(max_length=100, blank=True, default='')
+
+    # True for staff in their first year; affects workload band calculation.
+    is_new_employee = models.BooleanField(default=False)
+
+    # Free-text notes visible to School Ops only.
+    notes = models.TextField(blank=True, default='')
+
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)  # auto-updated on every save()
 
