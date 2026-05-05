@@ -21,6 +21,10 @@ from rest_framework.permissions import IsAuthenticated
 from rest_framework.response import Response
 from rest_framework.throttling import UserRateThrottle
 
+import io
+
+from PIL import Image
+
 from api.models import Message, Staff
 
 PEER_SLUGS = frozenset({'admin', 'hod', 'hos'})
@@ -59,7 +63,8 @@ def _err(message: str, errors: dict | None = None, *, http_status: int = status.
 
 
 def _staff(request) -> Staff:
-    return get_object_or_404(Staff, user=request.user)
+    # Reject disabled accounts even if their JWT is still valid.
+    return get_object_or_404(Staff, user=request.user, is_active=True)
 
 
 def _parse_thread_key(thread_key: str) -> tuple[str, str] | None:
@@ -105,16 +110,22 @@ def _resolve_thread_key_for_list(viewer: Staff, peer_slug: str, with_staff_numbe
     if viewer.role in ADMIN_LIKE_ROLES and peer_slug == 'admin':
         if len(ws) != 8:
             raise ValueError('with_staff_required')
+        if not Staff.objects.filter(staff_number=ws, is_active=True).exists():
+            raise ValueError('staff_not_found')
         return f'{ws}:admin'
 
     if viewer.role == 'HOD' and peer_slug == 'hod':
         if len(ws) != 8:
             raise ValueError('with_staff_required')
+        if not Staff.objects.filter(staff_number=ws, is_active=True).exists():
+            raise ValueError('staff_not_found')
         return f'{ws}:hod'
 
     if viewer.role == 'HOS' and peer_slug == 'hos':
         if len(ws) != 8:
             raise ValueError('with_staff_required')
+        if not Staff.objects.filter(staff_number=ws, is_active=True).exists():
+            raise ValueError('staff_not_found')
         return f'{ws}:hos'
 
     if ws and ws != viewer.staff_number:
@@ -133,16 +144,22 @@ def _resolve_thread_key_for_post(sender: Staff, receiver_role: str, with_staff_n
     if sender.role in ADMIN_LIKE_ROLES and slug == 'admin':
         if not ws or len(ws) != 8:
             raise ValueError('with_staff_required')
+        if not Staff.objects.filter(staff_number=ws, is_active=True).exists():
+            raise ValueError('staff_not_found')
         return f'{ws}:admin'
 
     if sender.role == 'HOD' and slug == 'hod':
         if not ws or len(ws) != 8:
             raise ValueError('with_staff_required')
+        if not Staff.objects.filter(staff_number=ws, is_active=True).exists():
+            raise ValueError('staff_not_found')
         return f'{ws}:hod'
 
     if sender.role == 'HOS' and slug == 'hos':
         if not ws or len(ws) != 8:
             raise ValueError('with_staff_required')
+        if not Staff.objects.filter(staff_number=ws, is_active=True).exists():
+            raise ValueError('staff_not_found')
         return f'{ws}:hos'
 
     if ws:
@@ -212,6 +229,14 @@ def profile_avatar(request):
             {'avatar': ['Unsupported image type. Use JPEG, PNG, or WebP.']},
         )
 
+    # Verify actual file content with Pillow — client MIME type alone is not trustworthy.
+    try:
+        img = Image.open(io.BytesIO(upload.read()))
+        img.verify()
+        upload.seek(0)
+    except Exception:
+        return _err('Validation failed', {'avatar': ['File is not a valid image.']})
+
     if staff.avatar:
         staff.avatar.delete(save=False)
 
@@ -246,6 +271,8 @@ def _messages_list(request):
             )
         if code == 'with_staff_forbidden':
             return _err('Forbidden', {'with_staff_number': ['Not allowed.']}, http_status=status.HTTP_403_FORBIDDEN)
+        if code == 'staff_not_found':
+            return _err('Validation failed', {'with_staff_number': ['Staff not found.']})
         return _err('Validation failed', {'conversation_with': ['Invalid value.']})
 
     try:
@@ -311,6 +338,8 @@ def _messages_create(request):
             )
         if code == 'with_staff_forbidden':
             return _err('Forbidden', {'with_staff_number': ['Not allowed.']}, http_status=status.HTTP_403_FORBIDDEN)
+        if code == 'staff_not_found':
+            return _err('Validation failed', {'with_staff_number': ['Staff not found.']})
         return _err('Validation failed', {'receiver_role': ['Invalid value.']})
 
     try:
