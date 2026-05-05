@@ -18,17 +18,17 @@ import ReportingFilterIntro from "../components/common/ReportingFilterIntro";
 import ReportingPeriodBar from "../components/common/ReportingPeriodBar";
 import SearchButton from "../components/common/SearchButton";
 import SectionTabs from "../components/common/SectionTabs";
-import { MOCK_DASHBOARD_USER } from "../data/mockDashboardUser";
 import StatusPill from "../components/common/StatusPill";
 import YearRangeSemesterActionRow from "../components/common/YearRangeSemesterActionRow";
 import ThemedNoticeModal, { SUPERSEDED_RECORD_MESSAGE } from "../components/common/ThemedNoticeModal";
 import WorkHoursBadge from "../components/common/WorkHoursBadge";
-import { submitContactSchoolOfOperations } from "../api/contactSchoolOfOperations";
+import type { ProfileModalUser } from "../components/common/ProfileModalFieldGrid";
 
 type AcademicItem = {
   id: number;
   name: string;
   employeeId: string;
+  department?: string;
   /** Job title (shown in detail modal; optional — falls back to generated title by id). */
   title?: string;
   notes: string;
@@ -44,24 +44,67 @@ type AcademicItem = {
   supervisorNote?: string;
   /** Admin (or delegate) who assigned this workload task to the staff member. */
   assignedBy?: string;
+  /** Display-only field for Academic detail modal (mirrors School Ops detail layout). */
+  employmentType?: "Full-time" | "Part-time" | string;
+  /** Display-only field for Academic detail modal (mirrors School Ops detail layout). */
+  newStaff?: "Yes" | "No" | string;
+  /** Display-only field for Academic detail modal (mirrors School Ops detail layout). */
+  hodReview?: "Yes" | "No" | string;
   /** When true (from API), row is read-only and detail is blocked — superseded by a newer version. */
   cancelled?: boolean;
+  detailSnapshot?: WorkloadDetailSnapshot;
 };
 
 type BreakdownEntry = {
   name: string;
   hours: number;
+  excludeFromWorkloadTotal?: boolean;
 };
 
-type BreakdownCategory = "Teaching" | "Assigned Roles" | "HDR" | "Service";
+type BreakdownCategory = "Teaching" | "Assigned Roles" | "HDR" | "Service" | "Research (residual)";
 
 type BreakdownData = Record<BreakdownCategory, BreakdownEntry[]>;
 
-const BREAKDOWN_TABS: BreakdownCategory[] = ["Teaching", "Assigned Roles", "HDR", "Service"];
+type WorkloadDetailSnapshot = {
+  breakdown: BreakdownData;
+  actualTeachingRatioDisplay: string;
+  actualTeachingRatioOutOfRange: boolean;
+  showActualTeachingRatioBandWarning: boolean;
+  actualRatioHoverText: string;
+  totalHoursDisplay: string;
+  adminModalHoursAbnormal: boolean;
+  totalHoursTooltipText: string;
+  employmentType: string;
+};
+
+const BREAKDOWN_TABS: BreakdownCategory[] = [
+  "Teaching",
+  "HDR",
+  "Service",
+  "Assigned Roles",
+  "Research (residual)",
+];
+
+function workloadBreakdownTotalLabel(tab: BreakdownCategory): string {
+  switch (tab) {
+    case "Teaching":
+      return "Teaching Total";
+    case "HDR":
+      return "HDR Total";
+    case "Service":
+      return "Service Total";
+    case "Assigned Roles":
+      return "Assigned Roles Total";
+    case "Research (residual)":
+      return "Research Total";
+    default:
+      return "Total";
+  }
+}
 
 function totalBreakdownHours(breakdown: BreakdownData): number {
   return BREAKDOWN_TABS.reduce(
-    (sum, tab) => sum + breakdown[tab].reduce((s, row) => s + row.hours, 0),
+    (sum, tab) => sum + breakdown[tab].reduce((s, row) => s + (row.excludeFromWorkloadTotal ? 0 : row.hours), 0),
     0
   );
 }
@@ -112,11 +155,54 @@ type SupervisorDraftRequest = {
 };
 
 const SUPERVISOR_DRAFT_KEY = "academic_to_supervisor_requests_v1";
+const SUPERVISOR_STATE_KEY = "supervisor_requests_state_v1";
 const ACADEMIC_STATUS_SYNC_KEY = "academic_status_sync_v1";
 const ACADEMIC_NOTES_SYNC_KEY = "academic_notes_sync_v1";
 const SUPERVISOR_SYNC_EVENT = "supervisor-status-updated";
 const ACADEMIC_DRAFT_EVENT = "academic-drafts-updated";
+const OPS_ACADEMIC_NOTIFICATION_KEY = "ops_to_academic_notifications_v1";
+const OPS_ACADEMIC_DISTRIBUTED_KEY = "ops_academic_distributed_workloads_v1";
 const REQUEST_REASON_MAX_LENGTH = 240;
+const ACADEMIC_DASHBOARD_USER: ProfileModalUser = {
+  surname: "Dias",
+  firstName: "John",
+  employeeId: "12345931",
+  title: "Lecturer",
+  department: "Physics",
+  email: "john.dias@uwa.edu.au",
+};
+
+type SupervisorStateRow = {
+  id?: number;
+  studentId?: string;
+  name?: string;
+  title?: string;
+  department?: string;
+  status?: string;
+  cancelled?: boolean;
+  operatedBy?: string;
+  hours?: number;
+  notes?: string;
+  description?: string;
+  targetTeachingRatio?: number;
+  teachingTargetHours?: number;
+  workloadNewStaff?: boolean;
+  hodReview?: string;
+  detailSnapshot?: WorkloadDetailSnapshot;
+};
+
+type AcademicNotification = {
+  id: string;
+  recipientStaffId: string;
+  recipientName: string;
+  recipientEmail: string;
+  fromName?: string;
+  fromEmail?: string;
+  subject: string;
+  body: string;
+  sentAt: string;
+  readAt?: string;
+};
 
 function readAcademicStatusSync(): Record<string, "pending" | "approved" | "rejected"> {
   if (typeof window === "undefined") return {};
@@ -158,12 +244,103 @@ function applySyncedStatus(
     const syncedStatus = synced[item.employeeId];
     const syncedNote = noteMap[item.employeeId];
     if (!syncedStatus && !syncedNote) return item;
+    const nextStatus: AcademicItem["status"] =
+      item.status === ""
+        ? // Freshly distributed workload must stay "-" until Academic clicks Submit Request.
+          ""
+        : syncedStatus || item.status;
     return {
       ...item,
-      status: syncedStatus || item.status,
+      status: nextStatus,
       supervisorNote: syncedNote || item.supervisorNote || "",
     };
   });
+}
+
+function readDistributedItemsForAcademic(employeeId: string): AcademicItem[] {
+  if (typeof window === "undefined") return [];
+  try {
+    const raw =
+      window.localStorage.getItem(OPS_ACADEMIC_DISTRIBUTED_KEY) ??
+      window.localStorage.getItem(SUPERVISOR_STATE_KEY);
+    if (!raw) return [];
+    const parsed = JSON.parse(raw);
+    if (!Array.isArray(parsed)) return [];
+
+    const rows = parsed as SupervisorStateRow[];
+    const filtered = rows.filter((row) => {
+      const sid = String(row.studentId ?? "").trim();
+      return sid === employeeId && row.cancelled !== true && row.status === "approved";
+    });
+
+    return filtered.map((row, idx) => {
+      const sid = String(row.studentId ?? "").trim();
+      const rawHodReview = String(row.hodReview ?? "").trim().toLowerCase();
+      return {
+        id: Number.isFinite(row.id) ? Number(row.id) : idx + 1,
+        name: String(row.name ?? "").trim() || `Staff ${sid}`,
+        employeeId: sid,
+        department: String(row.department ?? "").trim() || ACADEMIC_DASHBOARD_USER.department,
+        title: String(row.title ?? "").trim() || undefined,
+        notes: String(row.notes ?? row.description ?? "").trim(),
+        hours: typeof row.hours === "number" && Number.isFinite(row.hours) ? row.hours : 0,
+        status: "",
+        confirmation: "unconfirmed",
+        assignedBy: String(row.operatedBy ?? "").trim() || "School Operations",
+        targetTeachingRatio:
+          typeof row.targetTeachingRatio === "number" && Number.isFinite(row.targetTeachingRatio)
+            ? row.targetTeachingRatio
+            : undefined,
+        teachingTargetHours:
+          typeof row.teachingTargetHours === "number" && Number.isFinite(row.teachingTargetHours)
+            ? row.teachingTargetHours
+            : undefined,
+        newStaff: row.workloadNewStaff ? "Yes" : "No",
+        hodReview: rawHodReview === "yes" ? "Yes" : "No",
+        detailSnapshot: row.detailSnapshot,
+      };
+    });
+  } catch {
+    return [];
+  }
+}
+
+function readAcademicNotifications(employeeId: string): AcademicNotification[] {
+  if (typeof window === "undefined") return [];
+  try {
+    const raw = window.localStorage.getItem(OPS_ACADEMIC_NOTIFICATION_KEY);
+    if (!raw) return [];
+    const parsed = JSON.parse(raw);
+    if (!Array.isArray(parsed)) return [];
+    return (parsed as AcademicNotification[])
+      .filter((n) => String(n.recipientStaffId ?? "").trim() === employeeId)
+      .sort((a, b) => {
+        const ta = Date.parse(a.sentAt ?? "");
+        const tb = Date.parse(b.sentAt ?? "");
+        return (Number.isFinite(tb) ? tb : 0) - (Number.isFinite(ta) ? ta : 0);
+      });
+  } catch {
+    return [];
+  }
+}
+
+function markAcademicNotificationRead(employeeId: string, notificationId: string) {
+  if (typeof window === "undefined") return;
+  try {
+    const raw = window.localStorage.getItem(OPS_ACADEMIC_NOTIFICATION_KEY);
+    if (!raw) return;
+    const parsed = JSON.parse(raw);
+    if (!Array.isArray(parsed)) return;
+    const now = new Date().toISOString();
+    const next = (parsed as AcademicNotification[]).map((n) => {
+      if (String(n.recipientStaffId ?? "").trim() !== employeeId) return n;
+      if (n.id !== notificationId) return n;
+      return n.readAt ? n : { ...n, readAt: now };
+    });
+    window.localStorage.setItem(OPS_ACADEMIC_NOTIFICATION_KEY, JSON.stringify(next));
+  } catch {
+    // no-op for local mock state
+  }
 }
 
 function pushedTimeById(id: number) {
@@ -269,6 +446,7 @@ function breakdownById(id: number, totalHours: number): BreakdownData {
       { name: studentB, hours: hdr2 },
     ],
     Service: [{ name: "Committee support", hours: service }],
+    "Research (residual)": [{ name: "Research (residual)", hours: 0 }],
   };
 }
 
@@ -315,20 +493,51 @@ function AcademicDetailModal({
 }) {
   const [activeTab, setActiveTab] = useState<BreakdownCategory>("Teaching");
   const [descriptionExpanded, setDescriptionExpanded] = useState(true);
-  const breakdown = useMemo(() => breakdownById(item.id, item.hours), [item.id, item.hours]);
-  const hoursAbnormal = useMemo(() => isDetailHoursAbnormal(item, breakdown), [item, breakdown]);
+  const [hodNotesExpanded, setHodNotesExpanded] = useState(false);
+  const breakdown = useMemo(
+    () => item.detailSnapshot?.breakdown ?? breakdownById(item.id, item.hours),
+    [item.detailSnapshot, item.id, item.hours]
+  );
+  const hasHodReviewContent = useMemo(() => {
+    const note = item.supervisorNote?.trim() ?? "";
+    return Boolean(note) || item.status === "approved" || item.status === "rejected";
+  }, [item.status, item.supervisorNote]);
+
+  useEffect(() => {
+    setHodNotesExpanded(hasHodReviewContent);
+  }, [item.id, hasHodReviewContent]);
   const displayTargetTeachingRatio =
-    item.targetTeachingRatio != null ? `${item.targetTeachingRatio}%` : "—";
-  const displayActualTeachingRatio = `${actualTeachingRatioPercent(breakdown)}%`;
+    item.targetTeachingRatio != null ? `${(Math.round(item.targetTeachingRatio * 10) / 10).toFixed(1)}%` : "—";
+  const displayActualTeachingRatio =
+    item.detailSnapshot?.actualTeachingRatioDisplay ?? `${actualTeachingRatioPercent(breakdown)}%`;
+  const displayTotalWorkHours = item.detailSnapshot?.totalHoursDisplay ?? String(item.hours);
+  const actualRatioInputClassName = item.detailSnapshot?.actualTeachingRatioOutOfRange
+    ? "border-red-500 ring-1 ring-red-300 bg-red-50/60 text-red-900"
+    : item.detailSnapshot?.showActualTeachingRatioBandWarning
+      ? "border-yellow-500 ring-1 ring-yellow-300 bg-yellow-50/60 text-amber-900"
+      : "";
+  const actualRatioTooltipClassName = item.detailSnapshot?.actualTeachingRatioOutOfRange
+    ? "border-red-300 bg-red-50 text-red-900"
+    : "border-yellow-300 bg-yellow-50 text-amber-900";
+  const totalHoursInputClassName = item.detailSnapshot?.adminModalHoursAbnormal
+    ? "border-red-500 ring-1 ring-red-300 bg-red-50/40 text-red-900 text-xs sm:text-sm"
+    : "text-xs sm:text-sm";
   const tabRows = breakdown[activeTab];
-  const tabTotal = tabRows.reduce((sum, row) => sum + row.hours, 0);
-  const confirmDisabled = hoursAbnormal && item.confirmation !== "confirmed";
+  const tabTotal = tabRows.reduce((sum, row) => sum + (row.excludeFromWorkloadTotal ? 0 : row.hours), 0);
+  const hodReviewRequiresSubmission = String(item.hodReview ?? "")
+    .trim()
+    .toLowerCase() === "yes";
 
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 p-4" onClick={onClose}>
       <div className="w-full max-w-2xl rounded-md bg-white shadow-lg" onClick={(e) => e.stopPropagation()}>
         <div className="flex items-center justify-between rounded-t-md bg-[#2f4d9c] px-5 py-3 text-white">
-          <div className="text-lg font-bold">Academic Workload Detail</div>
+          <div className="flex items-center gap-3">
+            <div className="text-lg font-bold">Academic Workload Detail</div>
+            <div className="rounded bg-white/15 px-3 py-1 text-xs font-semibold">
+              {item.department || "Department N/A"}
+            </div>
+          </div>
           <button
             type="button"
             className="inline-flex h-9 w-9 items-center justify-center rounded-md bg-white/10 hover:bg-white/20"
@@ -341,30 +550,37 @@ function AcademicDetailModal({
         <div className="space-y-4 px-5 py-4">
           <div className="grid grid-cols-2 gap-4">
             <InfoField label="Name" value={item.name} />
-            <InfoField label="Employee ID" value={item.employeeId} />
+            <InfoField label="Staff ID" value={item.employeeId} />
           </div>
           <div className="grid grid-cols-2 gap-4">
             <InfoField label="Target teaching ratio" value={displayTargetTeachingRatio} />
-            <InfoField label="Total work hours" value={String(item.hours)} />
-            <InfoField label="Actual teaching ratio" value={displayActualTeachingRatio} />
-            <div className="flex flex-col gap-1">
-              <div className="w-fit rounded bg-[#2f4d9c] px-3 py-1 text-xs font-bold text-white">Validation</div>
-              <div
-                className={`flex min-h-[38px] items-center rounded border px-3 py-2 text-sm font-bold ${
-                  hoursAbnormal
-                    ? "border-red-400 bg-red-50 text-red-700"
-                    : "border-emerald-300 bg-emerald-50 text-emerald-800"
-                }`}
-              >
-                {hoursAbnormal ? "Abnormal" : "Normal"}
-              </div>
-            </div>
+            <InfoField
+              label="Actual teaching ratio"
+              value={displayActualTeachingRatio}
+              className="tabular-nums font-sans"
+              inputClassName={actualRatioInputClassName}
+              tooltipText={item.detailSnapshot?.actualRatioHoverText || ""}
+              tooltipClassName={actualRatioTooltipClassName}
+            />
+            <InfoField
+              label="Total work hours"
+              value={displayTotalWorkHours}
+              className="tabular-nums font-sans"
+              inputClassName={totalHoursInputClassName}
+              tooltipText={item.detailSnapshot?.totalHoursTooltipText || ""}
+            />
+            <InfoField label="Employment type" value={item.detailSnapshot?.employmentType || item.employmentType || "—"} />
+            <InfoField label="New Staff" value={item.newStaff || "—"} />
+            <InfoField
+              label="HoD Review"
+              value={item.hodReview || "—"}
+              inputClassName={
+                hodReviewRequiresSubmission
+                  ? "border-red-400 bg-red-100 font-semibold text-red-800"
+                  : ""
+              }
+            />
           </div>
-          {hoursAbnormal && (
-            <p className="text-sm font-medium leading-relaxed text-red-700">
-              After calculating hours by workload category, the gap from your teaching targets is too large.
-            </p>
-          )}
           <div>
             <div className="text-xs font-semibold uppercase text-slate-500">Workload Breakdown</div>
             <div className="mt-1 overflow-hidden rounded border border-slate-300">
@@ -399,7 +615,7 @@ function AcademicDetailModal({
                     </tr>
                   ))}
                   <tr className="bg-slate-50">
-                    <td className="px-3 py-2 font-semibold">Total</td>
+                    <td className="px-3 py-2 font-semibold">{workloadBreakdownTotalLabel(activeTab)}</td>
                     <td className="px-3 py-2 text-right font-semibold tabular-nums font-sans">{tabTotal}</td>
                   </tr>
                 </tbody>
@@ -423,34 +639,41 @@ function AcademicDetailModal({
               />
             )}
           </div>
-          {item.status ? (
-            <div>
-              <div className="text-xs font-semibold text-slate-500">Head of Department notes</div>
+          <div>
+            <button
+              type="button"
+              onClick={() => setHodNotesExpanded((v) => !v)}
+              className="flex w-full items-center justify-between rounded border border-slate-300 bg-slate-50 px-3 py-2 text-left text-xs font-semibold text-slate-500"
+            >
+              <span>Head of Department notes</span>
+              <span className="text-base leading-none">{hodNotesExpanded ? "−" : "+"}</span>
+            </button>
+            {hodNotesExpanded ? (
               <textarea
                 readOnly
-                value={item.supervisorNote || "- no notes yet -"}
+                value={item.supervisorNote?.trim() ? item.supervisorNote : "- no notes yet -"}
                 className="mt-1 h-20 w-full resize-none rounded border border-slate-300 px-3 py-2 text-sm"
               />
-            </div>
-          ) : null}
+            ) : null}
+          </div>
           <div className="flex flex-col items-center gap-2 pt-1">
             <button
               type="button"
               onClick={() => {
-                if (!hoursAbnormal) onConfirm();
+                onConfirm();
               }}
-              disabled={confirmDisabled}
+              disabled={hodReviewRequiresSubmission}
               className={`rounded-md px-6 py-2 text-sm font-semibold ${
                 item.confirmation === "confirmed"
                   ? "bg-[#16a34a] text-white"
-                  : hoursAbnormal
+                  : hodReviewRequiresSubmission
                     ? "cursor-not-allowed bg-slate-400 text-white"
                     : "bg-[#2f4d9c] text-white hover:bg-[#29458c]"
               }`}
             >
               Confirmed
             </button>
-            {hoursAbnormal && (
+            {hodReviewRequiresSubmission && (
               <p className="max-w-md text-center text-xs font-bold leading-relaxed text-red-700">
                 Please submit to your Head of Department for adjustment review.
               </p>
@@ -463,9 +686,14 @@ function AcademicDetailModal({
 }
 
 export default function Academic() {
-  const user = MOCK_DASHBOARD_USER;
+  const user = ACADEMIC_DASHBOARD_USER;
 
-  const [items, setItems] = useState<AcademicItem[]>([]);
+  const [items, setItems] = useState<AcademicItem[]>(() => {
+    const base = readDistributedItemsForAcademic(ACADEMIC_DASHBOARD_USER.employeeId);
+    const synced = readAcademicStatusSync();
+    const syncedNotes = readAcademicNotesSync();
+    return applySyncedStatus(base, synced, syncedNotes);
+  });
 
   const [selectedIds, setSelectedIds] = useState<Set<number>>(new Set([1]));
   const [page, setPage] = useState(1);
@@ -480,11 +708,16 @@ export default function Academic() {
   const [confirmationFilter, setConfirmationFilter] = useState<"" | "confirmed" | "unconfirmed">("");
   const [profileOpen, setProfileOpen] = useState(false);
   const [avatarSrc, setAvatarSrc] = useState<string | null>(null);
-  const [hasNewMessage, setHasNewMessage] = useState(true);
+  const [notifications, setNotifications] = useState<AcademicNotification[]>(() =>
+    readAcademicNotifications(ACADEMIC_DASHBOARD_USER.employeeId)
+  );
+  const [notificationPage, setNotificationPage] = useState(1);
+  const [activeNotificationId, setActiveNotificationId] = useState<string | null>(null);
+  const [notificationDetailOpen, setNotificationDetailOpen] = useState(false);
+  const [hasNewMessage, setHasNewMessage] = useState(() =>
+    readAcademicNotifications(ACADEMIC_DASHBOARD_USER.employeeId).some((item) => !item.readAt)
+  );
   const [messagePanelOpen, setMessagePanelOpen] = useState(false);
-  const [chatInput, setChatInput] = useState("");
-  const [contactSendError, setContactSendError] = useState("");
-  const [contactSending, setContactSending] = useState(false);
   const currentYear = useMemo(() => new Date().getFullYear(), []);
   const currentSemester = useMemo<"S1" | "S2">(() => {
     const month = new Date().getMonth() + 1;
@@ -526,6 +759,21 @@ export default function Academic() {
   const [exportYearToInput, setExportYearToInput] = useState("");
   const [exportSemesterInput, setExportSemesterInput] = useState<"All" | "S1" | "S2">("All");
   const [exportMessage, setExportMessage] = useState("");
+  const notificationPageSize = 10;
+  const notificationTotalPages = Math.max(1, Math.ceil(notifications.length / notificationPageSize));
+  const pagedNotifications = useMemo(() => {
+    const start = (notificationPage - 1) * notificationPageSize;
+    return notifications.slice(start, start + notificationPageSize);
+  }, [notifications, notificationPage]);
+  const activeNotification = useMemo(
+    () => notifications.find((n) => n.id === activeNotificationId) ?? null,
+    [notifications, activeNotificationId]
+  );
+  const notificationRecipientLabel = useMemo(() => {
+    const first = notifications[0];
+    if (!first) return `${user.firstName} ${user.surname}`;
+    return `${first.recipientName}${first.recipientEmail ? ` (${first.recipientEmail})` : ""}`;
+  }, [notifications, user.firstName, user.surname]);
   const selectedYear = Number(searchYearInput) || currentYear;
   const yearOptions = useMemo(
     () => Array.from({ length: 11 }, (_, i) => String(selectedYear - 5 + i)),
@@ -663,13 +911,27 @@ export default function Academic() {
 
   useEffect(() => {
     function syncFromSupervisor() {
+      const distributed = readDistributedItemsForAcademic(user.employeeId);
       const synced = readAcademicStatusSync();
       const syncedNotes = readAcademicNotesSync();
-      setItems((prev) => applySyncedStatus(prev, synced, syncedNotes));
+      setItems(applySyncedStatus(distributed, synced, syncedNotes));
+      const nextNotifications = readAcademicNotifications(user.employeeId);
+      setNotifications(nextNotifications);
+      setHasNewMessage(nextNotifications.some((item) => !item.readAt));
+      setNotificationPage((prev) => Math.min(Math.max(1, prev), Math.max(1, Math.ceil(nextNotifications.length / 10))));
+      setActiveNotificationId((prev) => (prev && nextNotifications.some((item) => item.id === prev) ? prev : null));
     }
 
     function onStorage(e: StorageEvent) {
-      if (e.key === ACADEMIC_STATUS_SYNC_KEY || e.key === ACADEMIC_NOTES_SYNC_KEY) syncFromSupervisor();
+      if (
+        e.key === OPS_ACADEMIC_DISTRIBUTED_KEY ||
+        e.key === SUPERVISOR_STATE_KEY ||
+        e.key === ACADEMIC_STATUS_SYNC_KEY ||
+        e.key === ACADEMIC_NOTES_SYNC_KEY ||
+        e.key === OPS_ACADEMIC_NOTIFICATION_KEY
+      ) {
+        syncFromSupervisor();
+      }
     }
 
     window.addEventListener("storage", onStorage);
@@ -777,32 +1039,23 @@ export default function Academic() {
   }
 
   function openMessagePanel() {
+    const nextNotifications = readAcademicNotifications(user.employeeId);
+    setNotifications(nextNotifications);
+    setNotificationPage(1);
+    setActiveNotificationId(nextNotifications[0]?.id ?? null);
+    setNotificationDetailOpen(false);
     setMessagePanelOpen(true);
-    setHasNewMessage(false);
-    setContactSendError("");
+    setHasNewMessage(nextNotifications.some((item) => !item.readAt));
   }
 
-  async function handleSendMessage() {
-    const trimmed = chatInput.trim();
-    if (!trimmed || contactSending) return;
-    setContactSendError("");
-    setContactSending(true);
-    try {
-      await submitContactSchoolOfOperations({
-        messageBody: trimmed,
-        sender: {
-          employeeId: user.employeeId,
-          surname: user.surname,
-          firstName: user.firstName,
-          email: user.email,
-        },
-      });
-      setChatInput("");
-    } catch (e) {
-      const msg = e instanceof Error ? e.message : "Could not send message. Please try again.";
-      setContactSendError(msg);
-    } finally {
-      setContactSending(false);
+  function handleOpenNotification(item: AcademicNotification) {
+    setActiveNotificationId(item.id);
+    setNotificationDetailOpen(true);
+    if (!item.readAt) {
+      markAcademicNotificationRead(user.employeeId, item.id);
+      const nextNotifications = readAcademicNotifications(user.employeeId);
+      setNotifications(nextNotifications);
+      setHasNewMessage(nextNotifications.some((next) => !next.readAt));
     }
   }
 
@@ -873,6 +1126,7 @@ export default function Academic() {
           title="Academic Dashboard"
           hasNewMessage={hasNewMessage}
           onMessageClick={openMessagePanel}
+          greetingName={user.surname}
           onAvatarClick={() => setProfileOpen(true)}
           avatarSrc={avatarSrc}
         />
@@ -883,44 +1137,120 @@ export default function Academic() {
             onClick={() => setMessagePanelOpen(false)}
           >
             <div
-              className="w-full max-w-3xl rounded-2xl border border-slate-200 bg-slate-50 p-6 shadow-xl"
+              className="w-full max-w-3xl rounded-2xl border-2 border-[#2f4d9c] bg-slate-50 p-6 shadow-xl"
               onClick={(e) => e.stopPropagation()}
             >
-              <div className="mb-4 flex items-center justify-between">
-                <div className="text-3xl font-semibold text-slate-800">Contact School of Operations</div>
+              <div className="-mx-6 -mt-6 mb-4 flex items-center justify-between rounded-t-2xl bg-[#2f4d9c] px-6 py-4 text-white">
+                <div className="text-3xl font-semibold">Workload Email Notifications</div>
                 <button
                   type="button"
                   aria-label="Close"
-                  className="rounded p-1 text-slate-500 hover:bg-slate-200"
+                  className="rounded p-1 text-white/90 hover:bg-white/20"
                   onClick={() => setMessagePanelOpen(false)}
                 >
                   ✕
                 </button>
               </div>
-
-              {contactSendError ? (
-                <div className="mb-3 rounded-md border border-red-200 bg-red-50 px-3 py-2 text-sm text-red-800">
-                  {contactSendError}
-                </div>
-              ) : null}
-
-              <div className="flex items-end gap-3">
-                <textarea
-                  value={chatInput}
-                  onChange={(e) => setChatInput(e.target.value)}
-                  placeholder="Write your message..."
-                  className="h-24 flex-1 resize-none rounded-lg border border-slate-300 bg-white px-3 py-2 text-base text-slate-800 outline-none focus:border-[#2f4d9c]"
-                />
-                <button
-                  type="button"
-                  onClick={() => void handleSendMessage()}
-                  disabled={contactSending}
-                  className="rounded-lg bg-[#2f4d9c] px-5 py-2 text-sm font-semibold text-white hover:bg-[#264183] disabled:cursor-not-allowed disabled:opacity-60"
-                >
-                  {contactSending ? "Sending…" : "Send"}
-                </button>
+              <div className="space-y-3">
+                {notifications.length === 0 ? (
+                  <div className="rounded-md border border-[#2f4d9c]/40 bg-[#eef3ff] px-4 py-5 text-sm text-slate-700">
+                    No notifications yet.
+                  </div>
+                ) : (
+                  <>
+                    <div className="max-h-80 overflow-y-auto rounded-md border border-[#2f4d9c]/40 bg-white">
+                      {pagedNotifications.map((item) => (
+                        <button
+                          key={item.id}
+                          type="button"
+                          onClick={() => handleOpenNotification(item)}
+                          className={`flex w-full items-center justify-between gap-4 border-b border-[#2f4d9c]/10 px-4 py-3 text-left hover:bg-[#f3f7ff] ${
+                            activeNotificationId === item.id ? "bg-[#e8efff]" : ""
+                          }`}
+                        >
+                          <span className="min-w-0 flex-1 truncate text-sm font-semibold text-slate-800">{item.subject}</span>
+                          {!item.readAt ? (
+                            <span className="shrink-0 rounded bg-red-100 px-2 py-0.5 text-[10px] font-bold uppercase tracking-wide text-red-700">
+                              New
+                            </span>
+                          ) : null}
+                          <span className="shrink-0 text-xs text-slate-500">{item.sentAt ? formatLocalDateTime(new Date(item.sentAt)) : "N/A"}</span>
+                        </button>
+                      ))}
+                    </div>
+                    <div className="flex items-center justify-between px-1 text-sm">
+                      <button
+                        type="button"
+                        onClick={() => setNotificationPage((p) => Math.max(1, p - 1))}
+                        disabled={notificationPage <= 1}
+                        className="rounded border border-[#2f4d9c]/35 bg-[#eef3ff] px-3 py-1 font-semibold text-[#2f4d9c] disabled:cursor-not-allowed disabled:opacity-50"
+                      >
+                        Previous
+                      </button>
+                      <span className="text-slate-600">
+                        Page {notificationPage} / {notificationTotalPages}
+                      </span>
+                      <button
+                        type="button"
+                        onClick={() => setNotificationPage((p) => Math.min(notificationTotalPages, p + 1))}
+                        disabled={notificationPage >= notificationTotalPages}
+                        className="rounded border border-[#2f4d9c]/35 bg-[#eef3ff] px-3 py-1 font-semibold text-[#2f4d9c] disabled:cursor-not-allowed disabled:opacity-50"
+                      >
+                        Next
+                      </button>
+                    </div>
+                  </>
+                )}
               </div>
             </div>
+            {notificationDetailOpen && activeNotification && (
+              <div
+                className="fixed inset-0 z-[75] flex items-center justify-center bg-black/25 p-4"
+                onClick={(e) => e.stopPropagation()}
+              >
+                <div
+                  className="w-full max-w-2xl overflow-hidden rounded-xl border-2 border-[#2f4d9c] bg-white shadow-2xl"
+                  onClick={(e) => e.stopPropagation()}
+                >
+                  <div className="flex items-center justify-between bg-[#2f4d9c] px-5 py-3 text-white">
+                    <div className="text-xl font-semibold">Email Detail</div>
+                    <button
+                      type="button"
+                      aria-label="Close detail"
+                      className="rounded p-1 text-white/90 hover:bg-white/20"
+                      onClick={() => setNotificationDetailOpen(false)}
+                    >
+                      ✕
+                    </button>
+                  </div>
+                  <div className="space-y-3 bg-slate-50 px-4 py-4">
+                    <div className="overflow-hidden rounded-lg border border-slate-200 bg-white shadow-sm">
+                      <div className="border-b border-slate-200 bg-slate-100 px-3 py-1.5 text-[11px] font-semibold uppercase tracking-wide text-slate-600">
+                        Subject
+                      </div>
+                      <div className="px-3 py-2 text-sm font-semibold text-slate-900">{activeNotification.subject}</div>
+                    </div>
+                    <div className="overflow-hidden rounded-lg border border-slate-200 bg-white shadow-sm">
+                      <div className="border-b border-slate-200 bg-slate-100 px-3 py-1.5 text-[11px] font-semibold uppercase tracking-wide text-slate-600">
+                        Sender
+                      </div>
+                      <div className="px-3 py-2 text-sm text-slate-700">
+                        {activeNotification.fromName || "School Operations"}
+                        {activeNotification.fromEmail ? ` (${activeNotification.fromEmail})` : ""}
+                      </div>
+                    </div>
+                    <div className="overflow-hidden rounded-lg border border-slate-200 bg-white shadow-sm">
+                      <div className="border-b border-slate-200 bg-slate-100 px-3 py-1.5 text-[11px] font-semibold uppercase tracking-wide text-slate-600">
+                        Message
+                      </div>
+                      <div className="max-h-72 overflow-y-auto whitespace-pre-line px-3 py-2 text-sm leading-relaxed text-slate-700">
+                        {activeNotification.body}
+                      </div>
+                    </div>
+                  </div>
+                </div>
+              </div>
+            )}
           </div>
         )}
 

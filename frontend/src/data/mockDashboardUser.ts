@@ -5,10 +5,10 @@ import type { ProfileModalUser } from "../components/common/ProfileModalFieldGri
  * Keep in sync wherever profile + outbound messages rely on these fields (e.g. Contact School of Operations).
  */
 export const MOCK_DASHBOARD_USER: ProfileModalUser = {
-  surname: "Sam",
+  surname: "Bronte",
   firstName: "Yaka",
   employeeId: "2345678",
   title: "Professor",
-  department: "Computer Science",
-  email: "yaka.sam@uwa.edu.au",
+  department: "Senior School",
+  email: "yaka.bronte@uwa.edu.au",
 };

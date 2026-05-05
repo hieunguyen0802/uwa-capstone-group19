@@ -1,15 +1,19 @@
 type DashboardHeaderProps = {
   title: string;
-  hasNewMessage: boolean;
-  onMessageClick: () => void;
+  hasNewMessage?: boolean;
+  onMessageClick?: () => void;
+  showMessageButton?: boolean;
+  greetingName?: string;
   onAvatarClick: () => void;
   avatarSrc: string | null;
 };
 
 export default function DashboardHeader({
   title,
-  hasNewMessage,
+  hasNewMessage = false,
   onMessageClick,
+  showMessageButton = true,
+  greetingName = "Sam",
   onAvatarClick,
   avatarSrc,
 }: DashboardHeaderProps) {
@@ -26,23 +30,25 @@ export default function DashboardHeader({
       <div className="text-center text-2xl font-semibold text-white">{title}</div>
 
       <div className="flex items-center gap-3 text-white">
-        <button
-          type="button"
-          aria-label="Messages"
-          className="inline-flex items-center justify-center text-white"
-          onClick={onMessageClick}
-        >
-          <span className="relative inline-flex h-10 w-10 items-center justify-center" aria-hidden="true">
-            <svg viewBox="0 0 24 24" className="h-9 w-9" fill="none" stroke="currentColor" strokeWidth="1.8">
-              <rect x="3.5" y="6.5" width="17" height="11" rx="1.5" />
-              <path d="M4.5 8l7.5 6 7.5-6" />
-            </svg>
-            {hasNewMessage && (
-              <span className="absolute right-[1px] top-[1px] h-3 w-3 rounded-full bg-red-500 ring-2 ring-[#2f4d9c]" />
-            )}
-          </span>
-        </button>
-        <div className="text-right text-sm font-semibold">Hi, Sam</div>
+        {showMessageButton && (
+          <button
+            type="button"
+            aria-label="Messages"
+            className="inline-flex items-center justify-center text-white"
+            onClick={onMessageClick}
+          >
+            <span className="relative inline-flex h-10 w-10 items-center justify-center" aria-hidden="true">
+              <svg viewBox="0 0 24 24" className="h-9 w-9" fill="none" stroke="currentColor" strokeWidth="1.8">
+                <rect x="3.5" y="6.5" width="17" height="11" rx="1.5" />
+                <path d="M4.5 8l7.5 6 7.5-6" />
+              </svg>
+              {hasNewMessage && (
+                <span className="absolute right-[1px] top-[1px] h-3 w-3 rounded-full bg-red-500 ring-2 ring-[#2f4d9c]" />
+              )}
+            </span>
+          </button>
+        )}
+        <div className="text-right text-sm font-semibold">Hi, {greetingName}</div>
         <button
           type="button"
           aria-label="Open profile"

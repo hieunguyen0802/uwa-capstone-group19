@@ -847,6 +847,7 @@ export default function Supervisor() {
           title="HoD Dashboard"
           hasNewMessage={hasNewMessage}
           onMessageClick={openMessagePanel}
+          greetingName={user.surname}
           onAvatarClick={() => setProfileOpen(true)}
           avatarSrc={avatarSrc}
         />
