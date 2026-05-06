@@ -17,6 +17,7 @@ node_modules/
 # Env
 .env
 .env.*
+!.env.example
 
 # macOS
 .DS_Store
