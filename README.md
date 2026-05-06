@@ -105,6 +105,51 @@ Recommended workflow:
 - Development: each member runs their own local Docker DB.
 - Integration/demo: one shared Docker DB in LAN or cloud VM.
 
+### Dual Environment Setup (Isolated Dev + Shared Test)
+
+Use `docker-compose.yml` for local development (isolated), and
+`docker-compose.test.yml` as a separate shared test stack.
+
+#### Local development (isolated, default)
+
+```bash
+cp .env.example .env
+docker compose up -d
+```
+
+Local ports:
+- Postgres: `5433`
+- pgAdmin: `5050`
+
+#### Shared test environment (clean + separate)
+
+```bash
+cp .env.test.example .env.test
+docker compose --env-file .env.test -f docker-compose.test.yml -p workload-test up -d db backend pgadmin
+```
+
+Shared test ports:
+- Postgres: `55433`
+- pgAdmin: `55050`
+
+This setup is fully isolated from local dev because it uses:
+- different compose project name (`-p workload-test`)
+- different env file (`.env.test`)
+- different volumes (`postgres_data_test`, `pgadmin_data_test`)
+- different host ports (`55433`, `55050`)
+
+#### Reset shared test DB to clean state
+
+If test data becomes dirty (e.g. frontend mock logic wrote temporary data):
+
+```bash
+docker compose --env-file .env.test -f docker-compose.test.yml -p workload-test down -v
+docker compose --env-file .env.test -f docker-compose.test.yml -p workload-test up -d db backend pgadmin
+docker compose --env-file .env.test -f docker-compose.test.yml -p workload-test exec backend python manage.py migrate
+```
+
+This gives you a fresh test DB schema every time.
+
 ---
 
 ## API Reference
