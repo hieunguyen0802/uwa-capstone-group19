@@ -182,13 +182,16 @@ SIMPLE_JWT = {
 }
 
 # Email — OTP delivery via SMTP.
-# In development, set EMAIL_BACKEND=django.core.mail.backends.console.EmailBackend
-# to print codes to the terminal instead of sending real emails.
+# Set EMAIL_BACKEND=django.core.mail.backends.smtp.EmailBackend in production.
+# Defaults to console backend so dev environments never send real emails accidentally.
 EMAIL_BACKEND = os.environ.get(
     'EMAIL_BACKEND',
-    'django.core.mail.backends.console.EmailBackend',  # dev fallback: prints to terminal
+    'django.core.mail.backends.console.EmailBackend',
 )
-EMAIL_HOST = os.environ.get('EMAIL_HOST', 'smtp.gmail.com')
+# No hardcoded SMTP defaults — must be set explicitly via environment variables.
+# Gmail example:  EMAIL_HOST=smtp.gmail.com  EMAIL_PORT=587
+# Outlook example: EMAIL_HOST=smtp.office365.com  EMAIL_PORT=587
+EMAIL_HOST = os.environ.get('EMAIL_HOST', '')
 EMAIL_PORT = int(os.environ.get('EMAIL_PORT', '587'))
 EMAIL_USE_TLS = os.environ.get('EMAIL_USE_TLS', 'true').lower() == 'true'
 EMAIL_HOST_USER = os.environ.get('EMAIL_HOST_USER', '')
