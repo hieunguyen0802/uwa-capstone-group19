@@ -76,8 +76,8 @@ exit()
 |----------|----------------------------|
 | Frontend | http://localhost:3000      |
 | Backend  | http://localhost:8000      |
-| Database | localhost:${DB_PORT:-5433} (${POSTGRES_USER} / ${POSTGRES_PASSWORD}) |
-| pgAdmin  | http://localhost:${PGADMIN_PORT:-5050} |
+| Database | localhost:5433 (default, configurable in `.env`) |
+| pgAdmin  | http://localhost:5050 (default, configurable in `.env`) |
 
 Use pgAdmin login from `.env`:
 - Email: `PGADMIN_DEFAULT_EMAIL`
@@ -100,6 +100,9 @@ If one teammate hosts the Docker database and others connect directly:
 5. Use Django migrations as the single source of schema version:
    - `docker compose exec backend python manage.py makemigrations`
    - `docker compose exec backend python manage.py migrate`
+
+Security note:
+- For shared/LAN testing, avoid exposing pgAdmin (`5050`) publicly. Prefer sharing only PostgreSQL port and keep pgAdmin host-local.
 
 Recommended workflow:
 - Development: each member runs their own local Docker DB.
