@@ -4,6 +4,19 @@ from api.models import WorkloadReport
 
 POINT_TO_HOURS = Decimal('17.25')
 
+# Optimistic lock error payload for reports superseded by a reimport.
+# Shared across HoD and Ops write paths so the frontend can rely on a single shape.
+STALE_REPORT_ERROR = {
+    'success': False,
+    'code': 'REPORT_SUPERSEDED',
+    'message': 'This record has been superseded by a newer import. Please reload the page and retry.',
+}
+
+
+def is_report_stale(report):
+    """Return True when the report has been replaced by a later import (is_current=False)."""
+    return not getattr(report, 'is_current', True)
+
 
 def get_workload_queryset(staff):
     """
