@@ -22,7 +22,6 @@ import InfoField from "../components/common/InfoField";
 import PaginationControls from "../components/common/PaginationControls";
 import ProfileModal from "../components/common/ProfileModal";
 import SearchButton from "../components/common/SearchButton";
-import { MOCK_DASHBOARD_USER } from "../data/mockDashboardUser";
 import SectionTabs from "../components/common/SectionTabs";
 import SectionTitleBlock from "../components/common/SectionTitleBlock";
 import StaffProfileModal, {
@@ -144,14 +143,12 @@ const ADMIN_WORKLOAD_BREAKDOWN_TABS: BreakdownCategory[] = [
   "Research (residual)",
 ];
 
-const SUPERVISOR_DRAFT_KEY = "academic_to_supervisor_requests_v1";
-const SUPERVISOR_STATE_KEY = "supervisor_requests_state_v1";
+const OPS_ACADEMIC_NOTIFICATION_KEY = "ops_to_academic_notifications_v1";
+const OPS_ACADEMIC_DISTRIBUTED_KEY = "ops_academic_distributed_workloads_v1";
+const OPS_SEMESTER_REPORTS_KEY = "ops_semester_report_inbox_v1";
 const ACADEMIC_STATUS_SYNC_KEY = "academic_status_sync_v1";
 const ACADEMIC_NOTES_SYNC_KEY = "academic_notes_sync_v1";
 const SUPERVISOR_SYNC_EVENT = "supervisor-status-updated";
-const ACADEMIC_DRAFT_EVENT = "academic-drafts-updated";
-const OPS_ACADEMIC_NOTIFICATION_KEY = "ops_to_academic_notifications_v1";
-const OPS_ACADEMIC_DISTRIBUTED_KEY = "ops_academic_distributed_workloads_v1";
 const SEMESTER_EXPECTED_MIN_HOURS = 856;
 const SEMESTER_EXPECTED_MAX_HOURS = 864;
 const WORKLOAD_REPORT_SEMESTER_LABEL = "2025-S1";
@@ -176,6 +173,47 @@ type AcademicNotification = {
   sentAt: string;
   readAt?: string;
 };
+
+type OpsSemesterReportItem = {
+  id: string;
+  year: number;
+  semester: "S1" | "S2";
+  title: string;
+  createdAt: string;
+  readAt?: string;
+  rows: Record<string, string | number>[];
+};
+
+function readOpsSemesterReports(): OpsSemesterReportItem[] {
+  if (typeof window === "undefined") return [];
+  try {
+    const raw = window.localStorage.getItem(OPS_SEMESTER_REPORTS_KEY);
+    if (!raw) return [];
+    const parsed = JSON.parse(raw);
+    if (!Array.isArray(parsed)) return [];
+    return parsed as OpsSemesterReportItem[];
+  } catch {
+    return [];
+  }
+}
+
+function writeOpsSemesterReports(items: OpsSemesterReportItem[]) {
+  if (typeof window === "undefined") return;
+  window.localStorage.setItem(OPS_SEMESTER_REPORTS_KEY, JSON.stringify(items));
+}
+
+function readAcademicStatusSync(): Record<string, "pending" | "approved" | "rejected"> {
+  if (typeof window === "undefined") return {};
+  try {
+    const raw = window.localStorage.getItem(ACADEMIC_STATUS_SYNC_KEY);
+    if (!raw) return {};
+    const parsed = JSON.parse(raw);
+    if (!parsed || typeof parsed !== "object") return {};
+    return parsed as Record<string, "pending" | "approved" | "rejected">;
+  } catch {
+    return {};
+  }
+}
 
 function formatOpsDistributionDdl(semester: "S1" | "S2") {
   if (semester === "S1") return "S1 (1 January - 30 June)";
@@ -212,47 +250,6 @@ function modifiedTimeById(id: number) {
   const day = ((id + 1) % 28) + 1;
   const hour = 9 + (id % 8);
   return `2026-03-${String(day).padStart(2, "0")} ${String(hour).padStart(2, "0")}:30`;
-}
-
-function readAcademicDrafts(): MockRequest[] {
-  if (typeof window === "undefined") return [];
-  try {
-    const raw = window.localStorage.getItem(SUPERVISOR_DRAFT_KEY);
-    if (!raw) return [];
-    const parsed = JSON.parse(raw);
-    if (!Array.isArray(parsed)) return [];
-    return parsed as MockRequest[];
-  } catch {
-    return [];
-  }
-}
-
-function consumeAcademicDrafts(): MockRequest[] {
-  if (typeof window === "undefined") return [];
-  const drafts = readAcademicDrafts();
-  window.localStorage.removeItem(SUPERVISOR_DRAFT_KEY);
-  return drafts;
-}
-
-function readSupervisorState(): MockRequest[] {
-  if (typeof window === "undefined") return [];
-  try {
-    const raw = window.localStorage.getItem(SUPERVISOR_STATE_KEY);
-    if (!raw) return [];
-    const parsed = JSON.parse(raw);
-    if (!Array.isArray(parsed)) return [];
-    return parsed as MockRequest[];
-  } catch {
-    return [];
-  }
-}
-
-function mergeDraftsIntoRequests(current: MockRequest[], drafts: MockRequest[]) {
-  if (!drafts.length) return current;
-  const existingIds = new Set(current.map((row) => row.id));
-  const incoming = drafts.filter((row) => !existingIds.has(row.id));
-  if (!incoming.length) return current;
-  return [...incoming, ...current];
 }
 
 function breakdownById(id: number, totalHours: number): BreakdownData {
@@ -843,10 +840,25 @@ export default function SchoolofOperations() {
     status: "active" | "disabled";
   };
 
-  const user = MOCK_DASHBOARD_USER;
+  const user = {
+    surname: "Bronte",
+    firstName: "Yaka",
+    employeeId: "2345678",
+    title: "Professor",
+    department: "Senior School",
+    email: "yaka.bronte@uwa.edu.au",
+  };
 
   const [profileOpen, setProfileOpen] = useState(false);
   const [avatarSrc, setAvatarSrc] = useState<string | null>(null);
+  const [opsReportInboxOpen, setOpsReportInboxOpen] = useState(false);
+  const [opsReportInboxPage, setOpsReportInboxPage] = useState(1);
+  const [opsSemesterReports, setOpsSemesterReports] = useState<OpsSemesterReportItem[]>(() =>
+    readOpsSemesterReports()
+  );
+  const [academicStatusSyncMap, setAcademicStatusSyncMap] = useState<
+    Record<string, "pending" | "approved" | "rejected">
+  >(() => readAcademicStatusSync());
   const [activeSection, setActiveSection] = useState<
     "approval" | "admin" | "visualization" | "export"
   >("approval");
@@ -862,45 +874,121 @@ export default function SchoolofOperations() {
   const [pending, setPending] = useState<MockRequest[]>([]);
 
   useEffect(() => {
-    function mergeLatestDrafts() {
-      const drafts = consumeAcademicDrafts();
-      if (!drafts.length) return;
-      setPending((prev) => mergeDraftsIntoRequests(prev, drafts));
-    }
+    const now = new Date();
+    const existing = readOpsSemesterReports();
+    const existingKeys = new Set(existing.map((item) => `${item.year}-${item.semester}`));
+    const semesterKeys = new Set<string>();
 
-    function onStorage(e: StorageEvent) {
-      if (e.key === SUPERVISOR_DRAFT_KEY) mergeLatestDrafts();
-    }
+    pending.forEach((row) => {
+      if (row.cancelled) return;
+      const matched = row.periodLabel.match(/^(\d{4})-(1|2)$/);
+      if (!matched) return;
+      const year = Number(matched[1]);
+      const semester = matched[2] === "1" ? "S1" : "S2";
+      if (now <= semesterEndDate(year, semester)) return;
+      semesterKeys.add(`${year}-${semester}`);
+    });
 
-    function onDraftEvent() {
-      mergeLatestDrafts();
-    }
+    const newReports: OpsSemesterReportItem[] = [];
+    semesterKeys.forEach((key) => {
+      if (existingKeys.has(key)) return;
+      const [yearText, semester] = key.split("-") as [string, "S1" | "S2"];
+      const year = Number(yearText);
+      const semesterRows = pending
+        .filter((row) => !row.cancelled && row.periodLabel === `${year}-${semester === "S1" ? "1" : "2"}`)
+        .map((row) => ({
+          "Staff ID": row.studentId,
+          Name: displayNameWithoutComma(row.name),
+          Status:
+            row.importedFromTemplate
+              ? "-"
+              : row.status === "approved"
+                ? "Approved"
+                : row.status === "rejected"
+                  ? "Rejected"
+                  : "Pending",
+          "Total Work Hours": roundToOneDecimal(row.hours),
+          Confirmation: !row.importedFromTemplate && row.status === "approved" ? "Confirmed" : "Unconfirmed",
+          "Distributed Time": submittedTimeById(row.id),
+          "Distributed By": row.operatedBy?.trim() || "—",
+          Department: row.department,
+          Title: row.title,
+          "Target Teaching Ratio": row.targetTeachingRatio != null ? `${roundToOneDecimal(row.targetTeachingRatio)}%` : "50.0%",
+          "Actual Teaching Ratio": row.detailSnapshot?.actualTeachingRatioDisplay ?? "-",
+          "Employment Type": row.detailSnapshot?.employmentType ?? (row.hours >= 800 ? "Full-time" : "Part-time"),
+          "New Staff": row.workloadNewStaff ? "Yes" : "No",
+          "HoD Review": row.hodReview === "yes" ? "Yes" : "No",
+          "School of Operations Notes": workloadModalNotes(row),
+        }));
+      if (!semesterRows.length) return;
+      newReports.push({
+        id: `ops-report-${year}-${semester}-${Date.now()}`,
+        year,
+        semester,
+        title: `${year} ${semester} distribution report generated`,
+        createdAt: new Date().toISOString(),
+        rows: semesterRows,
+      });
+    });
 
-    window.addEventListener("storage", onStorage);
-    window.addEventListener(ACADEMIC_DRAFT_EVENT, onDraftEvent as EventListener);
-    return () => {
-      window.removeEventListener("storage", onStorage);
-      window.removeEventListener(ACADEMIC_DRAFT_EVENT, onDraftEvent as EventListener);
-    };
+    if (!newReports.length) return;
+    const next = [...newReports, ...existing].sort(
+      (a, b) => Date.parse(b.createdAt || "") - Date.parse(a.createdAt || "")
+    );
+    writeOpsSemesterReports(next);
+    setOpsSemesterReports(next);
+  }, [pending]);
+
+  useEffect(() => {
+    if (!opsReportInboxOpen) return;
+    setOpsSemesterReports((prev) => {
+      const now = new Date().toISOString();
+      const next = prev.map((item) => (item.readAt ? item : { ...item, readAt: now }));
+      writeOpsSemesterReports(next);
+      return next;
+    });
+  }, [opsReportInboxOpen]);
+
+  useEffect(() => {
+    // Test helper: keep at least 2 inbox rows for UI verification.
+    setOpsSemesterReports((prev) => {
+      if (prev.length !== 1) return prev;
+      if (prev.some((item) => item.id.includes("-demo-copy"))) return prev;
+      const base = prev[0];
+      const copied: OpsSemesterReportItem = {
+        ...base,
+        id: `${base.id}-demo-copy`,
+        title: `${base.year} ${base.semester} distribution report generated (copy)`,
+        createdAt: new Date(Date.parse(base.createdAt || "") - 60_000).toISOString(),
+        readAt: undefined,
+      };
+      const next = [base, copied].sort(
+        (a, b) => Date.parse(b.createdAt || "") - Date.parse(a.createdAt || "")
+      );
+      writeOpsSemesterReports(next);
+      return next;
+    });
   }, []);
 
   useEffect(() => {
-    if (typeof window === "undefined") return;
-    window.localStorage.setItem(SUPERVISOR_STATE_KEY, JSON.stringify(pending));
-  }, [pending]);
+    const total = Math.max(1, Math.ceil(opsSemesterReports.length / 10));
+    setOpsReportInboxPage((prev) => Math.min(Math.max(1, prev), total));
+  }, [opsSemesterReports.length]);
 
   useEffect(() => {
-    if (typeof window === "undefined") return;
-    const sync: Record<string, "pending" | "approved" | "rejected"> = {};
-    const notesSync: Record<string, string> = {};
-    pending.forEach((row) => {
-      if (row.studentId) sync[row.studentId] = row.status;
-      if (row.studentId && row.supervisorNote) notesSync[row.studentId] = row.supervisorNote;
-    });
-    window.localStorage.setItem(ACADEMIC_STATUS_SYNC_KEY, JSON.stringify(sync));
-    window.localStorage.setItem(ACADEMIC_NOTES_SYNC_KEY, JSON.stringify(notesSync));
-    window.dispatchEvent(new Event(SUPERVISOR_SYNC_EVENT));
-  }, [pending]);
+    function syncFromSupervisor() {
+      setAcademicStatusSyncMap(readAcademicStatusSync());
+    }
+    function onStorage(e: StorageEvent) {
+      if (e.key === ACADEMIC_STATUS_SYNC_KEY) syncFromSupervisor();
+    }
+    window.addEventListener("storage", onStorage);
+    window.addEventListener(SUPERVISOR_SYNC_EVENT, syncFromSupervisor as EventListener);
+    return () => {
+      window.removeEventListener("storage", onStorage);
+      window.removeEventListener(SUPERVISOR_SYNC_EVENT, syncFromSupervisor as EventListener);
+    };
+  }, []);
   const [selectedIds, setSelectedIds] = useState<Set<number>>(new Set());
   const [page, setPage] = useState(1);
   const pageSize = 10; // Items per page
@@ -1178,6 +1266,28 @@ export default function SchoolofOperations() {
     () => Array.from({ length: 11 }, (_, i) => String(selectedYear - 5 + i)),
     [selectedYear]
   );
+  const opsReportsPerPage = 10;
+  const opsUnreadReportCount = useMemo(
+    () => opsSemesterReports.filter((item) => !item.readAt).length,
+    [opsSemesterReports]
+  );
+  const opsReportTotalPages = Math.max(1, Math.ceil(opsSemesterReports.length / opsReportsPerPage));
+  const pagedOpsReports = useMemo(() => {
+    const start = (opsReportInboxPage - 1) * opsReportsPerPage;
+    return opsSemesterReports.slice(start, start + opsReportsPerPage);
+  }, [opsSemesterReports, opsReportInboxPage]);
+
+  function semesterEndDate(year: number, semester: "S1" | "S2"): Date {
+    return semester === "S1" ? new Date(year, 5, 30, 23, 59, 59, 999) : new Date(year, 11, 31, 23, 59, 59, 999);
+  }
+
+  function handleDownloadOpsSemesterReport(report: OpsSemesterReportItem) {
+    if (!report.rows.length) return;
+    const ws = XLSX.utils.json_to_sheet(report.rows);
+    const wb = XLSX.utils.book_new();
+    XLSX.utils.book_append_sheet(wb, ws, `${report.year}-${report.semester}`);
+    XLSX.writeFile(wb, `workload_report_${report.year}_${report.semester}.xlsx`);
+  }
 
   const adminModalBreakdown = useMemo(() => {
     if (!detailsItem) return null;
@@ -1437,19 +1547,6 @@ export default function SchoolofOperations() {
     [detailsComputedTotalHours, totalHoursWorkingDaysSuffix]
   );
 
-  useEffect(() => {
-    // User-requested reset: clear current School Operations workload data and import caches.
-    setPending([]);
-    setSelectedIds(new Set());
-    setWorkloadTeachingImportLinesByStaffId({});
-    setWorkloadHdrImportByStaffId({});
-    setWorkloadServiceImportByStaffId({});
-    setWorkloadAssignedRoleImportByStaffId({});
-    setWorkloadAnomalyImportByStaffId({});
-    window.localStorage.removeItem(SUPERVISOR_STATE_KEY);
-    window.localStorage.removeItem(SUPERVISOR_DRAFT_KEY);
-  }, []);
-
   const itemsForFilter = useMemo(() => {
     const byStatus = pending.filter((it) => {
       if (statusFilter === "all") return !it.cancelled && it.status === "pending";
@@ -1528,6 +1625,16 @@ export default function SchoolofOperations() {
     workloadServiceImportByStaffId,
   ]);
 
+  function displayStatusForOpsRow(row: MockRequest): "pending" | "approved" | "rejected" | "-" {
+    if (row.cancelled) return row.status;
+    if (row.importedFromTemplate && row.status === "pending") return "-";
+    if (row.status !== "approved") return row.status;
+    const synced = academicStatusSyncMap[String(row.id)];
+    // Distributed to Academic but not submitted yet: keep initialization marker.
+    if (!synced) return "-";
+    return synced;
+  }
+
   const pendingFilteredIds = useMemo(() => itemsForFilter.map((it) => it.id), [itemsForFilter]);
   const allPendingFilteredSelected =
     pendingFilteredIds.length > 0 && pendingFilteredIds.every((id) => selectedIds.has(id));
@@ -1594,7 +1701,7 @@ export default function SchoolofOperations() {
     const rows = itemsForFilter.map((it) => ({
       Name: it.name,
       "Staff Number": it.studentId,
-      Status: it.status,
+      Status: displayStatusForOpsRow(it),
       "Hours out of band (import)": it.importedFromTemplate
         ? isImportedRowHoursOutOfBand(it, workloadAnomalyImportByStaffId)
           ? "Yes"
@@ -1642,8 +1749,8 @@ export default function SchoolofOperations() {
     const rows = itemsForFilter.map((it) => ({
       Name: it.name,
       "Staff Number": it.studentId,
-      Status: it.status,
-      Confirmation: it.status === "approved" ? "Confirmed" : "Unconfirmed",
+      Status: displayStatusForOpsRow(it),
+      Confirmation: displayStatusForOpsRow(it) === "approved" ? "Confirmed" : "Unconfirmed",
       "Total work hours": roundToOneDecimal(it.hours),
       "Distributed time": submittedTimeById(it.id),
       "Distributed by": it.operatedBy?.trim() ? it.operatedBy : "—",
@@ -2121,6 +2228,27 @@ export default function SchoolofOperations() {
       });
       if (typeof window !== "undefined") {
         window.localStorage.setItem(OPS_ACADEMIC_DISTRIBUTED_KEY, JSON.stringify(next));
+        // New distribution should always start from "-" on Academic/OPS until Academic submits.
+        const statusRaw = window.localStorage.getItem(ACADEMIC_STATUS_SYNC_KEY);
+        const statusMap =
+          statusRaw && typeof statusRaw === "string"
+            ? (JSON.parse(statusRaw) as Record<string, "pending" | "approved" | "rejected">)
+            : {};
+        const notesRaw = window.localStorage.getItem(ACADEMIC_NOTES_SYNC_KEY);
+        const notesMap =
+          notesRaw && typeof notesRaw === "string"
+            ? (JSON.parse(notesRaw) as Record<string, string>)
+            : {};
+        selectedPendingRows.forEach((row) => {
+          if (!approvedSelectedIds.has(row.id)) return;
+          delete statusMap[String(row.id)];
+          if (row.studentId) delete statusMap[row.studentId.trim()];
+          delete notesMap[String(row.id)];
+          if (row.studentId) delete notesMap[row.studentId.trim()];
+        });
+        window.localStorage.setItem(ACADEMIC_STATUS_SYNC_KEY, JSON.stringify(statusMap));
+        window.localStorage.setItem(ACADEMIC_NOTES_SYNC_KEY, JSON.stringify(notesMap));
+        window.dispatchEvent(new Event(SUPERVISOR_SYNC_EVENT));
       }
       return next;
     });
@@ -2276,8 +2404,6 @@ export default function SchoolofOperations() {
       { header: "title", key: "title", width: 18 },
       { header: "department", key: "department", width: 40 },
       { header: "active_status", key: "active_status", width: 16 },
-      { header: "is_new_employee", key: "is_new_employee", width: 18 },
-      { header: "notes", key: "notes", width: 52 },
     ];
 
     const headerRow = worksheet.getRow(1);
@@ -2304,8 +2430,6 @@ export default function SchoolofOperations() {
       title: "Lecturer",
       department: "Physics",
       active_status: "Active",
-      is_new_employee: "false",
-      notes: "",
     });
 
     // Apply data validation to a practical import range.
@@ -2360,14 +2484,6 @@ export default function SchoolofOperations() {
         showErrorMessage: true,
         errorTitle: "Invalid Active Status",
         error: "Active Status must be Active or Inactive.",
-      };
-      worksheet.getCell(`H${row}`).dataValidation = {
-        type: "list",
-        allowBlank: true,
-        formulae: ['"true,false"'],
-        showErrorMessage: true,
-        errorTitle: "Invalid is_new_employee",
-        error: "Use true or false — leave blank for false.",
       };
     }
 
@@ -2953,11 +3069,82 @@ export default function SchoolofOperations() {
       <div className="mx-auto max-w-7xl px-3 pb-10 pt-8">
         <DashboardHeader
           title="School Operations Dashboard"
-          showMessageButton={false}
+          hasNewMessage={opsUnreadReportCount > 0}
+          onMessageClick={() => setOpsReportInboxOpen(true)}
           greetingName={user.surname}
           onAvatarClick={() => setProfileOpen(true)}
           avatarSrc={avatarSrc}
         />
+
+        {opsReportInboxOpen && (
+          <div
+            className="fixed inset-0 z-[70] flex items-center justify-center bg-black/30 p-4"
+            onClick={() => setOpsReportInboxOpen(false)}
+          >
+            <div
+              className="w-full max-w-3xl rounded-2xl border-2 border-[#2f4d9c] bg-slate-50 p-6 shadow-xl"
+              onClick={(e) => e.stopPropagation()}
+            >
+              <div className="-mx-6 -mt-6 mb-4 flex items-center justify-between rounded-t-2xl bg-[#2f4d9c] px-6 py-4 text-white">
+                <div className="text-2xl font-semibold">Semester Distribution Reports</div>
+                <button
+                  type="button"
+                  aria-label="Close report inbox"
+                  className="rounded p-1 text-white/90 hover:bg-white/20"
+                  onClick={() => setOpsReportInboxOpen(false)}
+                >
+                  ✕
+                </button>
+              </div>
+              {opsSemesterReports.length === 0 ? (
+                <div className="rounded-md border border-[#2f4d9c]/30 bg-white px-4 py-5 text-sm text-slate-700">
+                  No semester report generated yet.
+                </div>
+              ) : (
+                <>
+                  <div className="max-h-80 overflow-y-auto rounded-md border border-[#2f4d9c]/40 bg-white">
+                    {pagedOpsReports.map((report) => (
+                      <div
+                        key={report.id}
+                        className="flex items-center justify-between gap-3 border-b border-[#2f4d9c]/10 px-4 py-3"
+                      >
+                        <div className="text-sm font-semibold text-slate-800">{report.title}</div>
+                        <button
+                          type="button"
+                          onClick={() => handleDownloadOpsSemesterReport(report)}
+                          className="inline-flex items-center gap-2 rounded border border-[#2f4d9c]/40 bg-[#eef3ff] px-3 py-1 text-xs font-semibold text-[#2f4d9c] hover:bg-[#e0e9ff]"
+                        >
+                          ⬇ Download
+                        </button>
+                      </div>
+                    ))}
+                  </div>
+                  <div className="mt-3 flex items-center justify-between px-1 text-sm">
+                    <button
+                      type="button"
+                      onClick={() => setOpsReportInboxPage((p) => Math.max(1, p - 1))}
+                      disabled={opsReportInboxPage <= 1}
+                      className="rounded border border-[#2f4d9c]/35 bg-[#eef3ff] px-3 py-1 font-semibold text-[#2f4d9c] disabled:cursor-not-allowed disabled:opacity-50"
+                    >
+                      Previous
+                    </button>
+                    <span className="text-slate-600">
+                      Page {opsReportInboxPage} / {opsReportTotalPages}
+                    </span>
+                    <button
+                      type="button"
+                      onClick={() => setOpsReportInboxPage((p) => Math.min(opsReportTotalPages, p + 1))}
+                      disabled={opsReportInboxPage >= opsReportTotalPages}
+                      className="rounded border border-[#2f4d9c]/35 bg-[#eef3ff] px-3 py-1 font-semibold text-[#2f4d9c] disabled:cursor-not-allowed disabled:opacity-50"
+                    >
+                      Next
+                    </button>
+                  </div>
+                </>
+              )}
+            </div>
+          </div>
+        )}
 
         <ProfileModal
           open={profileOpen}
@@ -3273,6 +3460,7 @@ export default function SchoolofOperations() {
                           const isSelected = selectedIds.has(item.id);
                           const rowCancelled = Boolean(item.cancelled);
                           const rowIndex = (page - 1) * pageSize + idx + 1;
+                          const opsDisplayStatus = displayStatusForOpsRow(item);
                           return (
                             <tr
                               key={item.id}
@@ -3314,17 +3502,17 @@ export default function SchoolofOperations() {
                                 <div className="text-xs text-slate-400">{item.studentId}</div>
                               </td>
                               <td className="px-3 py-3 text-center">
-                                {item.importedFromTemplate ? (
+                                {opsDisplayStatus === "-" ? (
                                   <span className="text-sm font-semibold text-slate-500">-</span>
                                 ) : (
-                                  <StatusPill status={item.status} variant="supervisor" />
+                                  <StatusPill status={opsDisplayStatus} variant="supervisor" />
                                 )}
                               </td>
                               <td className="px-3 py-3 text-center">
                                 <WorkHoursBadge hours={roundToOneDecimal(item.hours)} />
                               </td>
                               <td className="px-3 py-3">
-                                {!item.importedFromTemplate && item.status === "approved" ? (
+                                {opsDisplayStatus === "approved" ? (
                                   <span className="inline-flex items-center gap-2 text-xs font-semibold text-[#15803d]">
                                     <span className="inline-flex h-4 w-4 items-center justify-center rounded-full border border-[#15803d] bg-[#15803d] text-[10px] text-white">
                                       ✓

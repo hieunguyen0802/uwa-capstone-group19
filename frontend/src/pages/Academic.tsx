@@ -136,6 +136,7 @@ function isDetailHoursAbnormal(item: AcademicItem, breakdown: BreakdownData): bo
 
 type SupervisorDraftRequest = {
   id: number;
+  sourceWorkloadId?: number;
   studentId: string;
   semesterLabel: string;
   periodLabel: string;
@@ -152,10 +153,10 @@ type SupervisorDraftRequest = {
   hours: number;
   targetTeachingRatio?: number;
   teachingTargetHours?: number;
+  detailSnapshot?: WorkloadDetailSnapshot;
 };
 
 const SUPERVISOR_DRAFT_KEY = "academic_to_supervisor_requests_v1";
-const SUPERVISOR_STATE_KEY = "supervisor_requests_state_v1";
 const ACADEMIC_STATUS_SYNC_KEY = "academic_status_sync_v1";
 const ACADEMIC_NOTES_SYNC_KEY = "academic_notes_sync_v1";
 const SUPERVISOR_SYNC_EVENT = "supervisor-status-updated";
@@ -241,14 +242,11 @@ function applySyncedStatus(
   noteMap: Record<string, string>
 ) {
   return rows.map((item) => {
-    const syncedStatus = synced[item.employeeId];
-    const syncedNote = noteMap[item.employeeId];
+    const syncedStatus = synced[String(item.id)];
+    const syncedNote = noteMap[String(item.id)];
     if (!syncedStatus && !syncedNote) return item;
-    const nextStatus: AcademicItem["status"] =
-      item.status === ""
-        ? // Freshly distributed workload must stay "-" until Academic clicks Submit Request.
-          ""
-        : syncedStatus || item.status;
+    // Keep "-" as initialization when no synced status; otherwise follow HoD sync.
+    const nextStatus: AcademicItem["status"] = syncedStatus || item.status;
     return {
       ...item,
       status: nextStatus,
@@ -260,9 +258,7 @@ function applySyncedStatus(
 function readDistributedItemsForAcademic(employeeId: string): AcademicItem[] {
   if (typeof window === "undefined") return [];
   try {
-    const raw =
-      window.localStorage.getItem(OPS_ACADEMIC_DISTRIBUTED_KEY) ??
-      window.localStorage.getItem(SUPERVISOR_STATE_KEY);
+    const raw = window.localStorage.getItem(OPS_ACADEMIC_DISTRIBUTED_KEY);
     if (!raw) return [];
     const parsed = JSON.parse(raw);
     if (!Array.isArray(parsed)) return [];
@@ -272,7 +268,6 @@ function readDistributedItemsForAcademic(employeeId: string): AcademicItem[] {
       const sid = String(row.studentId ?? "").trim();
       return sid === employeeId && row.cancelled !== true && row.status === "approved";
     });
-
     return filtered.map((row, idx) => {
       const sid = String(row.studentId ?? "").trim();
       const rawHodReview = String(row.hodReview ?? "").trim().toLowerCase();
@@ -510,7 +505,19 @@ function AcademicDetailModal({
     item.targetTeachingRatio != null ? `${(Math.round(item.targetTeachingRatio * 10) / 10).toFixed(1)}%` : "—";
   const displayActualTeachingRatio =
     item.detailSnapshot?.actualTeachingRatioDisplay ?? `${actualTeachingRatioPercent(breakdown)}%`;
-  const displayTotalWorkHours = item.detailSnapshot?.totalHoursDisplay ?? String(item.hours);
+  // Keep modal and table on the same source of truth (`item.hours`), while
+  // still showing Ops-provided range hint suffix when it matches.
+  const canonicalHoursText = String(item.hours);
+  const snapshotDisplay = item.detailSnapshot?.totalHoursDisplay?.trim() ?? "";
+  const snapshotMatch = snapshotDisplay.match(/^([0-9]+(?:\.[0-9]+)?)\s*(.*)$/);
+  const snapshotLeadingHours = snapshotMatch?.[1] ?? "";
+  const snapshotSuffix = snapshotMatch?.[2]?.trim() ?? "";
+  const snapshotHoursMismatch =
+    Boolean(snapshotDisplay) && snapshotLeadingHours !== canonicalHoursText;
+  const displayTotalWorkHours =
+    !snapshotHoursMismatch && snapshotSuffix
+      ? `${canonicalHoursText} ${snapshotSuffix}`
+      : canonicalHoursText;
   const actualRatioInputClassName = item.detailSnapshot?.actualTeachingRatioOutOfRange
     ? "border-red-500 ring-1 ring-red-300 bg-red-50/60 text-red-900"
     : item.detailSnapshot?.showActualTeachingRatioBandWarning
@@ -519,7 +526,7 @@ function AcademicDetailModal({
   const actualRatioTooltipClassName = item.detailSnapshot?.actualTeachingRatioOutOfRange
     ? "border-red-300 bg-red-50 text-red-900"
     : "border-yellow-300 bg-yellow-50 text-amber-900";
-  const totalHoursInputClassName = item.detailSnapshot?.adminModalHoursAbnormal
+  const totalHoursInputClassName = !snapshotHoursMismatch && item.detailSnapshot?.adminModalHoursAbnormal
     ? "border-red-500 ring-1 ring-red-300 bg-red-50/40 text-red-900 text-xs sm:text-sm"
     : "text-xs sm:text-sm";
   const tabRows = breakdown[activeTab];
@@ -567,7 +574,7 @@ function AcademicDetailModal({
               value={displayTotalWorkHours}
               className="tabular-nums font-sans"
               inputClassName={totalHoursInputClassName}
-              tooltipText={item.detailSnapshot?.totalHoursTooltipText || ""}
+              tooltipText={!snapshotHoursMismatch ? item.detailSnapshot?.totalHoursTooltipText || "" : ""}
             />
             <InfoField label="Employment type" value={item.detailSnapshot?.employmentType || item.employmentType || "—"} />
             <InfoField label="New Staff" value={item.newStaff || "—"} />
@@ -896,6 +903,13 @@ export default function Academic() {
     () => computeYAxisDomain(trendChartData.map((item) => item.totalHours)),
     [trendChartData]
   );
+
+  useEffect(() => {
+    // Safety cleanup: remove legacy blocked message from earlier client-only logic.
+    if (requestInfo.toLowerCase().startsWith("submit blocked:")) {
+      setRequestInfo("");
+    }
+  }, [requestInfo]);
   const reportingPeriodLabel = useMemo(() => {
     if (!visualizationSemesterSlots.length) return "N/A";
     const firstYear = Number(visualizationSemesterSlots[0].key.split("-")[0]);
@@ -925,7 +939,6 @@ export default function Academic() {
     function onStorage(e: StorageEvent) {
       if (
         e.key === OPS_ACADEMIC_DISTRIBUTED_KEY ||
-        e.key === SUPERVISOR_STATE_KEY ||
         e.key === ACADEMIC_STATUS_SYNC_KEY ||
         e.key === ACADEMIC_NOTES_SYNC_KEY ||
         e.key === OPS_ACADEMIC_NOTIFICATION_KEY
@@ -955,6 +968,7 @@ export default function Academic() {
 
     const drafts: SupervisorDraftRequest[] = rows.map((row, idx) => ({
       id: Date.now() + idx,
+      sourceWorkloadId: row.id,
       studentId: row.employeeId,
       semesterLabel: "Sem1",
       periodLabel: "2025-1",
@@ -969,12 +983,26 @@ export default function Academic() {
       hours: row.hours,
       targetTeachingRatio: row.targetTeachingRatio,
       teachingTargetHours: row.teachingTargetHours,
+      detailSnapshot: row.detailSnapshot,
     }));
 
     if (typeof window !== "undefined") {
       const raw = window.localStorage.getItem(SUPERVISOR_DRAFT_KEY);
       const existing = raw ? (JSON.parse(raw) as SupervisorDraftRequest[]) : [];
       window.localStorage.setItem(SUPERVISOR_DRAFT_KEY, JSON.stringify([...drafts, ...existing]));
+
+      // Persist pending status immediately so Academic table won't fall back to "-"
+      // when other localStorage sync flows refresh rows from distributed snapshots.
+      const statusRaw = window.localStorage.getItem(ACADEMIC_STATUS_SYNC_KEY);
+      const statusMap =
+        statusRaw && typeof statusRaw === "string"
+          ? (JSON.parse(statusRaw) as Record<string, "pending" | "approved" | "rejected">)
+          : {};
+      rows.forEach((row) => {
+        statusMap[String(row.id)] = "pending";
+      });
+      window.localStorage.setItem(ACADEMIC_STATUS_SYNC_KEY, JSON.stringify(statusMap));
+      window.dispatchEvent(new Event(SUPERVISOR_SYNC_EVENT));
       window.dispatchEvent(new Event(ACADEMIC_DRAFT_EVENT));
     }
 
@@ -988,10 +1016,12 @@ export default function Academic() {
   }
 
   function openRequestModal() {
+    setRequestInfo("");
     if (selectedIds.size === 0) {
       setRequestInfo("Please select at least one row before submitting.");
       return;
     }
+
     setRequestReason("");
     setRequestReasonError("");
     setRequestModalOpen(true);
@@ -1328,7 +1358,7 @@ export default function Academic() {
 
           <div className="mt-10 text-4xl font-semibold text-slate-700">Workload Report Sem 1 - 2025</div>
 
-          <div className="mt-6 rounded-md bg-white p-4 ring-1 ring-slate-200">
+          <div className="mt-6 rounded-md bg-[#eef3fb] p-4 ring-1 ring-slate-200">
             <div className="overflow-x-auto">
               <div className="max-h-[520px] overflow-y-auto">
                 <table className="min-w-full border-separate border-spacing-y-0">
@@ -1345,7 +1375,7 @@ export default function Academic() {
                     <th className="px-3 py-2 whitespace-nowrap text-right">Push time</th>
                   </tr>
                 </thead>
-                <tbody className="divide-y divide-slate-200 bg-white">
+                <tbody className="divide-y divide-slate-200 bg-[#eef3fb]">
                   {pageItems.map((item, idx) => {
                     const selected = selectedIds.has(item.id);
                     const rowCancelled = Boolean(item.cancelled);
@@ -1363,7 +1393,7 @@ export default function Academic() {
                         className={`text-sm ${
                           rowCancelled
                             ? "cursor-not-allowed border-y border-slate-300/80 bg-slate-200 text-slate-500"
-                            : `cursor-pointer ${selected ? "border-l-4 border-[#2f4d9c] bg-[#eef2ff]" : ""}`
+                            : `cursor-pointer ${selected ? "border-l-4 border-[#2f4d9c] bg-[#eef2ff]" : "bg-white"}`
                         }`}
                       >
                         <td className="px-2 py-3" onClick={(e) => e.stopPropagation()}>
@@ -1432,6 +1462,13 @@ export default function Academic() {
                       </tr>
                     );
                   })}
+                  {pageItems.length === 0 && (
+                    <tr>
+                      <td colSpan={9} className="px-3 py-6 text-center text-sm text-slate-500">
+                        No items found
+                      </td>
+                    </tr>
+                  )}
                 </tbody>
                 </table>
               </div>

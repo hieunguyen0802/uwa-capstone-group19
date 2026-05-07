@@ -1,7 +1,6 @@
 import { useEffect, useMemo, useState, type ChangeEvent } from "react";
 import * as XLSX from "xlsx";
 import DashboardHeader from "../components/common/DashboardHeader";
-import { MOCK_DASHBOARD_USER } from "../data/mockDashboardUser";
 import LineMetricChartCard from "../components/common/LineMetricChartCard";
 import PaginationControls from "../components/common/PaginationControls";
 import ProfileModal from "../components/common/ProfileModal";
@@ -16,6 +15,7 @@ import WorkHoursBadge from "../components/common/WorkHoursBadge";
 
 type MockRequest = {
   id: number;
+  sourceWorkloadId?: number;
   studentId: string;
   semesterLabel: string;
   periodLabel: string;
@@ -29,17 +29,21 @@ type MockRequest = {
   rate: number;
   status: "pending" | "approved" | "rejected";
   hours: number;
+  detailSnapshot?: {
+    breakdown: BreakdownData;
+  };
   supervisorNote?: string;
   /** When true (from API), row is read-only and detail is blocked — superseded by a newer version. */
   cancelled?: boolean;
 };
 
-type BreakdownCategory = "Teaching" | "Assigned Roles" | "HDR" | "Service";
+type BreakdownCategory = "Teaching" | "Assigned Roles" | "HDR" | "Service" | "Research (residual)";
 type BreakdownEntry = { name: string; hours: number };
 type BreakdownData = Record<BreakdownCategory, BreakdownEntry[]>;
 
 const SUPERVISOR_DRAFT_KEY = "academic_to_supervisor_requests_v1";
 const SUPERVISOR_STATE_KEY = "supervisor_requests_state_v1";
+const OPS_ACADEMIC_DISTRIBUTED_KEY = "ops_academic_distributed_workloads_v1";
 const ACADEMIC_STATUS_SYNC_KEY = "academic_status_sync_v1";
 const ACADEMIC_NOTES_SYNC_KEY = "academic_notes_sync_v1";
 const SUPERVISOR_SYNC_EVENT = "supervisor-status-updated";
@@ -85,11 +89,20 @@ function readSupervisorState(): MockRequest[] {
 }
 
 function mergeDraftsIntoRequests(current: MockRequest[], drafts: MockRequest[]) {
-  if (!drafts.length) return current;
-  const existingIds = new Set(current.map((row) => row.id));
-  const incoming = drafts.filter((row) => !existingIds.has(row.id));
-  if (!incoming.length) return current;
-  return [...incoming, ...current];
+  const merged = [...drafts, ...current];
+  if (!merged.length) return merged;
+  const seen = new Set<string>();
+  const next: MockRequest[] = [];
+  for (const row of merged) {
+    const sourceId = Number(row.sourceWorkloadId);
+    const key = Number.isFinite(sourceId)
+      ? `src:${sourceId}`
+      : `legacy:${String(row.studentId).trim()}|${String(row.periodLabel).trim()}|${String(row.requestReason ?? "").trim()}`;
+    if (seen.has(key)) continue;
+    seen.add(key);
+    next.push(row);
+  }
+  return next;
 }
 
 function breakdownById(id: number, totalHours: number): BreakdownData {
@@ -130,6 +143,7 @@ function breakdownById(id: number, totalHours: number): BreakdownData {
       { name: studentB, hours: hdr2 },
     ],
     Service: [{ name: "Committee support", hours: service }],
+    "Research (residual)": [{ name: "Research (residual)", hours: 0 }],
   };
 }
 
@@ -214,7 +228,14 @@ export default function Supervisor() {
     date: string;
   };
 
-  const user = MOCK_DASHBOARD_USER;
+  const user = {
+    surname: "Rachel",
+    firstName: "Rachel",
+    employeeId: "12345931",
+    title: "Lecturer",
+    department: "Physics",
+    email: "rachel.rachel@uwa.edu.au",
+  };
 
   const [hasNewMessage, setHasNewMessage] = useState(true);
   const [messagePanelOpen, setMessagePanelOpen] = useState(false);
@@ -245,7 +266,7 @@ export default function Supervisor() {
   );
 
   const [loading] = useState(false);
-  const [pending, setPending] = useState<MockRequest[]>([]);
+  const [pending, setPending] = useState<MockRequest[]>(() => mergeDraftsIntoRequests(readSupervisorState(), []));
 
   useEffect(() => {
     function mergeLatestDrafts() {
@@ -262,6 +283,8 @@ export default function Supervisor() {
       mergeLatestDrafts();
     }
 
+    // Sync existing Academic submissions when HoD page is opened after submit.
+    mergeLatestDrafts();
     window.addEventListener("storage", onStorage);
     window.addEventListener(ACADEMIC_DRAFT_EVENT, onDraftEvent as EventListener);
     return () => {
@@ -279,9 +302,30 @@ export default function Supervisor() {
     if (typeof window === "undefined") return;
     const sync: Record<string, "pending" | "approved" | "rejected"> = {};
     const notesSync: Record<string, string> = {};
+    let latestDistributedIdByStaffId: Record<string, number> = {};
+    try {
+      const raw = window.localStorage.getItem(OPS_ACADEMIC_DISTRIBUTED_KEY);
+      const parsed = raw ? (JSON.parse(raw) as MockRequest[]) : [];
+      if (Array.isArray(parsed)) {
+        parsed.forEach((row) => {
+          const sid = String(row.studentId ?? "").trim();
+          const id = Number(row.id);
+          if (!sid || !Number.isFinite(id)) return;
+          if (row.cancelled || row.status !== "approved") return;
+          latestDistributedIdByStaffId[sid] = id;
+        });
+      }
+    } catch {
+      latestDistributedIdByStaffId = {};
+    }
     pending.forEach((row) => {
-      if (row.studentId) sync[row.studentId] = row.status;
-      if (row.studentId && row.supervisorNote) notesSync[row.studentId] = row.supervisorNote;
+      const sourceId = Number(row.sourceWorkloadId);
+      const fallbackId = latestDistributedIdByStaffId[String(row.studentId ?? "").trim()];
+      const effectiveSourceId = Number.isFinite(sourceId) ? sourceId : fallbackId;
+      if (Number.isFinite(effectiveSourceId)) sync[String(effectiveSourceId)] = row.status;
+      if (Number.isFinite(effectiveSourceId) && row.supervisorNote) {
+        notesSync[String(effectiveSourceId)] = row.supervisorNote;
+      }
     });
     window.localStorage.setItem(ACADEMIC_STATUS_SYNC_KEY, JSON.stringify(sync));
     window.localStorage.setItem(ACADEMIC_NOTES_SYNC_KEY, JSON.stringify(notesSync));
@@ -313,6 +357,7 @@ export default function Supervisor() {
   const [detailsItem, setDetailsItem] = useState<MockRequest | null>(null);
   const [detailsBreakdown, setDetailsBreakdown] = useState<BreakdownData | null>(null);
   const [detailsTab, setDetailsTab] = useState<BreakdownCategory>("Teaching");
+  const [detailsEditMode, setDetailsEditMode] = useState(false);
   const [descriptionExpanded, setDescriptionExpanded] = useState(false);
   const [noteModalOpen, setNoteModalOpen] = useState(false);
   const [noteDraft, setNoteDraft] = useState("");
@@ -322,16 +367,12 @@ export default function Supervisor() {
   const [noteTargetId, setNoteTargetId] = useState<number | null>(null);
 
   const [searchEmployeeIdInput, setSearchEmployeeIdInput] = useState("");
-  const [searchLastNameInput, setSearchLastNameInput] = useState("");
-  const [searchFirstNameInput, setSearchFirstNameInput] = useState("");
-  const [searchTitleInput, setSearchTitleInput] = useState("");
+  const [searchNameInput, setSearchNameInput] = useState("");
   const [searchYearInput, setSearchYearInput] = useState("");
   const [searchSemesterInput, setSearchSemesterInput] = useState<"" | "S1" | "S2">("");
   const [searchFilters, setSearchFilters] = useState({
     employeeId: "",
-    lastName: "",
-    firstName: "",
-    title: "",
+    name: "",
     year: "",
     semester: "",
   });
@@ -354,11 +395,6 @@ export default function Supervisor() {
   const [exportYearToInput, setExportYearToInput] = useState("");
   const [exportSemesterInput, setExportSemesterInput] = useState<"All" | "S1" | "S2">("All");
   const [exportMessage, setExportMessage] = useState("");
-  const selectedYear = Number(searchYearInput) || currentYear;
-  const yearOptions = useMemo(
-    () => Array.from({ length: 11 }, (_, i) => String(selectedYear - 5 + i)),
-    [selectedYear]
-  );
 
   const pendingCount = useMemo(
     () => pending.filter((it) => it.status === "pending").length,
@@ -387,16 +423,13 @@ export default function Supervisor() {
         return false;
       }
 
-      if (searchFilters.firstName && !firstName.includes(searchFilters.firstName)) {
-        return false;
-      }
-
-      if (searchFilters.lastName && !lastName.includes(searchFilters.lastName)) {
-        return false;
-      }
-
-      if (searchFilters.title && !it.title.toLowerCase().includes(searchFilters.title)) {
-        return false;
+      if (searchFilters.name) {
+        const q = searchFilters.name;
+        const matchByFull = fullName.includes(q);
+        const matchByFirst = firstName.includes(q);
+        const matchByLast = lastName.includes(q);
+        const matchByReversed = `${lastName} ${firstName}`.includes(q);
+        if (!(matchByFull || matchByFirst || matchByLast || matchByReversed)) return false;
       }
 
       const submittedText = submittedTimeById(it.id);
@@ -697,9 +730,7 @@ export default function Supervisor() {
   function handleSearch() {
     setSearchFilters({
       employeeId: searchEmployeeIdInput.trim().toLowerCase(),
-      lastName: searchLastNameInput.trim().toLowerCase(),
-      firstName: searchFirstNameInput.trim().toLowerCase(),
-      title: searchTitleInput.trim().toLowerCase(),
+      name: searchNameInput.trim().toLowerCase(),
       year: searchYearInput.trim().toLowerCase(),
       semester: searchSemesterInput.trim().toLowerCase(),
     });
@@ -716,14 +747,15 @@ export default function Supervisor() {
       return;
     }
     setDetailsItem(item);
-    setDetailsBreakdown(breakdownById(item.id, item.hours));
+    setDetailsBreakdown(item.detailSnapshot?.breakdown ?? breakdownById(item.id, item.hours));
     setDetailsOpen(true);
+    setDetailsEditMode(false);
     setDescriptionExpanded(false);
     setDetailsModalError("");
   }
 
   function requestCloseDetails() {
-    if (detailsBreakdown) {
+    if (detailsEditMode && detailsBreakdown) {
       const hasEmptyRow = (Object.keys(detailsBreakdown) as BreakdownCategory[]).some((tab) =>
         detailsBreakdown[tab].some((row) => row.name.trim() === "")
       );
@@ -739,6 +771,7 @@ export default function Supervisor() {
     setDetailsOpen(false);
     setDetailsItem(null);
     setDetailsBreakdown(null);
+    setDetailsEditMode(false);
     setDetailsModalError("");
     setNoteModalOpen(false);
     setNoteDraft("");
@@ -783,13 +816,6 @@ export default function Supervisor() {
         [tab]: currentRows.filter((_, rowIdx) => rowIdx !== idx),
       };
     });
-  }
-
-  function handleYearWheel(event: React.WheelEvent<HTMLSelectElement>) {
-    event.preventDefault();
-    const delta = event.deltaY > 0 ? 1 : -1;
-    const nextYear = (Number(searchYearInput) || currentYear) + delta;
-    setSearchYearInput(String(nextYear));
   }
 
   function handleSearchKeyDown(event: React.KeyboardEvent<HTMLInputElement | HTMLSelectElement>) {
@@ -1068,26 +1094,17 @@ export default function Supervisor() {
           {activeSection === "approval" && (
             <section>
           {/* Search Fields */}
-          <div className="grid grid-cols-3 gap-6">
+          <div className="flex items-end gap-4">
+            <div className="grid flex-1 grid-cols-3 gap-4">
             <div className="flex flex-col gap-1">
               <div className="w-fit rounded bg-[#2f4d9c] px-3 py-1 text-xs font-bold text-white">
-                Last name
-              </div>
-          <input
-                value={searchLastNameInput}
-                onChange={(e) => setSearchLastNameInput(e.target.value)}
-                onKeyDown={handleSearchKeyDown}
-                className="rounded border border-slate-300 px-3 py-2 text-sm"
-              />
-            </div>
-            <div className="flex flex-col gap-1">
-              <div className="w-fit rounded bg-[#2f4d9c] px-3 py-1 text-xs font-bold text-white">
-                First name
+                Name
               </div>
               <input
-                value={searchFirstNameInput}
-                onChange={(e) => setSearchFirstNameInput(e.target.value)}
+                value={searchNameInput}
+                onChange={(e) => setSearchNameInput(e.target.value)}
                 onKeyDown={handleSearchKeyDown}
+                placeholder="First, last, or full name"
                 className="rounded border border-slate-300 px-3 py-2 text-sm"
               />
             </div>
@@ -1104,39 +1121,23 @@ export default function Supervisor() {
             </div>
             <div className="flex flex-col gap-1">
               <div className="w-fit rounded bg-[#2f4d9c] px-3 py-1 text-xs font-bold text-white">
-                Title
-              </div>
-              <input
-                value={searchTitleInput}
-                onChange={(e) => setSearchTitleInput(e.target.value)}
-                onKeyDown={handleSearchKeyDown}
-                className="rounded border border-slate-300 px-3 py-2 text-sm"
-              />
-            </div>
-            <div className="flex flex-col gap-1">
-              <div className="w-fit rounded bg-[#2f4d9c] px-3 py-1 text-xs font-bold text-white">
                 Year & Semester
               </div>
               <div className="flex items-center gap-2">
-                <select
+                <input
                   value={searchYearInput}
                   onChange={(e) => setSearchYearInput(e.target.value)}
                   onKeyDown={handleSearchKeyDown}
-                  onWheel={handleYearWheel}
-                  className="w-full rounded border border-slate-300 px-2 py-2 text-sm"
-                >
-                  <option value="">Year</option>
-                  {yearOptions.map((year) => (
-                    <option key={year} value={year}>
-                      {year}
-                    </option>
-                  ))}
-                </select>
+                  placeholder="Year"
+                  maxLength={4}
+                  inputMode="numeric"
+                  className="w-1/2 min-w-[88px] rounded border border-slate-300 px-2 py-2 text-sm"
+                />
                 <select
                   value={searchSemesterInput}
                   onChange={(e) => setSearchSemesterInput(e.target.value as "" | "S1" | "S2")}
                   onKeyDown={handleSearchKeyDown}
-                  className="w-full rounded border border-slate-300 px-2 py-2 text-sm"
+                  className="w-1/2 min-w-[104px] rounded border border-slate-300 px-2 py-2 text-sm"
                 >
                   <option value="">Semester</option>
                   <option value="S1">S1</option>
@@ -1144,7 +1145,8 @@ export default function Supervisor() {
                 </select>
               </div>
             </div>
-            <div className="flex items-end justify-start">
+            </div>
+            <div className="pb-[1px]">
               <SearchButton onClick={handleSearch} />
             </div>
           </div>
@@ -1250,7 +1252,7 @@ export default function Supervisor() {
                     <th className="w-14 px-2 py-2">Task</th>
                     <th className="px-3 py-2">NAME</th>
                     <th className="px-3 py-2">TITLE</th>
-                    <th className="px-3 py-2">REASONS</th>
+                    <th className="px-3 py-2">DEPARTMENT</th>
                     <th className="px-3 py-2">STATUS</th>
                     <th className="px-3 py-2 text-center">TOTAL WORK HOURS</th>
                     <th className="px-3 py-2 text-right">SUBMITTED TIME</th>
@@ -1323,11 +1325,7 @@ export default function Supervisor() {
                             <div className="text-xs text-slate-400">{item.studentId}</div>
                           </td>
                           <td className="px-3 py-3 text-slate-700">{item.title}</td>
-                          <td className="px-3 py-3 text-slate-600">
-                            {item.requestReason ||
-                              extractRequestReason(item.description ?? "") ||
-                              "- no reason provided -"}
-                          </td>
+                          <td className="px-3 py-3 text-slate-600">{item.department || "—"}</td>
                           <td className="px-3 py-3">
                             <StatusPill status={item.status} variant="supervisor" />
                           </td>
@@ -1368,19 +1366,11 @@ export default function Supervisor() {
                     {/* Header */}
                     <div className="flex items-center justify-between gap-4 border-b border-black/30 bg-white px-5 py-3">
                       <div className="flex items-center gap-3">
-                        {/* Student identifier block */}
                         <div className="rounded-sm bg-[#2f4d9c] px-4 py-2 text-sm font-bold text-white tabular-nums font-sans">
-                          {detailsItem.studentId}-{detailsItem.semesterLabel}
-                          {detailsItem.periodLabel}
+                          2025-S1-Physics
                         </div>
                       </div>
                       <div className="flex items-center gap-3 text-sm font-semibold text-slate-800">
-                        <div className="flex items-center gap-2">
-                          <div className="flex h-8 w-8 items-center justify-center rounded-full bg-white ring-1 ring-black">
-                            ☁
-                          </div>
-                          <span className="text-base">{statusLabel(detailsItem.status)}</span>
-                        </div>
                         <button
                           type="button"
                           onClick={requestCloseDetails}
@@ -1399,67 +1389,109 @@ export default function Supervisor() {
                       <div className="grid grid-cols-2 gap-5">
                         <div className="flex items-center gap-3">
                           <div className="w-32 rounded-sm bg-[#2f4d9c] px-3 py-2 text-center text-base font-semibold text-white">
-                            Full name
+                            Name
                           </div>
-          <input
-                            readOnly
-                            value={detailsItem.name}
-                            className="w-full flex-1 rounded-sm border border-[#2f4d9c] px-3 py-2 text-base"
-                          />
+                          <input readOnly value={detailsItem.name} className="w-full flex-1 rounded-sm border border-[#2f4d9c] px-3 py-2 text-base" />
                         </div>
 
                         <div className="flex items-center gap-3">
                           <div className="w-32 rounded-sm bg-[#2f4d9c] px-3 py-2 text-center text-base font-semibold text-white">
-                            Title
+                            Staff ID
                           </div>
-          <input
-                            readOnly
-                            value={detailsItem.title}
-                            className="w-full flex-1 rounded-sm border border-[#2f4d9c] px-3 py-2 text-base"
-                          />
+                          <input readOnly value={detailsItem.studentId} className="w-full flex-1 rounded-sm border border-[#2f4d9c] px-3 py-2 text-base" />
                         </div>
 
                         <div className="flex items-center gap-3">
                           <div className="w-32 rounded-sm bg-[#2f4d9c] px-3 py-2 text-center text-base font-semibold text-white">
-                            Total Work Hours
+                            Target teaching ratio
+                          </div>
+                          <input readOnly value="50.0%" className="w-full flex-1 rounded-sm border border-[#2f4d9c] px-3 py-2 text-base" />
+                        </div>
+
+                        <div className="flex items-center gap-3">
+                          <div className="w-32 rounded-sm bg-[#2f4d9c] px-3 py-2 text-center text-base font-semibold text-white">
+                            Actual teaching ratio
                           </div>
                           {(() => {
-                            const totalHours =
-                              detailsBreakdown
-                                ? (["Teaching", "Assigned Roles", "HDR", "Service"] as BreakdownCategory[]).reduce(
-                                    (tabSum, tab) =>
-                                      tabSum + detailsBreakdown[tab].reduce((sum, row) => sum + row.hours, 0),
-                                    0
-                                  )
-                                : detailsItem.hours;
+                            const source = detailsBreakdown ?? breakdownById(detailsItem.id, detailsItem.hours);
+                            const teaching = source.Teaching.reduce((sum, row) => sum + row.hours, 0);
+                            const total = (["Teaching", "Assigned Roles", "HDR", "Service", "Research (residual)"] as BreakdownCategory[]).reduce(
+                              (tabSum, tab) => tabSum + source[tab].reduce((sum, row) => sum + row.hours, 0),
+                              0
+                            );
+                            const ratio = total <= 0 ? "0.0%" : `${((teaching / total) * 100).toFixed(1)}%`;
                             return (
-          <input
-                            readOnly
-                            value={totalHours}
-                            className="w-full flex-1 rounded-sm border border-[#2f4d9c] px-3 py-2 text-base tabular-nums font-sans"
-                          />
+                              <input readOnly value={ratio} className="w-full flex-1 rounded-sm border border-[#2f4d9c] px-3 py-2 text-base tabular-nums font-sans" />
                             );
                           })()}
                         </div>
 
                         <div className="flex items-center gap-3">
                           <div className="w-32 rounded-sm bg-[#2f4d9c] px-3 py-2 text-center text-base font-semibold text-white">
-                            Department
+                            Total work hours
                           </div>
-          <input
-                            readOnly
-                            value={detailsItem.department}
-                            className="w-full flex-1 rounded-sm border border-[#2f4d9c] px-3 py-2 text-base"
-                          />
+                          {(() => {
+                            const totalHours = detailsBreakdown
+                              ? (["Teaching", "Assigned Roles", "HDR", "Service", "Research (residual)"] as BreakdownCategory[]).reduce(
+                                  (tabSum, tab) => tabSum + detailsBreakdown[tab].reduce((sum, row) => sum + row.hours, 0),
+                                  0
+                                )
+                              : detailsItem.hours;
+                            return (
+                              <input readOnly value={totalHours} className="w-full flex-1 rounded-sm border border-[#2f4d9c] px-3 py-2 text-base tabular-nums font-sans" />
+                            );
+                          })()}
                         </div>
 
+                        <div className="flex items-center gap-3">
+                          <div className="w-32 rounded-sm bg-[#2f4d9c] px-3 py-2 text-center text-base font-semibold text-white">
+                            Employment type
+                          </div>
+                          {(() => {
+                            const totalHours = detailsBreakdown
+                              ? (["Teaching", "Assigned Roles", "HDR", "Service", "Research (residual)"] as BreakdownCategory[]).reduce(
+                                  (tabSum, tab) => tabSum + detailsBreakdown[tab].reduce((sum, row) => sum + row.hours, 0),
+                                  0
+                                )
+                              : detailsItem.hours;
+                            return (
+                              <input readOnly value={totalHours >= 800 ? "Full-time" : "Part-time"} className="w-full flex-1 rounded-sm border border-[#2f4d9c] px-3 py-2 text-base" />
+                            );
+                          })()}
+                        </div>
+
+                        <div className="flex items-center gap-3">
+                          <div className="w-32 rounded-sm bg-[#2f4d9c] px-3 py-2 text-center text-base font-semibold text-white">
+                            New Staff
+                          </div>
+                          <input readOnly value="No" className="w-full flex-1 rounded-sm border border-[#2f4d9c] px-3 py-2 text-base" />
+                        </div>
+
+                        <div className="flex items-center gap-3">
+                          <div className="w-32 rounded-sm bg-[#2f4d9c] px-3 py-2 text-center text-base font-semibold text-white">
+                            HoD Review
+                          </div>
+                          <input readOnly value="No" className="w-full flex-1 rounded-sm border border-[#2f4d9c] px-3 py-2 text-base" />
+                        </div>
                       </div>
 
                       <div>
-                        <div className="text-sm font-semibold uppercase text-slate-700">Workload Breakdown</div>
+                        <div className="flex items-center justify-between">
+                          <div className="text-sm font-semibold uppercase text-slate-700">Workload Breakdown</div>
+                          <button
+                            type="button"
+                            onClick={() => {
+                              setDetailsEditMode((v) => !v);
+                              setDetailsModalError("");
+                            }}
+                            className="rounded bg-[#2f4d9c] px-3 py-1 text-xs font-bold text-white hover:bg-[#264183]"
+                          >
+                            {detailsEditMode ? "Done" : "Edit"}
+                          </button>
+                        </div>
                         <div className="mt-2 overflow-hidden rounded-sm border border-slate-300">
                           <div className="flex flex-wrap gap-2 border-b border-slate-200 bg-slate-50 px-3 py-2">
-                            {(["Teaching", "Assigned Roles", "HDR", "Service"] as BreakdownCategory[]).map((tab) => (
+                            {(["Teaching", "Assigned Roles", "HDR", "Service", "Research (residual)"] as BreakdownCategory[]).map((tab) => (
                               <button
                                 key={tab}
                                 type="button"
@@ -1479,53 +1511,65 @@ export default function Supervisor() {
                               <tr className="text-left text-xs font-semibold uppercase text-slate-600">
                                 <th className="px-3 py-2">{detailsTab}</th>
                                 <th className="w-[120px] px-3 py-2 text-right">Hours</th>
-                                <th className="w-[88px] px-3 py-2 text-center">Action</th>
+                                {detailsEditMode ? <th className="w-[88px] px-3 py-2 text-center">Action</th> : null}
                               </tr>
                             </thead>
                             <tbody className="divide-y divide-slate-200 bg-white text-sm text-slate-700">
                               {(detailsBreakdown?.[detailsTab] ?? breakdownById(detailsItem.id, detailsItem.hours)[detailsTab]).map((row, idx) => (
                                 <tr key={`${detailsItem.id}-${detailsTab}-${idx}`}>
                                   <td className="px-3 py-2">
-          <input
-                                      value={row.name}
-                                      onChange={(e) => updateBreakdownRow(detailsTab, idx, "name", e.target.value)}
-                                      maxLength={60}
-                                      className="w-[240px] max-w-full overflow-hidden text-ellipsis whitespace-nowrap rounded border border-slate-300 px-2 py-1 text-sm"
-                                    />
+                                    {detailsEditMode ? (
+                                      <input
+                                        value={row.name}
+                                        onChange={(e) => updateBreakdownRow(detailsTab, idx, "name", e.target.value)}
+                                        maxLength={60}
+                                        className="w-[240px] max-w-full overflow-hidden text-ellipsis whitespace-nowrap rounded border border-slate-300 px-2 py-1 text-sm"
+                                      />
+                                    ) : (
+                                      <span className="block px-1 py-1">{row.name}</span>
+                                    )}
                                   </td>
                                   <td className="px-3 py-2">
-                                    <input
-                                      type="text"
-                                      inputMode="decimal"
-                                      maxLength={8}
-                                      value={String(row.hours)}
-                                      onChange={(e) => updateBreakdownRow(detailsTab, idx, "hours", e.target.value)}
-                                      className="ml-auto w-24 rounded border border-slate-300 px-2 py-1 text-right tabular-nums font-sans text-sm"
-                                    />
+                                    {detailsEditMode ? (
+                                      <input
+                                        type="text"
+                                        inputMode="decimal"
+                                        maxLength={8}
+                                        value={String(row.hours)}
+                                        onChange={(e) => updateBreakdownRow(detailsTab, idx, "hours", e.target.value)}
+                                        className="ml-auto w-24 rounded border border-slate-300 px-2 py-1 text-right tabular-nums font-sans text-sm"
+                                      />
+                                    ) : (
+                                      <div className="text-right tabular-nums font-sans">{row.hours}</div>
+                                    )}
                                   </td>
-                                  <td className="px-3 py-2 text-center">
+                                  {detailsEditMode ? (
+                                    <td className="px-3 py-2 text-center">
+                                      <button
+                                        type="button"
+                                        onClick={() => removeBreakdownRow(detailsTab, idx)}
+                                        className="rounded bg-slate-200 px-2 py-1 text-xs font-semibold text-slate-700 hover:bg-slate-300 disabled:opacity-50"
+                                        disabled={(detailsBreakdown?.[detailsTab] ?? []).length <= 1}
+                                      >
+                                        Delete
+                                      </button>
+                                    </td>
+                                  ) : null}
+                                </tr>
+                              ))}
+                              {detailsEditMode ? (
+                                <tr>
+                                  <td colSpan={3} className="px-3 py-2">
                                     <button
                                       type="button"
-                                      onClick={() => removeBreakdownRow(detailsTab, idx)}
-                                      className="rounded bg-slate-200 px-2 py-1 text-xs font-semibold text-slate-700 hover:bg-slate-300 disabled:opacity-50"
-                                      disabled={(detailsBreakdown?.[detailsTab] ?? []).length <= 1}
+                                      onClick={() => addBreakdownRow(detailsTab)}
+                                      className="rounded bg-[#2f4d9c] px-3 py-1 text-xs font-semibold text-white hover:bg-[#264183]"
                                     >
-                                      Delete
+                                      + Add Row
                                     </button>
                                   </td>
                                 </tr>
-                              ))}
-                              <tr>
-                                <td colSpan={3} className="px-3 py-2">
-                                  <button
-                                    type="button"
-                                    onClick={() => addBreakdownRow(detailsTab)}
-                                    className="rounded bg-[#2f4d9c] px-3 py-1 text-xs font-semibold text-white hover:bg-[#264183]"
-                                  >
-                                    + Add Row
-                                  </button>
-                                </td>
-                              </tr>
+                              ) : null}
                               <tr className="bg-slate-50">
                                 <td className="px-3 py-2 font-semibold">Total</td>
                                 <td className="px-3 py-2 text-right font-semibold tabular-nums font-sans">
@@ -1534,7 +1578,7 @@ export default function Supervisor() {
                                     0
                                   )}
                                 </td>
-                                <td />
+                                {detailsEditMode ? <td /> : null}
                               </tr>
                             </tbody>
                           </table>
@@ -1547,7 +1591,7 @@ export default function Supervisor() {
                           onClick={() => setDescriptionExpanded((v) => !v)}
                           className="flex w-full items-center justify-between rounded-sm border border-slate-300 bg-slate-50 px-3 py-2 text-left text-sm font-semibold uppercase text-slate-700"
                         >
-                          <span>Note</span>
+                          <span>School of Operations notes</span>
                           <span className="text-base leading-none">{descriptionExpanded ? "−" : "+"}</span>
                         </button>
                         {descriptionExpanded && (
