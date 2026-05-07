@@ -48,11 +48,45 @@ const ACADEMIC_STATUS_SYNC_KEY = "academic_status_sync_v1";
 const ACADEMIC_NOTES_SYNC_KEY = "academic_notes_sync_v1";
 const SUPERVISOR_SYNC_EVENT = "supervisor-status-updated";
 const ACADEMIC_DRAFT_EVENT = "academic-drafts-updated";
+const HOD_ANNUAL_REPORTS_KEY = "hod_annual_report_inbox_v1";
+
+type HodAnnualReportItem = {
+  id: string;
+  year: number;
+  department: string;
+  title: string;
+  createdAt: string;
+  readAt?: string;
+  isDemo?: boolean;
+  rows: Record<string, string | number>[];
+};
+
+function readHodAnnualReports(): HodAnnualReportItem[] {
+  if (typeof window === "undefined") return [];
+  try {
+    const raw = window.localStorage.getItem(HOD_ANNUAL_REPORTS_KEY);
+    if (!raw) return [];
+    const parsed = JSON.parse(raw);
+    if (!Array.isArray(parsed)) return [];
+    return parsed as HodAnnualReportItem[];
+  } catch {
+    return [];
+  }
+}
+
+function writeHodAnnualReports(items: HodAnnualReportItem[]) {
+  if (typeof window === "undefined") return;
+  window.localStorage.setItem(HOD_ANNUAL_REPORTS_KEY, JSON.stringify(items));
+}
 
 function submittedTimeById(id: number) {
   const day = ((id - 1) % 28) + 1;
   const hour = 8 + (id % 9);
   return `2026-03-${String(day).padStart(2, "0")} ${String(hour).padStart(2, "0")}:00`;
+}
+
+function displayNameWithoutComma(raw: string) {
+  return raw.replace(/,/g, " ").replace(/\s+/g, " ").trim();
 }
 
 function readAcademicDrafts(): MockRequest[] {
@@ -167,6 +201,14 @@ function workloadModalNotes(row: Pick<MockRequest, "notes" | "description">) {
   return cleanDescription(row.description ?? "");
 }
 
+function requestReasonText(row: Pick<MockRequest, "requestReason" | "description">) {
+  return row.requestReason?.trim() || extractRequestReason(row.description ?? "").trim();
+}
+
+function reportStatusText(status: MockRequest["status"]) {
+  return status === "approved" ? "Approved" : status === "rejected" ? "Rejected" : "Pending";
+}
+
 function parsePeriod(periodLabel: string) {
   const matched = periodLabel.match(/(\d{4})-(1|2)/);
   if (!matched) return { year: NaN, semester: "" as "" | "S1" | "S2" };
@@ -220,14 +262,58 @@ function reseedSemestersIfNeeded(items: MockRequest[]) {
   });
 }
 
-export default function Supervisor() {
-  type ChatMessage = {
-    sender: "Sam" | "Admin";
-    message: string;
-    time: string;
-    date: string;
-  };
+function annualReportAvailableOn(year: number) {
+  return new Date(year + 1, 0, 1, 0, 0, 0, 0);
+}
 
+function buildHodAnnualReportRows(rows: MockRequest[], department: string) {
+  return rows
+    .filter((row) => !row.cancelled && row.department === department)
+    .sort((a, b) => a.periodLabel.localeCompare(b.periodLabel) || a.name.localeCompare(b.name))
+    .map((row) => {
+      const parsed = parsePeriod(row.periodLabel);
+      return {
+        "Staff ID": row.studentId,
+        Name: displayNameWithoutComma(row.name),
+        Department: row.department,
+        Title: row.title,
+        Semester: parsed.semester || row.semesterLabel || row.periodLabel,
+        Status: reportStatusText(row.status),
+        "Total Work Hours": row.hours,
+        "Submitted Time": submittedTimeById(row.id),
+        "Application Reason": requestReasonText(row) || "—",
+        "HoD Review Note": row.supervisorNote?.trim() || "—",
+      };
+    });
+}
+
+function createHodAnnualDemoReport(department: string): HodAnnualReportItem {
+  return {
+    id: `hod-report-demo-2025-${department.replace(/\s+/g, "-").toLowerCase()}`,
+    year: 2025,
+    department,
+    title: `2025 ${department} annual report generated`,
+    createdAt: "2026-01-01T09:00:00.000Z",
+    readAt: undefined,
+    isDemo: true,
+    rows: [
+      {
+        "Staff ID": "12345931",
+        Name: "Dias John",
+        Department: department,
+        Title: "Lecturer",
+        Semester: "S1",
+        Status: "Pending",
+        "Total Work Hours": 793.5,
+        "Submitted Time": "2025-11-28 09:30",
+        "Application Reason": "wrong",
+        "HoD Review Note": "—",
+      },
+    ],
+  };
+}
+
+export default function Supervisor() {
   const user = {
     surname: "Rachel",
     firstName: "Rachel",
@@ -237,24 +323,11 @@ export default function Supervisor() {
     email: "rachel.rachel@uwa.edu.au",
   };
 
-  const [hasNewMessage, setHasNewMessage] = useState(true);
-  const [messagePanelOpen, setMessagePanelOpen] = useState(false);
   const [profileOpen, setProfileOpen] = useState(false);
   const [avatarSrc, setAvatarSrc] = useState<string | null>(null);
-  const [chatInput, setChatInput] = useState("");
-  const [chatHistory, setChatHistory] = useState<ChatMessage[]>([
-    { sender: "Sam", message: "I have a question about workload item #11.", time: "09:10", date: "2026-04-22" },
-    { sender: "Admin", message: "Please check the teaching hours again.", time: "09:16", date: "2026-04-22" },
-    { sender: "Sam", message: "Thank you, I will update it.", time: "09:18", date: "2026-04-23" },
-  ]);
-  const [selectedChatDate, setSelectedChatDate] = useState("2026-04-23");
-  const [calendarOpen, setCalendarOpen] = useState(false);
-  const [calendarMonth, setCalendarMonth] = useState("2026-04");
-  const availableChatDates = useMemo(() => new Set(chatHistory.map((entry) => entry.date)), [chatHistory]);
-  const visibleChatHistory = useMemo(
-    () => chatHistory.filter((entry) => entry.date === selectedChatDate),
-    [chatHistory, selectedChatDate]
-  );
+  const [hodReportInboxOpen, setHodReportInboxOpen] = useState(false);
+  const [hodAnnualReports, setHodAnnualReports] = useState<HodAnnualReportItem[]>(() => readHodAnnualReports());
+  const [hodReportInboxPage, setHodReportInboxPage] = useState(1);
   const currentYear = useMemo(() => new Date().getFullYear(), []);
   const currentSemester = useMemo<"S1" | "S2">(() => {
     const month = new Date().getMonth() + 1;
@@ -395,11 +468,110 @@ export default function Supervisor() {
   const [exportYearToInput, setExportYearToInput] = useState("");
   const [exportSemesterInput, setExportSemesterInput] = useState<"All" | "S1" | "S2">("All");
   const [exportMessage, setExportMessage] = useState("");
+  const hodReportsPerPage = 10;
+  const hodUnreadReportCount = useMemo(
+    () => hodAnnualReports.filter((item) => !item.readAt).length,
+    [hodAnnualReports]
+  );
+  const hodReportTotalPages = Math.max(1, Math.ceil(hodAnnualReports.length / hodReportsPerPage));
+  const pagedHodAnnualReports = useMemo(() => {
+    const start = (hodReportInboxPage - 1) * hodReportsPerPage;
+    return hodAnnualReports.slice(start, start + hodReportsPerPage);
+  }, [hodAnnualReports, hodReportInboxPage]);
+
+  function handleDownloadHodAnnualReport(report: HodAnnualReportItem) {
+    if (!report.rows.length) return;
+    const ws = XLSX.utils.json_to_sheet(report.rows);
+    const wb = XLSX.utils.book_new();
+    XLSX.utils.book_append_sheet(wb, ws, `${report.year}`);
+    XLSX.writeFile(
+      wb,
+      `hod_${report.department.replace(/[^a-z0-9]+/gi, "_").toLowerCase()}_annual_report_${report.year}.xlsx`
+    );
+  }
 
   const pendingCount = useMemo(
     () => pending.filter((it) => it.status === "pending").length,
     [pending]
   );
+
+  useEffect(() => {
+    setHodAnnualReports((prev) => {
+      const base = (prev.length ? prev : readHodAnnualReports()).map((item) => ({
+        ...item,
+        title: `${item.year} ${item.department} annual report generated`,
+      }));
+      if (base.length) {
+        writeHodAnnualReports(base);
+        return base;
+      }
+      const seeded = [createHodAnnualDemoReport(user.department)];
+      writeHodAnnualReports(seeded);
+      return seeded;
+    });
+  }, [user.department]);
+
+  useEffect(() => {
+    const now = new Date();
+    const existing = readHodAnnualReports();
+    const existingByKey = new Map<string, HodAnnualReportItem>(
+      existing.map((item) => [`${item.year}-${item.department}`, item] as const)
+    );
+    const availableYears = new Set<number>();
+
+    pending.forEach((row) => {
+      if (row.cancelled || row.department !== user.department) return;
+      const parsed = parsePeriod(row.periodLabel);
+      if (!Number.isFinite(parsed.year)) return;
+      if (now < annualReportAvailableOn(parsed.year)) return;
+      availableYears.add(parsed.year);
+    });
+
+    const newReports: HodAnnualReportItem[] = [];
+    const replacedDemoKeys = new Set<string>();
+    availableYears.forEach((year) => {
+      const key = `${year}-${user.department}`;
+      const existingItem = existingByKey.get(key);
+      if (existingItem && !existingItem.isDemo) return;
+      const yearRows = buildHodAnnualReportRows(
+        pending.filter((row) => parsePeriod(row.periodLabel).year === year),
+        user.department
+      );
+      if (!yearRows.length) return;
+      if (existingItem?.isDemo) replacedDemoKeys.add(key);
+      newReports.push({
+        id: `hod-report-${year}-${user.department.replace(/\s+/g, "-").toLowerCase()}-${Date.now()}`,
+        year,
+        department: user.department,
+        title: `${year} ${user.department} annual report generated`,
+        createdAt: new Date().toISOString(),
+        rows: yearRows,
+      });
+    });
+
+    if (!newReports.length) return;
+    const retainedExisting = existing.filter((item) => !replacedDemoKeys.has(`${item.year}-${item.department}`));
+    const next = [...newReports, ...retainedExisting].sort(
+      (a, b) => Date.parse(b.createdAt || "") - Date.parse(a.createdAt || "")
+    );
+    writeHodAnnualReports(next);
+    setHodAnnualReports(next);
+  }, [pending, user.department]);
+
+  useEffect(() => {
+    if (!hodReportInboxOpen) return;
+    setHodAnnualReports((prev) => {
+      const now = new Date().toISOString();
+      const next = prev.map((item) => (item.readAt ? item : { ...item, readAt: now }));
+      writeHodAnnualReports(next);
+      return next;
+    });
+  }, [hodReportInboxOpen]);
+
+  useEffect(() => {
+    const total = Math.max(1, Math.ceil(hodAnnualReports.length / hodReportsPerPage));
+    setHodReportInboxPage((prev) => Math.min(Math.max(1, prev), total));
+  }, [hodAnnualReports.length]);
 
   const itemsForFilter = useMemo(() => {
     const byStatus =
@@ -825,27 +997,6 @@ export default function Supervisor() {
     }
   }
 
-  function openMessagePanel() {
-    setMessagePanelOpen(true);
-    setHasNewMessage(false);
-  }
-
-  function handleSendMessage() {
-    const trimmed = chatInput.trim();
-    if (!trimmed) return;
-    const now = new Date();
-    const hh = String(now.getHours()).padStart(2, "0");
-    const mm = String(now.getMinutes()).padStart(2, "0");
-    const today = now.toISOString().slice(0, 10);
-    setChatHistory((prev) => [
-      ...prev,
-      { sender: "Sam", message: trimmed, time: `${hh}:${mm}`, date: today },
-    ]);
-    setSelectedChatDate(today);
-    setCalendarMonth(today.slice(0, 7));
-    setChatInput("");
-  }
-
   function handleAvatarUpload(event: ChangeEvent<HTMLInputElement>) {
     const file = event.target.files?.[0];
     if (!file) return;
@@ -858,167 +1009,87 @@ export default function Supervisor() {
     event.target.value = "";
   }
 
-  function changeCalendarMonth(offset: number) {
-    const [yearStr, monthStr] = calendarMonth.split("-");
-    const date = new Date(Number(yearStr), Number(monthStr) - 1 + offset, 1);
-    setCalendarMonth(
-      `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, "0")}`
-    );
-  }
-
   return (
     <div className="min-h-screen bg-[#f3f4f6] font-serif">
       <div className="mx-auto max-w-7xl px-3 pb-10 pt-8">
         <DashboardHeader
           title="HoD Dashboard"
-          hasNewMessage={hasNewMessage}
-          onMessageClick={openMessagePanel}
+          hasNewMessage={hodUnreadReportCount > 0}
+          onMessageClick={() => setHodReportInboxOpen(true)}
           greetingName={user.surname}
           onAvatarClick={() => setProfileOpen(true)}
           avatarSrc={avatarSrc}
         />
 
-        {messagePanelOpen && (
+        {hodReportInboxOpen && (
           <div
             className="fixed inset-0 z-[70] flex items-center justify-center bg-black/30 p-4"
-            onClick={() => setMessagePanelOpen(false)}
+            onClick={() => setHodReportInboxOpen(false)}
           >
             <div
-              className="w-full max-w-3xl rounded-2xl border border-slate-200 bg-slate-50 p-6 shadow-xl"
+              className="w-full max-w-3xl rounded-2xl border-2 border-[#2f4d9c] bg-slate-50 p-6 shadow-xl"
               onClick={(e) => e.stopPropagation()}
             >
-              <div className="mb-4 flex items-center justify-between">
-                <div className="text-3xl font-semibold text-slate-800">Contact Admin</div>
+              <div className="-mx-6 -mt-6 mb-4 flex items-center justify-between rounded-t-2xl bg-[#2f4d9c] px-6 py-4 text-white">
+                <div className="text-2xl font-semibold">Annual Department Reports</div>
                 <button
                   type="button"
-                  aria-label="Close"
-                  className="rounded p-1 text-slate-500 hover:bg-slate-200"
-                  onClick={() => setMessagePanelOpen(false)}
+                  aria-label="Close report inbox"
+                  className="rounded p-1 text-white/90 hover:bg-white/20"
+                  onClick={() => setHodReportInboxOpen(false)}
                 >
                   ✕
                 </button>
               </div>
-
-              <div className="mb-4 rounded-lg border border-slate-200 bg-white p-4">
-                <div className="mb-3 flex items-center gap-3">
-                  <div className="text-sm font-semibold text-slate-700">Chat Record Date</div>
-                  <div className="relative">
+              {hodAnnualReports.length === 0 ? (
+                <div className="rounded-md border border-[#2f4d9c]/30 bg-white px-4 py-5 text-sm text-slate-700">
+                  No annual department report generated yet.
+                </div>
+              ) : (
+                <>
+                  <div className="max-h-80 overflow-y-auto rounded-md border border-[#2f4d9c]/40 bg-white">
+                    {pagedHodAnnualReports.map((report) => (
+                      <div
+                        key={report.id}
+                        className="flex items-center justify-between gap-3 border-b border-[#2f4d9c]/10 px-4 py-3"
+                      >
+                        <div className="text-sm font-semibold text-slate-800">{report.title}</div>
+                        <button
+                          type="button"
+                          onClick={() => handleDownloadHodAnnualReport(report)}
+                          className="inline-flex items-center gap-2 rounded border border-[#2f4d9c]/40 bg-[#eef3ff] px-3 py-1 text-xs font-semibold text-[#2f4d9c] hover:bg-[#e0e9ff]"
+                        >
+                          ⬇ Download
+                        </button>
+                      </div>
+                    ))}
+                  </div>
+                  <div className="mt-3 flex items-center justify-between px-1 text-sm">
                     <button
                       type="button"
-                      onClick={() => setCalendarOpen((v) => !v)}
-                      className="inline-flex items-center gap-2 rounded border border-slate-300 bg-white px-3 py-1 text-sm text-slate-800"
+                      onClick={() => setHodReportInboxPage((p) => Math.max(1, p - 1))}
+                      disabled={hodReportInboxPage <= 1}
+                      className="rounded border border-[#2f4d9c]/35 bg-[#eef3ff] px-3 py-1 font-semibold text-[#2f4d9c] disabled:cursor-not-allowed disabled:opacity-50"
                     >
-                      {selectedChatDate}
-                      <span aria-hidden="true">📅</span>
+                      Previous
                     </button>
-                    {calendarOpen && (
-                      <div className="absolute z-20 mt-2 w-72 rounded-lg border border-slate-200 bg-white p-3 shadow-lg">
-                        <div className="mb-2 flex items-center justify-between">
-                          <button
-                            type="button"
-                            onClick={() => changeCalendarMonth(-1)}
-                            className="rounded px-2 py-1 text-sm hover:bg-slate-100"
-                          >
-                            ‹
-                          </button>
-                          <div className="text-sm font-semibold text-slate-700">{calendarMonth}</div>
-                          <button
-                            type="button"
-                            onClick={() => changeCalendarMonth(1)}
-                            className="rounded px-2 py-1 text-sm hover:bg-slate-100"
-                          >
-                            ›
-                          </button>
-            </div>
-
-                        <div className="mb-1 grid grid-cols-7 gap-1 text-center text-xs font-semibold text-slate-500">
-                          {["Su", "Mo", "Tu", "We", "Th", "Fr", "Sa"].map((d) => (
-                            <div key={d}>{d}</div>
-                          ))}
-                        </div>
-
-                        <div className="grid grid-cols-7 gap-1">
-                          {(() => {
-                            const [yearStr, monthStr] = calendarMonth.split("-");
-                            const year = Number(yearStr);
-                            const month = Number(monthStr) - 1;
-                            const firstDay = new Date(year, month, 1).getDay();
-                            const totalDays = new Date(year, month + 1, 0).getDate();
-                            const cells = [];
-
-                            for (let i = 0; i < firstDay; i += 1) {
-                              cells.push(<div key={`empty-${i}`} />);
-                            }
-
-                            for (let day = 1; day <= totalDays; day += 1) {
-                              const dateKey = `${year}-${String(month + 1).padStart(2, "0")}-${String(day).padStart(
-                                2,
-                                "0"
-                              )}`;
-                              const selectable = availableChatDates.has(dateKey);
-                              const isSelected = selectedChatDate === dateKey;
-
-                              cells.push(
-                                <button
-                                  key={dateKey}
-                                  type="button"
-                                  disabled={!selectable}
-                                  onClick={() => {
-                                    setSelectedChatDate(dateKey);
-                                    setCalendarOpen(false);
-                                  }}
-                                  className={`h-8 rounded text-xs ${
-                                    !selectable
-                                      ? "cursor-not-allowed bg-slate-100 text-slate-300"
-                                      : isSelected
-                                        ? "bg-[#2f4d9c] text-white"
-                                        : "text-slate-700 hover:bg-slate-100"
-                                  }`}
-                                >
-                                  {day}
-                                </button>
-                              );
-                            }
-
-                            return cells;
-                          })()}
-            </div>
-                      </div>
-                    )}
+                    <span className="text-slate-600">
+                      Page {hodReportInboxPage} / {hodReportTotalPages}
+                    </span>
+                    <button
+                      type="button"
+                      onClick={() => setHodReportInboxPage((p) => Math.min(hodReportTotalPages, p + 1))}
+                      disabled={hodReportInboxPage >= hodReportTotalPages}
+                      className="rounded border border-[#2f4d9c]/35 bg-[#eef3ff] px-3 py-1 font-semibold text-[#2f4d9c] disabled:cursor-not-allowed disabled:opacity-50"
+                    >
+                      Next
+                    </button>
                   </div>
-                </div>
-                <div className="max-h-72 space-y-2 overflow-y-auto pr-1 font-mono text-[15px] leading-6 text-slate-800">
-                  {visibleChatHistory.length > 0 ? (
-                    visibleChatHistory.map((entry, idx) => (
-                      <div key={idx}>
-                        <span className="text-slate-500">[{entry.time}]</span>{" "}
-                        <span className="font-semibold">{entry.sender}:</span> {entry.message}
-                      </div>
-                    ))
-                  ) : (
-                    <div className="text-sm text-slate-500">No chat records for this date.</div>
-                  )}
-                </div>
-              </div>
-
-              <div className="flex items-end gap-3">
-                <textarea
-                  value={chatInput}
-                  onChange={(e) => setChatInput(e.target.value)}
-                  placeholder="Write your message..."
-                  className="h-16 flex-1 resize-none rounded-lg border border-slate-300 bg-white px-3 py-2 text-base text-slate-800 outline-none focus:border-[#2f4d9c]"
-                />
-                <button
-                  type="button"
-                  onClick={handleSendMessage}
-                  className="rounded-lg bg-[#2f4d9c] px-5 py-2 text-sm font-semibold text-white hover:bg-[#264183]"
-                >
-                  Send
-                </button>
+                </>
+              )}
             </div>
-            </div>
-        </div>
-      )}
+          </div>
+        )}
 
         <ProfileModal
           open={profileOpen}
@@ -1252,6 +1323,7 @@ export default function Supervisor() {
                     <th className="w-14 px-2 py-2">Task</th>
                     <th className="px-3 py-2">NAME</th>
                     <th className="px-3 py-2">TITLE</th>
+                    <th className="w-[180px] px-3 py-2">REASONS</th>
                     <th className="px-3 py-2">DEPARTMENT</th>
                     <th className="px-3 py-2">STATUS</th>
                     <th className="px-3 py-2 text-center">TOTAL WORK HOURS</th>
@@ -1261,7 +1333,7 @@ export default function Supervisor() {
                 <tbody className="divide-y divide-slate-200 bg-white">
                   {loading && (
                     <tr>
-                      <td colSpan={8} className="px-3 py-6 text-center text-sm text-slate-500">
+                      <td colSpan={9} className="px-3 py-6 text-center text-sm text-slate-500">
                         Loading...
                       </td>
                     </tr>
@@ -1269,7 +1341,7 @@ export default function Supervisor() {
 
                   {!loading && pageItems.length === 0 && (
                     <tr>
-                      <td colSpan={8} className="px-3 py-6 text-center text-sm text-slate-500">
+                      <td colSpan={9} className="px-3 py-6 text-center text-sm text-slate-500">
                         {statusFilter === "pending"
                           ? "No pending requests"
                           : "No items found"}
@@ -1325,6 +1397,14 @@ export default function Supervisor() {
                             <div className="text-xs text-slate-400">{item.studentId}</div>
                           </td>
                           <td className="px-3 py-3 text-slate-700">{item.title}</td>
+                          <td className="px-3 py-3 text-slate-600">
+                            <div
+                              className="max-w-[180px] truncate"
+                              title={requestReasonText(item) || "No reason provided"}
+                            >
+                              {requestReasonText(item) || "—"}
+                            </div>
+                          </td>
                           <td className="px-3 py-3 text-slate-600">{item.department || "—"}</td>
                           <td className="px-3 py-3">
                             <StatusPill status={item.status} variant="supervisor" />
@@ -1607,11 +1687,7 @@ export default function Supervisor() {
                         <div className="text-sm font-semibold text-slate-700">Application Reason</div>
                         <textarea
                           readOnly
-                          value={
-                            detailsItem.requestReason ||
-                            extractRequestReason(detailsItem.description ?? "") ||
-                            "- no reason provided -"
-                          }
+                          value={requestReasonText(detailsItem) || "- no reason provided -"}
                           className="mt-2 h-24 w-full resize-none rounded-sm border border-slate-300 bg-white px-4 py-3 text-sm text-slate-700"
                         />
                       </div>

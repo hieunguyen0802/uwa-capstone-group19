@@ -3249,7 +3249,7 @@ export default function SchoolofOperations() {
               )}
 
               <div className="mt-4 rounded-md bg-[#f4f7ff] p-4">
-                <div className="grid grid-cols-1 gap-6 md:grid-cols-[minmax(0,1.6fr)_minmax(0,0.8fr)_minmax(0,1.2fr)]">
+                <div className="grid grid-cols-1 gap-6 md:grid-cols-3">
                   <div className="flex flex-col gap-1">
                     <div className="w-fit rounded bg-[#2f4d9c] px-3 py-1 text-xs font-bold text-white">Name</div>
                     <input
@@ -3286,7 +3286,7 @@ export default function SchoolofOperations() {
                     </select>
                   </div>
                 </div>
-                <div className="mt-4 grid grid-cols-1 items-end gap-6 md:grid-cols-[1fr_auto_1fr]">
+                <div className="mt-4 grid grid-cols-1 items-end gap-6 md:grid-cols-3">
                   <div className="flex flex-col gap-1">
                     <div className="w-fit rounded bg-[#2f4d9c] px-3 py-1 text-xs font-bold text-white">Year & Semester</div>
                     <div className="flex w-full min-w-0 items-center gap-2">
@@ -3317,7 +3317,7 @@ export default function SchoolofOperations() {
                       </select>
                     </div>
                   </div>
-                  <div className="flex justify-center md:justify-self-center">
+                  <div className="flex items-end justify-center md:justify-self-center">
                     <SearchButton onClick={handleSearch} />
                   </div>
                   <span className="hidden md:block" aria-hidden />

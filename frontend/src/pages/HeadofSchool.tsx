@@ -18,7 +18,6 @@ import ExcelJS from "exceljs";
 import * as XLSX from "xlsx";
 import DashboardHeader from "../components/common/DashboardHeader";
 import FilterFormRow from "../components/common/FilterFormRow";
-import InfoField from "../components/common/InfoField";
 import PaginationControls from "../components/common/PaginationControls";
 import ProfileModal from "../components/common/ProfileModal";
 import SearchButton from "../components/common/SearchButton";
@@ -51,7 +50,7 @@ type MockRequest = {
   cancelled?: boolean;
 };
 
-type BreakdownCategory = "Teaching" | "Assigned Roles" | "HDR" | "Service";
+type BreakdownCategory = "Teaching" | "Assigned Roles" | "HDR" | "Service" | "Research (residual)";
 type BreakdownEntry = { name: string; hours: number };
 type BreakdownData = Record<BreakdownCategory, BreakdownEntry[]>;
 
@@ -62,6 +61,44 @@ const ACADEMIC_STATUS_SYNC_KEY = "academic_status_sync_v1";
 const ACADEMIC_NOTES_SYNC_KEY = "academic_notes_sync_v1";
 const SUPERVISOR_SYNC_EVENT = "supervisor-status-updated";
 const ACADEMIC_DRAFT_EVENT = "academic-drafts-updated";
+const HOS_SEMESTER_REPORTS_KEY = "hos_semester_report_inbox_v1";
+
+type HosSemesterReportItem = {
+  id: string;
+  year: number;
+  semester: "S1" | "S2";
+  title: string;
+  createdAt: string;
+  readAt?: string;
+  isDemo?: boolean;
+  rows: Record<string, string | number>[];
+};
+
+function readHosSemesterReports(): HosSemesterReportItem[] {
+  if (typeof window === "undefined") return [];
+  try {
+    const raw = window.localStorage.getItem(HOS_SEMESTER_REPORTS_KEY);
+    if (!raw) return [];
+    const parsed = JSON.parse(raw);
+    if (!Array.isArray(parsed)) return [];
+    return parsed as HosSemesterReportItem[];
+  } catch {
+    return [];
+  }
+}
+
+function writeHosSemesterReports(items: HosSemesterReportItem[]) {
+  if (typeof window === "undefined") return;
+  window.localStorage.setItem(HOS_SEMESTER_REPORTS_KEY, JSON.stringify(items));
+}
+
+function displayNameWithoutComma(raw: string): string {
+  return raw.replace(/,/g, " ").replace(/\s+/g, " ").trim();
+}
+
+function reportStatusText(status: MockRequest["status"]) {
+  return status === "approved" ? "Approved" : status === "rejected" ? "Rejected" : "Pending";
+}
 
 function submittedTimeById(id: number) {
   const day = ((id - 1) % 28) + 1;
@@ -126,6 +163,7 @@ function breakdownById(id: number): BreakdownData {
         { name: "Student B", hours: 2 },
       ],
       Service: [{ name: "Committee support", hours: 10 }],
+      "Research (residual)": [{ name: "Research (residual)", hours: 0 }],
     },
     {
       Teaching: [{ name: "CITS3002", hours: 15 }],
@@ -135,6 +173,7 @@ function breakdownById(id: number): BreakdownData {
         { name: "Student E", hours: 2 },
       ],
       Service: [{ name: "Peer review", hours: 4 }],
+      "Research (residual)": [{ name: "Research (residual)", hours: 0 }],
     },
   ];
   return patterns[id % patterns.length];
@@ -160,6 +199,65 @@ function workloadModalNotes(row: Pick<MockRequest, "notes" | "description">) {
   return cleanDescription(row.description ?? "");
 }
 
+function requestReasonText(row: Pick<MockRequest, "requestReason" | "description">) {
+  return row.requestReason?.trim() || extractRequestReason(row.description ?? "").trim();
+}
+
+function buildHosSemesterReportRows(rows: MockRequest[]) {
+  return rows.map((row) => ({
+    "Staff ID": row.studentId,
+    Name: displayNameWithoutComma(row.name),
+    Department: row.department,
+    Title: row.title,
+    Status: reportStatusText(row.status),
+    "Total Work Hours": row.hours,
+    "Submitted Time": submittedTimeById(row.id),
+    "Application Reason": requestReasonText(row) || "—",
+    "HoS Review Note": row.supervisorNote?.trim() || "—",
+  }));
+}
+
+function createHosSemesterDemoReport(): HosSemesterReportItem {
+  return {
+    id: "hos-report-demo-2025-S1",
+    year: 2025,
+    semester: "S1",
+    title: "2025 S1 distribution report generated",
+    createdAt: "2025-07-01T09:00:00.000Z",
+    readAt: undefined,
+    isDemo: true,
+    rows: [
+      {
+        "Staff ID": "12345931",
+        Name: "Dias John",
+        Department: "Physics",
+        Title: "Lecturer",
+        Status: "Pending",
+        "Total Work Hours": 793.5,
+        "Submitted Time": "2025-06-24 10:00",
+        "Application Reason": "wrong",
+        "HoS Review Note": "—",
+      },
+    ],
+  };
+}
+
+/** Last name, first name, or full name (substring or order-independent tokens; commas as spaces). */
+function workloadNameSearchMatches(recordName: string, queryRaw: string): boolean {
+  const q = queryRaw.trim().toLowerCase();
+  if (!q) return true;
+  const norm = recordName
+    .toLowerCase()
+    .replace(/,/g, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+  if (!norm) return false;
+  if (norm.includes(q)) return true;
+  const qTokens = q.split(/\s+/).filter(Boolean);
+  const parts = norm.split(" ").filter(Boolean);
+  return qTokens.every((t) => parts.some((p) => p.includes(t)));
+}
+
 function shortDepartmentName(department: string) {
   if (department === "Computer Science & Software Engineering") return "CS&SE";
   if (department === "Mathematics & Statistics") return "Math&Stats";
@@ -178,13 +276,14 @@ function maxValue(values: number[]) {
   return Math.max(...values);
 }
 
+/** Workload search filter: school departments (org chart). */
+const WORKLOAD_SEARCH_DEPARTMENT_OPTIONS = [
+  "Physics",
+  "Mathematics & Statistics",
+  "Computer Science & Software Engineering",
+] as const;
+
 export default function HeadofSchool() {
-  type ChatMessage = {
-    sender: "Sam" | "Admin";
-    message: string;
-    time: string;
-    date: string;
-  };
   type AssignRole = "HoD" | "Admin";
   type AssignDepartment =
     | "Physics"
@@ -217,19 +316,13 @@ export default function HeadofSchool() {
 
   const user = MOCK_DASHBOARD_USER;
 
-  const [hasNewMessage, setHasNewMessage] = useState(true);
-  const [messagePanelOpen, setMessagePanelOpen] = useState(false);
+  const [hosReportInboxOpen, setHosReportInboxOpen] = useState(false);
   const [profileOpen, setProfileOpen] = useState(false);
   const [avatarSrc, setAvatarSrc] = useState<string | null>(null);
-  const [chatInput, setChatInput] = useState("");
-  const [chatHistory, setChatHistory] = useState<ChatMessage[]>([
-    { sender: "Sam", message: "I have a question about workload item #11.", time: "09:10", date: "2026-04-22" },
-    { sender: "Admin", message: "Please check the teaching hours again.", time: "09:16", date: "2026-04-22" },
-    { sender: "Sam", message: "Thank you, I will update it.", time: "09:18", date: "2026-04-23" },
-  ]);
-  const [selectedChatDate, setSelectedChatDate] = useState("2026-04-23");
-  const [calendarOpen, setCalendarOpen] = useState(false);
-  const [calendarMonth, setCalendarMonth] = useState("2026-04");
+  const [hosSemesterReports, setHosSemesterReports] = useState<HosSemesterReportItem[]>(() =>
+    readHosSemesterReports()
+  );
+  const [hosReportInboxPage, setHosReportInboxPage] = useState(1);
   const [activeSection, setActiveSection] = useState<
     "approval" | "admin" | "visualization" | "export"
   >("approval");
@@ -239,11 +332,6 @@ export default function HeadofSchool() {
     { key: "visualization", label: "Visualization" },
     { key: "export", label: "Export Excel" },
   ];
-  const availableChatDates = useMemo(() => new Set(chatHistory.map((entry) => entry.date)), [chatHistory]);
-  const visibleChatHistory = useMemo(
-    () => chatHistory.filter((entry) => entry.date === selectedChatDate),
-    [chatHistory, selectedChatDate]
-  );
   const currentYear = useMemo(() => new Date().getFullYear(), []);
 
   const [loading] = useState(false);
@@ -315,25 +403,23 @@ export default function HeadofSchool() {
   const [detailsItem, setDetailsItem] = useState<MockRequest | null>(null);
   const [detailsBreakdown, setDetailsBreakdown] = useState<BreakdownData | null>(null);
   const [detailsTab, setDetailsTab] = useState<BreakdownCategory>("Teaching");
+  const [detailsEditMode, setDetailsEditMode] = useState(false);
   const [descriptionExpanded, setDescriptionExpanded] = useState(false);
   const [noteModalOpen, setNoteModalOpen] = useState(false);
   const [noteDraft, setNoteDraft] = useState("");
   const [noteError, setNoteError] = useState("");
+  const [detailsModalError, setDetailsModalError] = useState("");
   const [noteDecision, setNoteDecision] = useState<"approve" | "reject">("approve");
   const [noteTargetId, setNoteTargetId] = useState<number | null>(null);
 
   const [searchEmployeeIdInput, setSearchEmployeeIdInput] = useState("");
-  const [searchLastNameInput, setSearchLastNameInput] = useState("");
-  const [searchFirstNameInput, setSearchFirstNameInput] = useState("");
-  const [searchTitleInput, setSearchTitleInput] = useState("");
+  const [searchNameInput, setSearchNameInput] = useState("");
   const [searchDepartmentInput, setSearchDepartmentInput] = useState("");
   const [searchYearInput, setSearchYearInput] = useState("");
   const [searchSemesterInput, setSearchSemesterInput] = useState<"" | "S1" | "S2">("");
   const [searchFilters, setSearchFilters] = useState({
     employeeId: "",
-    lastName: "",
-    firstName: "",
-    title: "",
+    name: "",
     department: "",
     year: "",
     semester: "",
@@ -421,6 +507,108 @@ export default function HeadofSchool() {
     () => Array.from({ length: 11 }, (_, i) => String(selectedYear - 5 + i)),
     [selectedYear]
   );
+  const hosReportsPerPage = 10;
+  const hosUnreadReportCount = useMemo(
+    () => hosSemesterReports.filter((item) => !item.readAt).length,
+    [hosSemesterReports]
+  );
+  const hosReportTotalPages = Math.max(1, Math.ceil(hosSemesterReports.length / hosReportsPerPage));
+  const pagedHosReports = useMemo(() => {
+    const start = (hosReportInboxPage - 1) * hosReportsPerPage;
+    return hosSemesterReports.slice(start, start + hosReportsPerPage);
+  }, [hosSemesterReports, hosReportInboxPage]);
+
+  function semesterReportAvailableOn(year: number, semester: "S1" | "S2"): Date {
+    return semester === "S1" ? new Date(year, 6, 1, 0, 0, 0, 0) : new Date(year + 1, 0, 1, 0, 0, 0, 0);
+  }
+
+  function handleDownloadHosSemesterReport(report: HosSemesterReportItem) {
+    if (!report.rows.length) return;
+    const ws = XLSX.utils.json_to_sheet(report.rows);
+    const wb = XLSX.utils.book_new();
+    XLSX.utils.book_append_sheet(wb, ws, `${report.year}-${report.semester}`);
+    XLSX.writeFile(wb, `hos_distribution_report_${report.year}_${report.semester}.xlsx`);
+  }
+
+  useEffect(() => {
+    setHosSemesterReports((prev) => {
+      const base = (prev.length ? prev : readHosSemesterReports()).map((item) => ({
+        ...item,
+        title: `${item.year} ${item.semester} distribution report generated`,
+      }));
+      if (base.length) {
+        writeHosSemesterReports(base);
+        return base;
+      }
+      const seeded = [createHosSemesterDemoReport()];
+      writeHosSemesterReports(seeded);
+      return seeded;
+    });
+  }, []);
+
+  useEffect(() => {
+    const now = new Date();
+    const existing = readHosSemesterReports();
+    const existingByKey = new Map<string, HosSemesterReportItem>(
+      existing.map((item) => [`${item.year}-${item.semester}`, item] as const)
+    );
+    const semesterKeys = new Set<string>();
+
+    pending.forEach((row) => {
+      if (row.cancelled) return;
+      const matched = row.periodLabel.match(/^(\d{4})-(1|2)$/);
+      if (!matched) return;
+      const year = Number(matched[1]);
+      const semester = matched[2] === "1" ? "S1" : "S2";
+      if (now < semesterReportAvailableOn(year, semester)) return;
+      semesterKeys.add(`${year}-${semester}`);
+    });
+
+    const newReports: HosSemesterReportItem[] = [];
+    const replacedDemoKeys = new Set<string>();
+    semesterKeys.forEach((key) => {
+      const existingItem = existingByKey.get(key);
+      if (existingItem && !existingItem.isDemo) return;
+      const [yearText, semester] = key.split("-") as [string, "S1" | "S2"];
+      const year = Number(yearText);
+      const semesterRows = buildHosSemesterReportRows(
+        pending.filter((row) => !row.cancelled && row.periodLabel === `${year}-${semester === "S1" ? "1" : "2"}`)
+      );
+      if (!semesterRows.length) return;
+      if (existingItem?.isDemo) replacedDemoKeys.add(key);
+      newReports.push({
+        id: `hos-report-${year}-${semester}-${Date.now()}`,
+        year,
+        semester,
+        title: `${year} ${semester} distribution report generated`,
+        createdAt: new Date().toISOString(),
+        rows: semesterRows,
+      });
+    });
+
+    if (!newReports.length) return;
+    const retainedExisting = existing.filter((item) => !replacedDemoKeys.has(`${item.year}-${item.semester}`));
+    const next = [...newReports, ...retainedExisting].sort(
+      (a, b) => Date.parse(b.createdAt || "") - Date.parse(a.createdAt || "")
+    );
+    writeHosSemesterReports(next);
+    setHosSemesterReports(next);
+  }, [pending]);
+
+  useEffect(() => {
+    if (!hosReportInboxOpen) return;
+    setHosSemesterReports((prev) => {
+      const now = new Date().toISOString();
+      const next = prev.map((item) => (item.readAt ? item : { ...item, readAt: now }));
+      writeHosSemesterReports(next);
+      return next;
+    });
+  }, [hosReportInboxOpen]);
+
+  useEffect(() => {
+    const total = Math.max(1, Math.ceil(hosSemesterReports.length / hosReportsPerPage));
+    setHosReportInboxPage((prev) => Math.min(Math.max(1, prev), total));
+  }, [hosSemesterReports.length]);
 
   const pendingCount = useMemo(
     () => pending.filter((it) => it.status === "pending").length,
@@ -437,11 +625,6 @@ export default function HeadofSchool() {
     if (!hasSearchFilter) return byStatus;
 
     return byStatus.filter((it) => {
-      const fullName = it.name.toLowerCase();
-      const nameParts = it.name.trim().toLowerCase().split(/\s+/);
-      const firstName = nameParts[0] || "";
-      const lastName = nameParts[nameParts.length - 1] || "";
-
       if (
         searchFilters.employeeId &&
         !it.studentId.toLowerCase().includes(searchFilters.employeeId)
@@ -449,15 +632,7 @@ export default function HeadofSchool() {
         return false;
       }
 
-      if (searchFilters.firstName && !firstName.includes(searchFilters.firstName)) {
-        return false;
-      }
-
-      if (searchFilters.lastName && !lastName.includes(searchFilters.lastName)) {
-        return false;
-      }
-
-      if (searchFilters.title && !it.title.toLowerCase().includes(searchFilters.title)) {
+      if (searchFilters.name && !workloadNameSearchMatches(it.name, searchFilters.name)) {
         return false;
       }
 
@@ -490,7 +665,7 @@ export default function HeadofSchool() {
         }
       }
 
-      return fullName.length > 0;
+      return it.name.trim().length > 0;
     });
   }, [pending, statusFilter, searchFilters]);
   const adminSearchResults = useMemo(() => {
@@ -753,13 +928,6 @@ export default function HeadofSchool() {
     });
   }
 
-  function statusLabel(status: string) {
-    if (status === "pending") return "Pending";
-    if (status === "approved") return "Approved";
-    if (status === "rejected") return "Rejected";
-    return status;
-  }
-
   const canSubmit =
     statusFilter === "pending" && selectedIds.size > 0 && !submitting;
 
@@ -829,6 +997,15 @@ export default function HeadofSchool() {
   }
 
   function openNoteModal(kind: "approve" | "reject", id: number) {
+    if (detailsBreakdown) {
+      const hasEmptyRow = (Object.keys(detailsBreakdown) as BreakdownCategory[]).some((tab) =>
+        detailsBreakdown[tab].some((row) => row.name.trim() === "")
+      );
+      if (hasEmptyRow) {
+        setDetailsModalError("Empty breakdown rows must be completed or deleted first.");
+        return;
+      }
+    }
     setNoteDecision(kind);
     setNoteTargetId(id);
     setNoteDraft("");
@@ -855,9 +1032,7 @@ export default function HeadofSchool() {
   function handleSearch() {
     setSearchFilters({
       employeeId: searchEmployeeIdInput.trim().toLowerCase(),
-      lastName: searchLastNameInput.trim().toLowerCase(),
-      firstName: searchFirstNameInput.trim().toLowerCase(),
-      title: searchTitleInput.trim().toLowerCase(),
+      name: searchNameInput.trim().toLowerCase(),
       department: searchDepartmentInput.trim().toLowerCase(),
       year: searchYearInput.trim().toLowerCase(),
       semester: searchSemesterInput.trim().toLowerCase(),
@@ -1259,13 +1434,30 @@ export default function HeadofSchool() {
     setDetailsItem(item);
     setDetailsBreakdown(breakdownById(item.id));
     setDetailsOpen(true);
+    setDetailsEditMode(false);
     setDescriptionExpanded(false);
+    setDetailsModalError("");
+  }
+
+  function requestCloseDetails() {
+    if (detailsEditMode && detailsBreakdown) {
+      const hasEmptyRow = (Object.keys(detailsBreakdown) as BreakdownCategory[]).some((tab) =>
+        detailsBreakdown[tab].some((row) => row.name.trim() === "")
+      );
+      if (hasEmptyRow) {
+        setDetailsModalError("Empty breakdown rows must be completed or deleted before closing.");
+        return;
+      }
+    }
+    closeDetails();
   }
 
   function closeDetails() {
     setDetailsOpen(false);
     setDetailsItem(null);
     setDetailsBreakdown(null);
+    setDetailsEditMode(false);
+    setDetailsModalError("");
     setNoteModalOpen(false);
     setNoteDraft("");
     setNoteError("");
@@ -1273,6 +1465,7 @@ export default function HeadofSchool() {
   }
 
   function updateBreakdownRow(tab: BreakdownCategory, idx: number, field: "name" | "hours", value: string) {
+    setDetailsModalError("");
     setDetailsBreakdown((prev) => {
       if (!prev) return prev;
       const nextRows = prev[tab].map((row, rowIdx) => {
@@ -1286,11 +1479,28 @@ export default function HeadofSchool() {
     });
   }
 
-  function handleYearWheel(event: React.WheelEvent<HTMLSelectElement>) {
-    event.preventDefault();
-    const delta = event.deltaY > 0 ? 1 : -1;
-    const nextYear = (Number(searchYearInput) || currentYear) + delta;
-    setSearchYearInput(String(nextYear));
+  function addBreakdownRow(tab: BreakdownCategory) {
+    setDetailsModalError("");
+    setDetailsBreakdown((prev) => {
+      if (!prev) return prev;
+      return {
+        ...prev,
+        [tab]: [...prev[tab], { name: "", hours: 0 }],
+      };
+    });
+  }
+
+  function removeBreakdownRow(tab: BreakdownCategory, idx: number) {
+    setDetailsModalError("");
+    setDetailsBreakdown((prev) => {
+      if (!prev) return prev;
+      const currentRows = prev[tab];
+      if (currentRows.length <= 1) return prev;
+      return {
+        ...prev,
+        [tab]: currentRows.filter((_, rowIdx) => rowIdx !== idx),
+      };
+    });
   }
 
   function handleSearchKeyDown(event: React.KeyboardEvent<HTMLInputElement | HTMLSelectElement>) {
@@ -1298,27 +1508,6 @@ export default function HeadofSchool() {
       event.preventDefault();
       handleSearch();
     }
-  }
-
-  function openMessagePanel() {
-    setMessagePanelOpen(true);
-    setHasNewMessage(false);
-  }
-
-  function handleSendMessage() {
-    const trimmed = chatInput.trim();
-    if (!trimmed) return;
-    const now = new Date();
-    const hh = String(now.getHours()).padStart(2, "0");
-    const mm = String(now.getMinutes()).padStart(2, "0");
-    const today = now.toISOString().slice(0, 10);
-    setChatHistory((prev) => [
-      ...prev,
-      { sender: "Sam", message: trimmed, time: `${hh}:${mm}`, date: today },
-    ]);
-    setSelectedChatDate(today);
-    setCalendarMonth(today.slice(0, 7));
-    setChatInput("");
   }
 
   function handleAvatarUpload(event: ChangeEvent<HTMLInputElement>) {
@@ -1333,164 +1522,84 @@ export default function HeadofSchool() {
     event.target.value = "";
   }
 
-  function changeCalendarMonth(offset: number) {
-    const [yearStr, monthStr] = calendarMonth.split("-");
-    const date = new Date(Number(yearStr), Number(monthStr) - 1 + offset, 1);
-    setCalendarMonth(
-      `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, "0")}`
-    );
-  }
-
   return (
     <div className="min-h-screen bg-[#f3f4f6] font-serif">
       <div className="mx-auto max-w-7xl px-3 pb-10 pt-8">
         <DashboardHeader
           title="HoS Dashboard"
-          hasNewMessage={hasNewMessage}
-          onMessageClick={openMessagePanel}
+          hasNewMessage={hosUnreadReportCount > 0}
+          onMessageClick={() => setHosReportInboxOpen(true)}
           greetingName={user.surname}
           onAvatarClick={() => setProfileOpen(true)}
           avatarSrc={avatarSrc}
         />
 
-        {messagePanelOpen && (
+        {hosReportInboxOpen && (
           <div
             className="fixed inset-0 z-[70] flex items-center justify-center bg-black/30 p-4"
-            onClick={() => setMessagePanelOpen(false)}
+            onClick={() => setHosReportInboxOpen(false)}
           >
             <div
-              className="w-full max-w-3xl rounded-2xl border border-slate-200 bg-slate-50 p-6 shadow-xl"
+              className="w-full max-w-3xl rounded-2xl border-2 border-[#2f4d9c] bg-slate-50 p-6 shadow-xl"
               onClick={(e) => e.stopPropagation()}
             >
-              <div className="mb-4 flex items-center justify-between">
-                <div className="text-3xl font-semibold text-slate-800">Contact Admin</div>
+              <div className="-mx-6 -mt-6 mb-4 flex items-center justify-between rounded-t-2xl bg-[#2f4d9c] px-6 py-4 text-white">
+                <div className="text-2xl font-semibold">Semester Distribution Reports</div>
                 <button
                   type="button"
-                  aria-label="Close"
-                  className="rounded p-1 text-slate-500 hover:bg-slate-200"
-                  onClick={() => setMessagePanelOpen(false)}
+                  aria-label="Close report inbox"
+                  className="rounded p-1 text-white/90 hover:bg-white/20"
+                  onClick={() => setHosReportInboxOpen(false)}
                 >
                   ✕
                 </button>
               </div>
-
-              <div className="mb-4 rounded-lg border border-slate-200 bg-white p-4">
-                <div className="mb-3 flex items-center gap-3">
-                  <div className="text-sm font-semibold text-slate-700">Chat Record Date</div>
-                  <div className="relative">
+              {hosSemesterReports.length === 0 ? (
+                <div className="rounded-md border border-[#2f4d9c]/30 bg-white px-4 py-5 text-sm text-slate-700">
+                  No semester report generated yet.
+                </div>
+              ) : (
+                <>
+                  <div className="max-h-80 overflow-y-auto rounded-md border border-[#2f4d9c]/40 bg-white">
+                    {pagedHosReports.map((report) => (
+                      <div
+                        key={report.id}
+                        className="flex items-center justify-between gap-3 border-b border-[#2f4d9c]/10 px-4 py-3"
+                      >
+                        <div className="text-sm font-semibold text-slate-800">{report.title}</div>
+                        <button
+                          type="button"
+                          onClick={() => handleDownloadHosSemesterReport(report)}
+                          className="inline-flex items-center gap-2 rounded border border-[#2f4d9c]/40 bg-[#eef3ff] px-3 py-1 text-xs font-semibold text-[#2f4d9c] hover:bg-[#e0e9ff]"
+                        >
+                          ⬇ Download
+                        </button>
+                      </div>
+                    ))}
+                  </div>
+                  <div className="mt-3 flex items-center justify-between px-1 text-sm">
                     <button
                       type="button"
-                      onClick={() => setCalendarOpen((v) => !v)}
-                      className="inline-flex items-center gap-2 rounded border border-slate-300 bg-white px-3 py-1 text-sm text-slate-800"
+                      onClick={() => setHosReportInboxPage((p) => Math.max(1, p - 1))}
+                      disabled={hosReportInboxPage <= 1}
+                      className="rounded border border-[#2f4d9c]/35 bg-[#eef3ff] px-3 py-1 font-semibold text-[#2f4d9c] disabled:cursor-not-allowed disabled:opacity-50"
                     >
-                      {selectedChatDate}
-                      <span aria-hidden="true">📅</span>
+                      Previous
                     </button>
-                    {calendarOpen && (
-                      <div className="absolute z-20 mt-2 w-72 rounded-lg border border-slate-200 bg-white p-3 shadow-lg">
-                        <div className="mb-2 flex items-center justify-between">
-                          <button
-                            type="button"
-                            onClick={() => changeCalendarMonth(-1)}
-                            className="rounded px-2 py-1 text-sm hover:bg-slate-100"
-                          >
-                            ‹
-                          </button>
-                          <div className="text-sm font-semibold text-slate-700">{calendarMonth}</div>
-                          <button
-                            type="button"
-                            onClick={() => changeCalendarMonth(1)}
-                            className="rounded px-2 py-1 text-sm hover:bg-slate-100"
-                          >
-                            ›
-                          </button>
-                        </div>
-
-                        <div className="mb-1 grid grid-cols-7 gap-1 text-center text-xs font-semibold text-slate-500">
-                          {["Su", "Mo", "Tu", "We", "Th", "Fr", "Sa"].map((d) => (
-                            <div key={d}>{d}</div>
-                          ))}
-                        </div>
-
-                        <div className="grid grid-cols-7 gap-1">
-                          {(() => {
-                            const [yearStr, monthStr] = calendarMonth.split("-");
-                            const year = Number(yearStr);
-                            const month = Number(monthStr) - 1;
-                            const firstDay = new Date(year, month, 1).getDay();
-                            const totalDays = new Date(year, month + 1, 0).getDate();
-                            const cells = [];
-
-                            for (let i = 0; i < firstDay; i += 1) {
-                              cells.push(<div key={`empty-${i}`} />);
-                            }
-
-                            for (let day = 1; day <= totalDays; day += 1) {
-                              const dateKey = `${year}-${String(month + 1).padStart(2, "0")}-${String(day).padStart(
-                                2,
-                                "0"
-                              )}`;
-                              const selectable = availableChatDates.has(dateKey);
-                              const isSelected = selectedChatDate === dateKey;
-
-                              cells.push(
-                                <button
-                                  key={dateKey}
-                                  type="button"
-                                  disabled={!selectable}
-                                  onClick={() => {
-                                    setSelectedChatDate(dateKey);
-                                    setCalendarOpen(false);
-                                  }}
-                                  className={`h-8 rounded text-xs ${
-                                    !selectable
-                                      ? "cursor-not-allowed bg-slate-100 text-slate-300"
-                                      : isSelected
-                                        ? "bg-[#2f4d9c] text-white"
-                                        : "text-slate-700 hover:bg-slate-100"
-                                  }`}
-                                >
-                                  {day}
-                                </button>
-                              );
-                            }
-
-                            return cells;
-                          })()}
-                        </div>
-                      </div>
-                    )}
+                    <span className="text-slate-600">
+                      Page {hosReportInboxPage} / {hosReportTotalPages}
+                    </span>
+                    <button
+                      type="button"
+                      onClick={() => setHosReportInboxPage((p) => Math.min(hosReportTotalPages, p + 1))}
+                      disabled={hosReportInboxPage >= hosReportTotalPages}
+                      className="rounded border border-[#2f4d9c]/35 bg-[#eef3ff] px-3 py-1 font-semibold text-[#2f4d9c] disabled:cursor-not-allowed disabled:opacity-50"
+                    >
+                      Next
+                    </button>
                   </div>
-                </div>
-                <div className="max-h-72 space-y-2 overflow-y-auto pr-1 font-mono text-[15px] leading-6 text-slate-800">
-                  {visibleChatHistory.length > 0 ? (
-                    visibleChatHistory.map((entry, idx) => (
-                      <div key={idx}>
-                        <span className="text-slate-500">[{entry.time}]</span>{" "}
-                        <span className="font-semibold">{entry.sender}:</span> {entry.message}
-                      </div>
-                    ))
-                  ) : (
-                    <div className="text-sm text-slate-500">No chat records for this date.</div>
-                  )}
-                </div>
-              </div>
-
-              <div className="flex items-end gap-3">
-                <textarea
-                  value={chatInput}
-                  onChange={(e) => setChatInput(e.target.value)}
-                  placeholder="Write your message..."
-                  className="h-16 flex-1 resize-none rounded-lg border border-slate-300 bg-white px-3 py-2 text-base text-slate-800 outline-none focus:border-[#2f4d9c]"
-                />
-                <button
-                  type="button"
-                  onClick={handleSendMessage}
-                  className="rounded-lg bg-[#2f4d9c] px-5 py-2 text-sm font-semibold text-white hover:bg-[#264183]"
-                >
-                  Send
-                </button>
-              </div>
+                </>
+              )}
             </div>
           </div>
         )}
@@ -1566,84 +1675,80 @@ export default function HeadofSchool() {
                 </div>
               )}
 
-              <div className="grid grid-cols-3 gap-6">
-                <div className="flex flex-col gap-1">
-                  <div className="w-fit rounded bg-[#2f4d9c] px-3 py-1 text-xs font-bold text-white">Last name</div>
-                  <input
-                    value={searchLastNameInput}
-                    onChange={(e) => setSearchLastNameInput(e.target.value)}
-                    onKeyDown={handleSearchKeyDown}
-                    className="rounded border border-slate-300 px-3 py-2 text-sm"
-                  />
-                </div>
-                <div className="flex flex-col gap-1">
-                  <div className="w-fit rounded bg-[#2f4d9c] px-3 py-1 text-xs font-bold text-white">First name</div>
-                  <input
-                    value={searchFirstNameInput}
-                    onChange={(e) => setSearchFirstNameInput(e.target.value)}
-                    onKeyDown={handleSearchKeyDown}
-                    className="rounded border border-slate-300 px-3 py-2 text-sm"
-                  />
-                </div>
-                <div className="flex flex-col gap-1">
-                  <div className="w-fit rounded bg-[#2f4d9c] px-3 py-1 text-xs font-bold text-white">Staff ID</div>
-                  <input
-                    value={searchEmployeeIdInput}
-                    onChange={(e) => setSearchEmployeeIdInput(e.target.value)}
-                    onKeyDown={handleSearchKeyDown}
-                    className="rounded border border-slate-300 px-3 py-2 text-sm tabular-nums font-sans"
-                  />
-                </div>
-                <div className="flex flex-col gap-1">
-                  <div className="w-fit rounded bg-[#2f4d9c] px-3 py-1 text-xs font-bold text-white">Title</div>
-                  <input
-                    value={searchTitleInput}
-                    onChange={(e) => setSearchTitleInput(e.target.value)}
-                    onKeyDown={handleSearchKeyDown}
-                    className="rounded border border-slate-300 px-3 py-2 text-sm"
-                  />
-                </div>
-                <div className="flex flex-col gap-1">
-                  <div className="w-fit rounded bg-[#2f4d9c] px-3 py-1 text-xs font-bold text-white">Department</div>
-                  <input
-                    value={searchDepartmentInput}
-                    onChange={(e) => setSearchDepartmentInput(e.target.value)}
-                    onKeyDown={handleSearchKeyDown}
-                    className="rounded border border-slate-300 px-3 py-2 text-sm"
-                  />
-                </div>
-                <div className="flex flex-col gap-1">
-                  <div className="w-fit rounded bg-[#2f4d9c] px-3 py-1 text-xs font-bold text-white">Year & Semester</div>
-                  <div className="flex items-center gap-2">
-                    <select
-                      value={searchYearInput}
-                      onChange={(e) => setSearchYearInput(e.target.value)}
+              <div className="rounded-md bg-[#f4f7ff] p-4">
+                <div className="grid grid-cols-1 gap-6 md:grid-cols-3">
+                  <div className="flex flex-col gap-1">
+                    <div className="w-fit rounded bg-[#2f4d9c] px-3 py-1 text-xs font-bold text-white">Name</div>
+                    <input
+                      value={searchNameInput}
+                      onChange={(e) => setSearchNameInput(e.target.value)}
                       onKeyDown={handleSearchKeyDown}
-                      onWheel={handleYearWheel}
-                      className="w-full rounded border border-slate-300 px-2 py-2 text-sm"
+                      placeholder="Last name, first name, or full name"
+                      className="rounded border border-slate-300 px-3 py-2 text-sm"
+                    />
+                  </div>
+                  <div className="flex flex-col gap-1">
+                    <div className="w-fit rounded bg-[#2f4d9c] px-3 py-1 text-xs font-bold text-white">Staff ID</div>
+                    <input
+                      value={searchEmployeeIdInput}
+                      onChange={(e) => setSearchEmployeeIdInput(e.target.value)}
+                      onKeyDown={handleSearchKeyDown}
+                      className="rounded border border-slate-300 px-3 py-2 text-sm tabular-nums font-sans"
+                    />
+                  </div>
+                  <div className="flex flex-col gap-1">
+                    <div className="w-fit rounded bg-[#2f4d9c] px-3 py-1 text-xs font-bold text-white">Department</div>
+                    <select
+                      value={searchDepartmentInput}
+                      onChange={(e) => setSearchDepartmentInput(e.target.value)}
+                      onKeyDown={handleSearchKeyDown}
+                      className="rounded border border-slate-300 px-3 py-2 text-sm"
                     >
-                      <option value="">Year</option>
-                      {yearOptions.map((year) => (
-                        <option key={year} value={year}>
-                          {year}
+                      <option value="">All departments</option>
+                      {WORKLOAD_SEARCH_DEPARTMENT_OPTIONS.map((dept) => (
+                        <option key={dept} value={dept}>
+                          {dept}
                         </option>
                       ))}
                     </select>
-                    <select
-                      value={searchSemesterInput}
-                      onChange={(e) => setSearchSemesterInput(e.target.value as "" | "S1" | "S2")}
-                      onKeyDown={handleSearchKeyDown}
-                      className="w-full rounded border border-slate-300 px-2 py-2 text-sm"
-                    >
-                      <option value="">Semester</option>
-                      <option value="S1">S1</option>
-                      <option value="S2">S2</option>
-                    </select>
                   </div>
                 </div>
-              </div>
-              <div className="mt-4 flex justify-center">
-                <SearchButton onClick={handleSearch} />
+                <div className="mt-4 grid grid-cols-1 items-end gap-6 md:grid-cols-3">
+                  <div className="flex flex-col gap-1">
+                    <div className="w-fit rounded bg-[#2f4d9c] px-3 py-1 text-xs font-bold text-white">Year & Semester</div>
+                    <div className="flex w-full min-w-0 items-center gap-2">
+                      <input
+                        type="text"
+                        inputMode="numeric"
+                        list="hos-workload-year-options"
+                        value={searchYearInput}
+                        onChange={(e) => setSearchYearInput(e.target.value)}
+                        onKeyDown={handleSearchKeyDown}
+                        className="min-w-0 flex-1 rounded border border-slate-300 px-2 py-2 text-sm"
+                        placeholder="Year"
+                      />
+                      <datalist id="hos-workload-year-options">
+                        {yearOptions.map((year) => (
+                          <option key={year} value={year} />
+                        ))}
+                      </datalist>
+                      <select
+                        value={searchSemesterInput}
+                        onChange={(e) => setSearchSemesterInput(e.target.value as "" | "S1" | "S2")}
+                        onKeyDown={handleSearchKeyDown}
+                        className="min-w-0 flex-1 rounded border border-slate-300 px-2 py-2 text-sm"
+                      >
+                        <option value="">All semesters</option>
+                        <option value="S1">S1</option>
+                        <option value="S2">S2</option>
+                      </select>
+                    </div>
+                  </div>
+                  <div className="flex items-end justify-center md:justify-self-center">
+                    <SearchButton onClick={handleSearch} />
+                  </div>
+                  <span className="hidden md:block" aria-hidden />
+                </div>
               </div>
 
               <div className="mt-6 text-lg font-semibold text-slate-700">Workload Report Sem 1 - 2025</div>
@@ -1735,8 +1840,8 @@ export default function HeadofSchool() {
                         <th className="w-14 px-2 py-2">Task</th>
                         <th className="px-3 py-2">NAME</th>
                         <th className="px-3 py-2">TITLE</th>
-                        <th className="px-3 py-2">DEPARTMENT / SCHOOL</th>
-                        <th className="px-3 py-2">REASONS</th>
+                        <th className="w-[180px] px-3 py-2">REASONS</th>
+                        <th className="px-3 py-2">DEPARTMENT</th>
                         <th className="px-3 py-2">STATUS</th>
                         <th className="px-3 py-2 text-center">TOTAL WORK HOURS</th>
                         <th className="px-3 py-2 text-right">SUBMITTED TIME</th>
@@ -1802,10 +1907,15 @@ export default function HeadofSchool() {
                                 <div className="text-xs text-slate-400">{item.studentId}</div>
                               </td>
                               <td className="px-3 py-3 text-slate-700">{item.title}</td>
-                              <td className="px-3 py-3 text-slate-700">{item.department || "-"}</td>
                               <td className="px-3 py-3 text-slate-600">
-                                {item.requestReason || extractRequestReason(item.description ?? "") || "- no reason provided -"}
+                                <div
+                                  className="max-w-[180px] truncate"
+                                  title={requestReasonText(item) || "No reason provided"}
+                                >
+                                  {requestReasonText(item) || "—"}
+                                </div>
                               </td>
+                              <td className="px-3 py-3 text-slate-600">{item.department || "—"}</td>
                               <td className="px-3 py-3">
                                 <StatusPill status={item.status} variant="supervisor" />
                               </td>
@@ -1834,7 +1944,7 @@ export default function HeadofSchool() {
               {detailsOpen && detailsItem && (
                 <div
                   className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 p-4"
-                  onClick={closeDetails}
+                  onClick={requestCloseDetails}
                 >
                   <div
                     className="w-full max-w-2xl rounded-sm bg-white p-0 shadow"
@@ -1842,15 +1952,19 @@ export default function HeadofSchool() {
                   >
                     <div className="rounded-sm border border-black">
                       <div className="flex items-center justify-between gap-4 border-b border-black/30 bg-white px-5 py-3">
-                        <div className="rounded-sm bg-[#2f4d9c] px-4 py-2 text-sm font-bold text-white tabular-nums font-sans">
-                          {detailsItem.studentId}-{detailsItem.semesterLabel}
-                          {detailsItem.periodLabel}
+                        <div className="flex items-center gap-3">
+                          <div className="rounded-sm bg-[#2f4d9c] px-4 py-2 text-sm font-bold text-white tabular-nums font-sans">
+                            {(() => {
+                              const matched = detailsItem.periodLabel.match(/^(\d{4})-(1|2)$/);
+                              if (!matched) return `${detailsItem.periodLabel}-${detailsItem.department}`;
+                              return `${matched[1]}-${matched[2] === "1" ? "S1" : "S2"}-${detailsItem.department}`;
+                            })()}
+                          </div>
                         </div>
                         <div className="flex items-center gap-3 text-sm font-semibold text-slate-800">
-                          <span className="text-base">{statusLabel(detailsItem.status)}</span>
                           <button
                             type="button"
-                            onClick={closeDetails}
+                            onClick={requestCloseDetails}
                             className="rounded bg-slate-200 px-3 py-1 text-xs font-bold text-slate-700 hover:bg-slate-300"
                           >
                             Close
@@ -1860,28 +1974,111 @@ export default function HeadofSchool() {
 
                       <form className="space-y-4 px-6 py-5" onSubmit={(e) => e.preventDefault()}>
                         <div className="grid grid-cols-2 gap-5">
-                          <InfoField label="Full name" value={detailsItem.name} />
-                          <InfoField label="Title" value={detailsItem.title} />
-                          <InfoField
-                            label="Total Work Hours"
-                            value={String(
-                              detailsBreakdown
-                                ? (["Teaching", "Assigned Roles", "HDR", "Service"] as BreakdownCategory[]).reduce(
+                          <div className="flex items-center gap-3">
+                            <div className="w-32 rounded-sm bg-[#2f4d9c] px-3 py-2 text-center text-base font-semibold text-white">
+                              Name
+                            </div>
+                            <input readOnly value={detailsItem.name} className="w-full flex-1 rounded-sm border border-[#2f4d9c] px-3 py-2 text-base" />
+                          </div>
+
+                          <div className="flex items-center gap-3">
+                            <div className="w-32 rounded-sm bg-[#2f4d9c] px-3 py-2 text-center text-base font-semibold text-white">
+                              Staff ID
+                            </div>
+                            <input readOnly value={detailsItem.studentId} className="w-full flex-1 rounded-sm border border-[#2f4d9c] px-3 py-2 text-base" />
+                          </div>
+
+                          <div className="flex items-center gap-3">
+                            <div className="w-32 rounded-sm bg-[#2f4d9c] px-3 py-2 text-center text-base font-semibold text-white">
+                              Target teaching ratio
+                            </div>
+                            <input readOnly value="50.0%" className="w-full flex-1 rounded-sm border border-[#2f4d9c] px-3 py-2 text-base" />
+                          </div>
+
+                          <div className="flex items-center gap-3">
+                            <div className="w-32 rounded-sm bg-[#2f4d9c] px-3 py-2 text-center text-base font-semibold text-white">
+                              Actual teaching ratio
+                            </div>
+                            {(() => {
+                              const source = detailsBreakdown ?? breakdownById(detailsItem.id);
+                              const teaching = source.Teaching.reduce((sum, row) => sum + row.hours, 0);
+                              const total = (["Teaching", "Assigned Roles", "HDR", "Service", "Research (residual)"] as BreakdownCategory[]).reduce(
+                                (tabSum, tab) => tabSum + source[tab].reduce((sum, row) => sum + row.hours, 0),
+                                0
+                              );
+                              const ratio = total <= 0 ? "0.0%" : `${((teaching / total) * 100).toFixed(1)}%`;
+                              return (
+                                <input readOnly value={ratio} className="w-full flex-1 rounded-sm border border-[#2f4d9c] px-3 py-2 text-base tabular-nums font-sans" />
+                              );
+                            })()}
+                          </div>
+
+                          <div className="flex items-center gap-3">
+                            <div className="w-32 rounded-sm bg-[#2f4d9c] px-3 py-2 text-center text-base font-semibold text-white">
+                              Total work hours
+                            </div>
+                            {(() => {
+                              const totalHours = detailsBreakdown
+                                ? (["Teaching", "Assigned Roles", "HDR", "Service", "Research (residual)"] as BreakdownCategory[]).reduce(
                                     (tabSum, tab) => tabSum + detailsBreakdown[tab].reduce((sum, row) => sum + row.hours, 0),
                                     0
                                   )
-                                : detailsItem.hours
-                            )}
-                            className="tabular-nums font-sans"
-                          />
-                          <InfoField label="Department" value={detailsItem.department} />
+                                : detailsItem.hours;
+                              return (
+                                <input readOnly value={totalHours} className="w-full flex-1 rounded-sm border border-[#2f4d9c] px-3 py-2 text-base tabular-nums font-sans" />
+                              );
+                            })()}
+                          </div>
+
+                          <div className="flex items-center gap-3">
+                            <div className="w-32 rounded-sm bg-[#2f4d9c] px-3 py-2 text-center text-base font-semibold text-white">
+                              Employment type
+                            </div>
+                            {(() => {
+                              const totalHours = detailsBreakdown
+                                ? (["Teaching", "Assigned Roles", "HDR", "Service", "Research (residual)"] as BreakdownCategory[]).reduce(
+                                    (tabSum, tab) => tabSum + detailsBreakdown[tab].reduce((sum, row) => sum + row.hours, 0),
+                                    0
+                                  )
+                                : detailsItem.hours;
+                              return (
+                                <input readOnly value={totalHours >= 800 ? "Full-time" : "Part-time"} className="w-full flex-1 rounded-sm border border-[#2f4d9c] px-3 py-2 text-base" />
+                              );
+                            })()}
+                          </div>
+
+                          <div className="flex items-center gap-3">
+                            <div className="w-32 rounded-sm bg-[#2f4d9c] px-3 py-2 text-center text-base font-semibold text-white">
+                              New Staff
+                            </div>
+                            <input readOnly value="No" className="w-full flex-1 rounded-sm border border-[#2f4d9c] px-3 py-2 text-base" />
+                          </div>
+
+                          <div className="flex items-center gap-3">
+                            <div className="w-32 rounded-sm bg-[#2f4d9c] px-3 py-2 text-center text-base font-semibold text-white">
+                              HoD Review
+                            </div>
+                            <input readOnly value="No" className="w-full flex-1 rounded-sm border border-[#2f4d9c] px-3 py-2 text-base" />
+                          </div>
                         </div>
 
                         <div>
-                          <div className="text-sm font-semibold uppercase text-slate-700">Workload Breakdown</div>
+                          <div className="flex items-center justify-between">
+                            <div className="text-sm font-semibold uppercase text-slate-700">Workload Breakdown</div>
+                            <button
+                              type="button"
+                              onClick={() => {
+                                setDetailsEditMode((v) => !v);
+                                setDetailsModalError("");
+                              }}
+                              className="rounded bg-[#2f4d9c] px-3 py-1 text-xs font-bold text-white hover:bg-[#264183]"
+                            >
+                              {detailsEditMode ? "Done" : "Edit"}
+                            </button>
+                          </div>
                           <div className="mt-2 overflow-hidden rounded-sm border border-slate-300">
                             <div className="flex flex-wrap gap-2 border-b border-slate-200 bg-slate-50 px-3 py-2">
-                              {(["Teaching", "Assigned Roles", "HDR", "Service"] as BreakdownCategory[]).map((tab) => (
+                              {(["Teaching", "Assigned Roles", "HDR", "Service", "Research (residual)"] as BreakdownCategory[]).map((tab) => (
                                 <button
                                   key={tab}
                                   type="button"
@@ -1901,31 +2098,75 @@ export default function HeadofSchool() {
                                 <tr className="text-left text-xs font-semibold uppercase text-slate-600">
                                   <th className="px-3 py-2">{detailsTab}</th>
                                   <th className="w-[120px] px-3 py-2 text-right">Hours</th>
+                                  {detailsEditMode ? <th className="w-[88px] px-3 py-2 text-center">Action</th> : null}
                                 </tr>
                               </thead>
                               <tbody className="divide-y divide-slate-200 bg-white text-sm text-slate-700">
                                 {(detailsBreakdown?.[detailsTab] ?? breakdownById(detailsItem.id)[detailsTab]).map((row, idx) => (
                                   <tr key={`${detailsItem.id}-${detailsTab}-${idx}`}>
                                     <td className="px-3 py-2">
-                                      <input
-                                        value={row.name}
-                                        onChange={(e) => updateBreakdownRow(detailsTab, idx, "name", e.target.value)}
-                                        maxLength={60}
-                                        className="w-[240px] max-w-full overflow-hidden text-ellipsis whitespace-nowrap rounded border border-slate-300 px-2 py-1 text-sm"
-                                      />
+                                      {detailsEditMode ? (
+                                        <input
+                                          value={row.name}
+                                          onChange={(e) => updateBreakdownRow(detailsTab, idx, "name", e.target.value)}
+                                          maxLength={60}
+                                          className="w-[240px] max-w-full overflow-hidden text-ellipsis whitespace-nowrap rounded border border-slate-300 px-2 py-1 text-sm"
+                                        />
+                                      ) : (
+                                        <span className="block px-1 py-1">{row.name}</span>
+                                      )}
                                     </td>
                                     <td className="px-3 py-2">
-                                      <input
-                                        type="text"
-                                        inputMode="decimal"
-                                        maxLength={8}
-                                        value={String(row.hours)}
-                                        onChange={(e) => updateBreakdownRow(detailsTab, idx, "hours", e.target.value)}
-                                        className="ml-auto w-24 rounded border border-slate-300 px-2 py-1 text-right tabular-nums font-sans text-sm"
-                                      />
+                                      {detailsEditMode ? (
+                                        <input
+                                          type="text"
+                                          inputMode="decimal"
+                                          maxLength={8}
+                                          value={String(row.hours)}
+                                          onChange={(e) => updateBreakdownRow(detailsTab, idx, "hours", e.target.value)}
+                                          className="ml-auto w-24 rounded border border-slate-300 px-2 py-1 text-right tabular-nums font-sans text-sm"
+                                        />
+                                      ) : (
+                                        <div className="text-right tabular-nums font-sans">{row.hours}</div>
+                                      )}
                                     </td>
+                                    {detailsEditMode ? (
+                                      <td className="px-3 py-2 text-center">
+                                        <button
+                                          type="button"
+                                          onClick={() => removeBreakdownRow(detailsTab, idx)}
+                                          className="rounded bg-slate-200 px-2 py-1 text-xs font-semibold text-slate-700 hover:bg-slate-300 disabled:opacity-50"
+                                          disabled={(detailsBreakdown?.[detailsTab] ?? []).length <= 1}
+                                        >
+                                          Delete
+                                        </button>
+                                      </td>
+                                    ) : null}
                                   </tr>
                                 ))}
+                                {detailsEditMode ? (
+                                  <tr>
+                                    <td colSpan={3} className="px-3 py-2">
+                                      <button
+                                        type="button"
+                                        onClick={() => addBreakdownRow(detailsTab)}
+                                        className="rounded bg-[#2f4d9c] px-3 py-1 text-xs font-semibold text-white hover:bg-[#264183]"
+                                      >
+                                        + Add Row
+                                      </button>
+                                    </td>
+                                  </tr>
+                                ) : null}
+                                <tr className="bg-slate-50">
+                                  <td className="px-3 py-2 font-semibold">Total</td>
+                                  <td className="px-3 py-2 text-right font-semibold tabular-nums font-sans">
+                                    {(detailsBreakdown?.[detailsTab] ?? breakdownById(detailsItem.id)[detailsTab]).reduce(
+                                      (sum, row) => sum + row.hours,
+                                      0
+                                    )}
+                                  </td>
+                                  {detailsEditMode ? <td /> : null}
+                                </tr>
                               </tbody>
                             </table>
                           </div>
@@ -1937,7 +2178,7 @@ export default function HeadofSchool() {
                             onClick={() => setDescriptionExpanded((v) => !v)}
                             className="flex w-full items-center justify-between rounded-sm border border-slate-300 bg-slate-50 px-3 py-2 text-left text-sm font-semibold uppercase text-slate-700"
                           >
-                            <span>Note</span>
+                            <span>School of Operations notes</span>
                             <span className="text-base leading-none">{descriptionExpanded ? "−" : "+"}</span>
                           </button>
                           {descriptionExpanded && (
@@ -1953,10 +2194,13 @@ export default function HeadofSchool() {
                           <div className="text-sm font-semibold text-slate-700">Application Reason</div>
                           <textarea
                             readOnly
-                            value={detailsItem.requestReason || extractRequestReason(detailsItem.description ?? "") || "- no reason provided -"}
+                            value={requestReasonText(detailsItem) || "- no reason provided -"}
                             className="mt-2 h-24 w-full resize-none rounded-sm border border-slate-300 bg-white px-4 py-3 text-sm text-slate-700"
                           />
                         </div>
+                        {detailsModalError && (
+                          <div className="text-sm font-semibold text-[#dc2626]">{detailsModalError}</div>
+                        )}
 
                         {detailsItem.status === "pending" && (
                           <div className="flex items-center justify-center gap-24 pt-2">

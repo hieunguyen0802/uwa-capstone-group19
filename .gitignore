@@ -35,6 +35,8 @@ postman/
 
 # Personal notes (not for version control)
 *.md
+!docs/
+!docs/*.md
 *.pdf
 *.xlsx
 *.xlsm
