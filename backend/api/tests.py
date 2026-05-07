@@ -1305,3 +1305,124 @@ class TestAdminOpsContract(BaseTestCase):
         download = client.get(f'/api/admin/export/download/?token={token}')
         self.assertEqual(download.status_code, 200)
         self.assertIn('spreadsheetml', download['Content-Type'])
+
+
+class TestEditConflictOptimisticLock(BaseTestCase):
+    """
+    Optimistic-lock coverage for reports superseded by a reimport.
+
+    Rule: when Ops reimports, the old report gets is_current=False and
+    superseded_by set. Any HoD/Ops write against that stale report_id must
+    return HTTP 409 with code REPORT_SUPERSEDED so the UI can force a reload,
+    rather than silently mutating a superseded record.
+    """
+
+    def setUp(self):
+        super().setUp()
+        # Put report in PENDING so supervisor_single_decision would otherwise succeed.
+        self.report.status = 'PENDING'
+        self.report.save(update_fields=['status'])
+
+        # Simulate Daniela reimporting: create a fresh current report, retire the old one.
+        self.fresh_report = WorkloadReport.objects.create(
+            staff=self.academic,
+            academic_year=self.report.academic_year,
+            semester=self.report.semester,
+            snapshot_fte=self.academic.fte,
+            snapshot_department=self.dept_csse,
+            status='PENDING',
+            is_current=True,
+        )
+        self.report.is_current = False
+        self.report.superseded_by = self.fresh_report
+        self.report.save(update_fields=['is_current', 'superseded_by'])
+
+    def _hod_decide(self, report_id, client=None):
+        client = client or self._auth_client(self.hod_csse)
+        return client.post(
+            f'/api/supervisor/workload-requests/{report_id}/decision/',
+            {'decision': 'approved', 'note': 'looks good'},
+            format='json',
+        )
+
+    def _ops_decide(self, report_id, client=None):
+        client = client or self._auth_client(self.ops)
+        return client.post(
+            f'/api/admin/workload-requests/{report_id}/decision/',
+            {'decision': 'approved', 'note': 'looks good'},
+            format='json',
+        )
+
+    def test_hod_single_decision_returns_409_on_stale_report(self):
+        res = self._hod_decide(self.report.report_id)
+        self.assertEqual(res.status_code, 409)
+        self.assertEqual(res.data.get('code'), 'REPORT_SUPERSEDED')
+        # Stale report must not have its status mutated.
+        self.report.refresh_from_db()
+        self.assertEqual(self.report.status, 'PENDING')
+
+    def test_hod_single_decision_returns_404_on_unknown_report(self):
+        unknown_id = '00000000-0000-0000-0000-000000000000'
+        res = self._hod_decide(unknown_id)
+        self.assertEqual(res.status_code, 404)
+
+    def test_hod_single_decision_still_works_on_current_report(self):
+        res = self._hod_decide(self.fresh_report.report_id)
+        self.assertEqual(res.status_code, 200)
+        self.fresh_report.refresh_from_db()
+        self.assertEqual(self.fresh_report.status, 'APPROVED')
+
+    def test_hod_batch_decision_reports_stale_ids(self):
+        client = self._auth_client(self.hod_csse)
+        res = client.post(
+            '/api/supervisor/workload-requests/batch-decision/',
+            {
+                'request_ids': [str(self.report.report_id), str(self.fresh_report.report_id)],
+                'decision': 'approved',
+            },
+            format='json',
+        )
+        self.assertEqual(res.status_code, 409)
+        self.assertEqual(res.data.get('code'), 'REPORT_SUPERSEDED')
+        self.assertIn(str(self.report.report_id), res.data['errors']['request_ids'])
+
+    def test_ops_single_decision_returns_409_on_stale_report(self):
+        res = self._ops_decide(self.report.report_id)
+        self.assertEqual(res.status_code, 409)
+        self.assertEqual(res.data.get('code'), 'REPORT_SUPERSEDED')
+
+    def test_two_ops_last_write_wins_via_reimport(self):
+        """
+        Second Ops (Bronte) reimports on top of Daniela's fresh_report.
+        fresh_report should now be stale and subsequent HoD edits against it
+        should return 409.
+        """
+        bronte = self._make_staff('ops_bronte', 'SCHOOL_OPS', self.dept_csse)
+        latest = WorkloadReport.objects.create(
+            staff=self.academic,
+            academic_year=self.fresh_report.academic_year,
+            semester=self.fresh_report.semester,
+            snapshot_fte=self.academic.fte,
+            snapshot_department=self.dept_csse,
+            status='PENDING',
+            is_current=True,
+        )
+        self.fresh_report.is_current = False
+        self.fresh_report.superseded_by = latest
+        self.fresh_report.save(update_fields=['is_current', 'superseded_by'])
+        AuditLog.objects.create(
+            report=self.fresh_report,
+            action_by=bronte,
+            action_type='MODIFIED_BY_REIMPORT',
+        )
+
+        # HoD holds the now-stale fresh_report id → 409
+        stale_res = self._hod_decide(self.fresh_report.report_id)
+        self.assertEqual(stale_res.status_code, 409)
+
+        # Latest record still editable → Bronte's reimport wins.
+        ok_res = self._hod_decide(latest.report_id)
+        self.assertEqual(ok_res.status_code, 200)
+        latest.refresh_from_db()
+        self.assertEqual(latest.status, 'APPROVED')
+
