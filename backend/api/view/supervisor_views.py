@@ -14,6 +14,11 @@ from rest_framework.response import Response
 
 from api.decorators import require_role
 from api.models import AuditLog, WorkloadItem
+from api.services.audit_service import (
+    compute_workload_item_diffs,
+    snapshot_workload_items,
+    write_audit,
+)
 from api.services.workload_service import (
     get_workload_queryset,
     _parse_year_range,
@@ -384,6 +389,8 @@ def supervisor_single_decision(request, id):
         )
 
     # Optional breakdown update: replace all items with the provided data.
+    # Snapshot BEFORE delete — once rows are gone the before-state cannot be recovered.
+    workload_edit_diffs = None
     if breakdown_data and isinstance(breakdown_data, dict):
         parsed, parse_errors = _parse_breakdown_data(breakdown_data)
         if parse_errors:
@@ -397,10 +404,24 @@ def supervisor_single_decision(request, id):
                  'errors': {'breakdown': ['At least one valid breakdown row is required']}},
                 status=http_status.HTTP_400_BAD_REQUEST,
             )
+        before_snapshot = snapshot_workload_items(report.items.all())
         report.items.all().delete()
         WorkloadItem.objects.bulk_create([
             WorkloadItem(report=report, **kwargs) for kwargs in parsed
         ])
+        after_snapshot = snapshot_workload_items(report.items.all())
+        workload_edit_diffs = compute_workload_item_diffs(before_snapshot, after_snapshot)
+
+    # Audit breakdown edits separately from the approve/reject decision so the
+    # history timeline shows them as distinct events.
+    if workload_edit_diffs:
+        write_audit(
+            action_type='WORKLOAD_EDIT',
+            action_by=request.staff,
+            report=report,
+            source='HOD_BREAKDOWN_EDIT',
+            diffs=workload_edit_diffs,
+        )
 
     action_type = 'APPROVE' if decision == 'approved' else 'REJECT'
     report.status = decision.upper()
@@ -643,3 +664,96 @@ def get_pending_requests(request):
 def get_my_workloads(request):
     qs = get_workload_queryset(request.staff).order_by('-created_at')[:20]
     return Response([_serialize_report(r) for r in qs])
+
+
+# ─── Change history timeline for a single report ─────────────────────────────
+
+# Maps internal AuditLog.action_type to a UI-friendly label. Keep in sync with
+# the ACTION_CHOICES list in models.py — if a new action_type is added there,
+# add its label here so the frontend displays it correctly.
+_ACTION_LABELS = {
+    'IMPORTED': 'Imported from Excel',
+    'MODIFIED_BY_REIMPORT': 'Superseded by re-import',
+    'IMPORT_SKIP': 'Import skipped (protected)',
+    'APPROVE': 'Approved',
+    'REJECT': 'Rejected',
+    'CONFIRMATION': 'Confirmed by academic',
+    'SUBMIT_REQUEST': 'Approval request submitted',
+    'WORKLOAD_EDIT': 'Workload edited',
+    'PROFILE_EDIT': 'Profile edited',
+    'COMMENT': 'Commented',
+    'CONFIG_CHANGE': 'System config changed',
+}
+
+
+def _can_view_report_history(staff, report) -> bool:
+    """Check that `staff` is allowed to see the audit history of `report`.
+
+    History must include superseded (is_current=False) versions, so we cannot
+    reuse the is_current-filtered get_workload_queryset here — write the
+    visibility rule explicitly instead.
+    """
+    if staff.role in ('SCHOOL_OPS', 'HOS'):
+        return True
+    if staff.role == 'HOD':
+        return report.snapshot_department_id == staff.department_id
+    if staff.role == 'ACADEMIC':
+        return report.staff_id == staff.staff_id
+    return False
+
+
+@api_view(['GET'])
+@permission_classes([IsAuthenticated])
+def report_history(request, id):
+    """GET /api/reports/{id}/history
+
+    Returns the audit trail for a single WorkloadReport, newest first.
+    Visible to ACADEMIC (own), HOD (own department), SCHOOL_OPS/HOS (all).
+
+    Response shape is frozen in IntegrationLog/changehistory+.md §5.5 — the
+    frontend renders a single diff component against this shape.
+    """
+    from api.models import WorkloadReport
+
+    report = get_object_or_404(
+        WorkloadReport.objects.select_related('snapshot_department', 'staff'),
+        report_id=id,
+    )
+    if not _can_view_report_history(request.staff, report):
+        return Response(
+            {'success': False, 'message': 'Not permitted'},
+            status=http_status.HTTP_403_FORBIDDEN,
+        )
+
+    logs = (
+        AuditLog.objects
+        .filter(report=report)
+        .select_related('action_by__user')
+        .order_by('-created_at')[:200]
+    )
+
+    items = []
+    for log in logs:
+        actor_user = log.action_by.user if log.action_by else None
+        actor_name = (
+            (actor_user.get_full_name().strip() or actor_user.username)
+            if actor_user else 'System'
+        )
+        actor_role = log.action_by.role if log.action_by else ''
+        changes = log.changes or {}
+        items.append({
+            'timestamp': log.created_at.isoformat(),
+            'actor': actor_name,
+            'actor_role': actor_role,
+            'action_type': log.action_type,
+            'action_label': _ACTION_LABELS.get(log.action_type, log.action_type),
+            'source': changes.get('source', ''),
+            'comment': log.comment,
+            'diffs': changes.get('diffs', []),
+        })
+
+    return Response({
+        'success': True,
+        'message': 'Report history loaded',
+        'data': {'items': items},
+    })

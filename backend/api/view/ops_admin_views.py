@@ -44,6 +44,7 @@ from api.services.workload_service import (
     persist_report_anomaly,
     evaluate_mvp_anomaly,
 )
+from api.services.audit_service import compute_diffs, write_audit
 from api.view.supervisor_views import (
     _get_request_reason,
     _get_supervisor_note,
@@ -986,6 +987,17 @@ def admin_staff_import(request):
             continue
 
         user_obj = staff_row.user
+        # Snapshot BEFORE any field write so the diff reflects the caller's intent.
+        before_snapshot = {
+            'first_name': user_obj.first_name,
+            'last_name': user_obj.last_name,
+            'email': user_obj.email,
+            'department': staff_row.department.name if staff_row.department_id else '',
+            'title': staff_row.title,
+            'is_active': staff_row.is_active,
+            'is_new_employee': staff_row.is_new_employee,
+            'notes': staff_row.notes,
+        }
         user_fields = []
 
         first_name = row.get('firstName')
@@ -1044,6 +1056,46 @@ def admin_staff_import(request):
         if staff_fields:
             staff_fields.append('updated_at')
             staff_row.save(update_fields=staff_fields)
+
+        after_snapshot = {
+            'first_name': user_obj.first_name,
+            'last_name': user_obj.last_name,
+            'email': user_obj.email,
+            'department': staff_row.department.name if staff_row.department_id else '',
+            'title': staff_row.title,
+            'is_active': staff_row.is_active,
+            'is_new_employee': staff_row.is_new_employee,
+            'notes': staff_row.notes,
+        }
+        diffs = compute_diffs(
+            before_snapshot,
+            after_snapshot,
+            field_labels={
+                'first_name': 'First name',
+                'last_name': 'Last name',
+                'email': 'Email',
+                'department': 'Department',
+                'title': 'Title',
+                'is_active': 'Active',
+                'is_new_employee': 'New employee',
+                'notes': 'Notes',
+            },
+        )
+        if diffs:
+            # HoS imports the role-assignment template; Ops imports the staff-profile
+            # template. Both hit this endpoint — we tag the source by caller role so
+            # the audit export can tell them apart.
+            import_source = (
+                'HOS_ROLE_ASSIGNMENT' if request.staff.role == 'HOS' else 'STAFF_IMPORT'
+            )
+            write_audit(
+                action_type='PROFILE_EDIT',
+                action_by=request.staff,
+                report=None,
+                source=import_source,
+                diffs=diffs,
+                staff_number=staff_row.staff_number,
+            )
 
         updated_count += 1
 
@@ -1138,6 +1190,17 @@ def admin_staff_patch(request, staff_id):
     notes = payload.get('notes')
 
     user_obj = staff_row.user
+    # Snapshot before any mutation so the diff reflects the user's intent, not post-save state.
+    before_snapshot = {
+        'first_name': user_obj.first_name,
+        'last_name': user_obj.last_name,
+        'email': user_obj.email,
+        'department': staff_row.department.name if staff_row.department_id else '',
+        'title': staff_row.title,
+        'is_active': staff_row.is_active,
+        'is_new_employee': staff_row.is_new_employee,
+        'notes': staff_row.notes,
+    }
     user_fields = []
 
     if first_name is not None:
@@ -1183,6 +1246,40 @@ def admin_staff_patch(request, staff_id):
     if staff_fields:
         staff_fields.append('updated_at')
         staff_row.save(update_fields=staff_fields)
+
+    after_snapshot = {
+        'first_name': user_obj.first_name,
+        'last_name': user_obj.last_name,
+        'email': user_obj.email,
+        'department': staff_row.department.name if staff_row.department_id else '',
+        'title': staff_row.title,
+        'is_active': staff_row.is_active,
+        'is_new_employee': staff_row.is_new_employee,
+        'notes': staff_row.notes,
+    }
+    diffs = compute_diffs(
+        before_snapshot,
+        after_snapshot,
+        field_labels={
+            'first_name': 'First name',
+            'last_name': 'Last name',
+            'email': 'Email',
+            'department': 'Department',
+            'title': 'Title',
+            'is_active': 'Active',
+            'is_new_employee': 'New employee',
+            'notes': 'Notes',
+        },
+    )
+    if diffs:
+        write_audit(
+            action_type='PROFILE_EDIT',
+            action_by=request.staff,
+            report=None,
+            source='STAFF_INLINE_EDIT',
+            diffs=diffs,
+            staff_number=staff_row.staff_number,
+        )
 
     return Response({
         'ok': True,
@@ -1566,3 +1663,168 @@ def admin_contact_staff(request):
         )
 
     return Response({'ok': True, 'referenceId': ref_id})
+
+
+# ─── Audit-log export (Export 2 from changehistory+.md §2 "决策 C") ────────────
+
+# Surface these action_types in the audit export. Anything else stays in the DB
+# but is not considered "material" to the compliance trail.
+_AUDIT_EXPORT_ACTIONS = [
+    'IMPORTED',
+    'MODIFIED_BY_REIMPORT',
+    'IMPORT_SKIP',
+    'WORKLOAD_EDIT',
+    'PROFILE_EDIT',
+    'APPROVE',
+    'REJECT',
+    'CONFIRMATION',
+    'SUBMIT_REQUEST',
+]
+
+_AUDIT_ACTION_HUMAN = {
+    'IMPORTED': 'Imported from Excel',
+    'MODIFIED_BY_REIMPORT': 'Superseded by re-import',
+    'IMPORT_SKIP': 'Import skipped (protected)',
+    'APPROVE': 'Approved',
+    'REJECT': 'Rejected',
+    'CONFIRMATION': 'Confirmed by academic',
+    'SUBMIT_REQUEST': 'Approval request submitted',
+    'WORKLOAD_EDIT': 'Workload edited',
+    'PROFILE_EDIT': 'Profile edited',
+}
+
+
+@api_view(['GET'])
+@permission_classes([IsAuthenticated])
+@require_role(*ADMIN_ROLES)
+@throttle_classes([AdminExportThrottle])
+def admin_audit_log_export(request):
+    """GET /api/school-operations/audit-log/export
+
+    Export 2 — the audit trail flat file. One row per (AuditLog, changed field):
+    if a single PROFILE_EDIT changed `email` and `department`, the export
+    produces two rows so each field's before/after is on its own line.
+
+    Query params (all optional):
+        date_from, date_to  ISO date (inclusive) filtering AuditLog.created_at
+        action_type         restrict to a single action_type
+        staff_id            filter by changes.staff_number OR report.staff.staff_number
+    """
+    try:
+        import openpyxl
+    except ImportError:
+        return Response(
+            {'success': False, 'message': 'Export unavailable: openpyxl not installed'},
+            status=http_status.HTTP_503_SERVICE_UNAVAILABLE,
+        )
+
+    qs = (
+        AuditLog.objects
+        .filter(action_type__in=_AUDIT_EXPORT_ACTIONS)
+        .select_related('action_by__user', 'report__staff__user')
+        .order_by('-created_at')
+    )
+
+    date_from = (request.GET.get('date_from') or '').strip()
+    date_to = (request.GET.get('date_to') or '').strip()
+    if date_from:
+        qs = qs.filter(created_at__date__gte=date_from)
+    if date_to:
+        qs = qs.filter(created_at__date__lte=date_to)
+
+    action_type = (request.GET.get('action_type') or '').strip()
+    if action_type:
+        qs = qs.filter(action_type=action_type)
+
+    staff_id = (request.GET.get('staff_id') or '').strip()
+    if staff_id:
+        qs = qs.filter(
+            models.Q(changes__staff_number=staff_id)
+            | models.Q(report__staff__staff_number=staff_id)
+        )
+
+    # Cap at 10k rows to keep export latency bounded — at higher volumes Ops
+    # should narrow by date_from/date_to rather than pulling the whole history.
+    qs = qs[:10000]
+
+    wb = openpyxl.Workbook()
+    ws = wb.active
+    ws.title = 'Change History'
+    ws.append([
+        'Timestamp',
+        'Action',
+        'Source',
+        'Performed By',
+        'Role',
+        'Staff Affected',
+        'Report ID',
+        'Field Changed',
+        'Before',
+        'After',
+        'Comment',
+    ])
+
+    for log in qs:
+        actor_user = log.action_by.user if log.action_by else None
+        actor_name = (
+            (actor_user.get_full_name().strip() or actor_user.username)
+            if actor_user else 'System'
+        )
+        actor_role = log.action_by.role if log.action_by else ''
+        changes = log.changes or {}
+        source = changes.get('source') or changes.get('kind') or ''
+
+        # Resolve staff-affected: profile edits carry it in changes.staff_number;
+        # workload actions resolve via report.staff.
+        staff_affected = changes.get('staff_number', '')
+        if not staff_affected and log.report_id and log.report.staff_id:
+            staff_affected = log.report.staff.staff_number
+
+        report_id_str = str(log.report_id) if log.report_id else ''
+        action_label = _AUDIT_ACTION_HUMAN.get(log.action_type, log.action_type)
+        ts_str = log.created_at.strftime('%Y-%m-%d %H:%M:%S')
+
+        diffs = changes.get('diffs') or []
+        if diffs:
+            # One row per field touched.
+            for d in diffs:
+                ws.append([
+                    ts_str,
+                    action_label,
+                    source,
+                    actor_name,
+                    actor_role,
+                    staff_affected,
+                    report_id_str,
+                    d.get('field', ''),
+                    d.get('before', ''),
+                    d.get('after', ''),
+                    log.comment or '',
+                ])
+        else:
+            # Non-diff actions (APPROVE / REJECT / IMPORTED / CONFIRMATION) still
+            # need one row so the trail shows they happened.
+            ws.append([
+                ts_str,
+                action_label,
+                source,
+                actor_name,
+                actor_role,
+                staff_affected,
+                report_id_str,
+                '',
+                '',
+                '',
+                log.comment or '',
+            ])
+
+    buffer = io.BytesIO()
+    wb.save(buffer)
+    buffer.seek(0)
+
+    response = HttpResponse(
+        buffer.read(),
+        content_type='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+    )
+    response['Content-Disposition'] = 'attachment; filename="Change_History.xlsx"'
+    return response

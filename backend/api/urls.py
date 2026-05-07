@@ -15,6 +15,7 @@ from api.view.supervisor_views import (
     supervisor_single_decision,
     supervisor_visualization,
     supervisor_export,
+    report_history,
 )
 from api.view.hos_views import (
     hos_staff_list,
@@ -59,6 +60,7 @@ from api.view.ops_admin_views import (
     admin_export_download,
     admin_school_export,
     admin_contact_staff,
+    admin_audit_log_export,
 )
 
 urlpatterns = [
@@ -84,6 +86,10 @@ urlpatterns = [
     path('supervisor/workload-requests/<str:id>/decision/', supervisor_single_decision),
     path('supervisor/visualization/', supervisor_visualization),
     path('supervisor/export/', supervisor_export),
+
+    # Change history timeline — same endpoint serves ACADEMIC, HOD, SCHOOL_OPS, HOS
+    # (visibility gate lives inside the view, not in the URL).
+    path('reports/<str:id>/history/', report_history),
 
     # Supervisor — legacy endpoints
     path('supervisor/requests/', supervisor_requests),
@@ -156,5 +162,6 @@ urlpatterns = [
     path('school-operations/staff', admin_staff_list),
     path('school-operations/visualization', admin_visualization),
     path('school-operations/export', admin_school_export),
+    path('school-operations/audit-log/export', admin_audit_log_export),
     path('school-operations/contact-staff', admin_contact_staff),
 ]
