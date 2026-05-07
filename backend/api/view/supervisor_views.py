@@ -704,11 +704,17 @@ def _can_view_report_history(staff, report) -> bool:
 
 @api_view(['GET'])
 @permission_classes([IsAuthenticated])
+@require_role('ACADEMIC', 'HOD', 'SCHOOL_OPS', 'HOS')
 def report_history(request, id):
     """GET /api/reports/{id}/history
 
     Returns the audit trail for a single WorkloadReport, newest first.
     Visible to ACADEMIC (own), HOD (own department), SCHOOL_OPS/HOS (all).
+
+    When a report has been superseded by a reimport, the change chain is split
+    across multiple WorkloadReport rows (old ones have is_current=False and
+    point at their successor via superseded_by). We walk that chain and merge
+    AuditLog rows from every version so "full audit trail" holds after reimport.
 
     Response shape is frozen in IntegrationLog/changehistory+.md §5.5 — the
     frontend renders a single diff component against this shape.
@@ -725,9 +731,26 @@ def report_history(request, id):
             status=http_status.HTTP_403_FORBIDDEN,
         )
 
+    # Collect every WorkloadReport version for this staff+period. The chain is
+    # only linear today but we guard with a visited set so a cycle (should never
+    # occur in production) cannot hang the request.
+    chain_ids: set = {report.report_id}
+    frontier = {report.report_id}
+    for _ in range(50):  # hard cap; reimport chains never approach this in practice
+        predecessors = set(
+            WorkloadReport.objects
+            .filter(superseded_by_id__in=frontier)
+            .exclude(report_id__in=chain_ids)
+            .values_list('report_id', flat=True)
+        )
+        if not predecessors:
+            break
+        chain_ids |= predecessors
+        frontier = predecessors
+
     logs = (
         AuditLog.objects
-        .filter(report=report)
+        .filter(report_id__in=chain_ids)
         .select_related('action_by__user')
         .order_by('-created_at')[:200]
     )

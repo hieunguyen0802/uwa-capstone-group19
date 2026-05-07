@@ -998,64 +998,79 @@ def admin_staff_import(request):
             'is_new_employee': staff_row.is_new_employee,
             'notes': staff_row.notes,
         }
-        user_fields = []
+
+        # Validate every field BEFORE any DB write. A row that fails halfway
+        # through must not leave the user/staff tables partially updated —
+        # and must not drop its audit breadcrumb.
+        row_error = None
+        pending_user_fields = {}
+        pending_staff_fields = {}
+        pending_department = None
 
         first_name = row.get('firstName')
         if first_name is not None:
-            user_obj.first_name = str(first_name).strip()[:150]
-            user_fields.append('first_name')
+            pending_user_fields['first_name'] = str(first_name).strip()[:150]
 
         last_name = row.get('lastName')
         if last_name is not None:
-            user_obj.last_name = str(last_name).strip()[:150]
-            user_fields.append('last_name')
+            pending_user_fields['last_name'] = str(last_name).strip()[:150]
 
         email = row.get('email')
         if email is not None:
             email_clean = str(email).strip().lower()
             if email_clean and not re.match(r'^[^@\s]+@[^@\s]+\.[^@\s]+$', email_clean):
-                failures.append({'index': idx, 'staffId': staff_number, 'message': 'invalid email'})
-                continue
-            user_obj.email = email_clean
-            user_fields.append('email')
+                row_error = 'invalid email'
+            else:
+                pending_user_fields['email'] = email_clean
 
-        if user_fields:
-            user_obj.save(update_fields=list(set(user_fields)))
+        if row_error is None:
+            dept_name = row.get('department')
+            if dept_name:
+                dept = Department.objects.filter(name__iexact=str(dept_name).strip()).first()
+                if not dept:
+                    row_error = 'department not found'
+                else:
+                    pending_department = dept
 
-        staff_fields = []
+        if row_error is None:
+            title = row.get('title')
+            if title is not None:
+                pending_staff_fields['title'] = str(title).strip()[:100]
 
-        dept_name = row.get('department')
-        if dept_name:
-            dept = Department.objects.filter(name__iexact=str(dept_name).strip()).first()
-            if not dept:
-                failures.append({'index': idx, 'staffId': staff_number, 'message': 'department not found'})
-                continue
-            staff_row.department = dept
-            staff_fields.append('department')
+            is_active = row.get('isActive')
+            if is_active is not None:
+                pending_staff_fields['is_active'] = bool(is_active)
 
-        title = row.get('title')
-        if title is not None:
-            staff_row.title = str(title).strip()[:100]
-            staff_fields.append('title')
+            is_new = row.get('isNewEmployee')
+            if is_new is not None:
+                pending_staff_fields['is_new_employee'] = bool(is_new)
 
-        is_active = row.get('isActive')
-        if is_active is not None:
-            staff_row.is_active = bool(is_active)
-            staff_fields.append('is_active')
+            notes = row.get('notes')
+            if notes is not None:
+                pending_staff_fields['notes'] = str(notes)
 
-        is_new = row.get('isNewEmployee')
-        if is_new is not None:
-            staff_row.is_new_employee = bool(is_new)
-            staff_fields.append('is_new_employee')
+        if row_error is not None:
+            failures.append({'index': idx, 'staffId': staff_number, 'message': row_error})
+            continue
 
-        notes = row.get('notes')
-        if notes is not None:
-            staff_row.notes = str(notes)
-            staff_fields.append('notes')
+        # All validation passed — apply writes inside a savepoint so a mid-row
+        # exception still rolls back cleanly.
+        with transaction.atomic():
+            for field, value in pending_user_fields.items():
+                setattr(user_obj, field, value)
+            if pending_user_fields:
+                user_obj.save(update_fields=list(pending_user_fields.keys()))
 
-        if staff_fields:
-            staff_fields.append('updated_at')
-            staff_row.save(update_fields=staff_fields)
+            staff_update_fields = []
+            if pending_department is not None:
+                staff_row.department = pending_department
+                staff_update_fields.append('department')
+            for field, value in pending_staff_fields.items():
+                setattr(staff_row, field, value)
+                staff_update_fields.append(field)
+            if staff_update_fields:
+                staff_update_fields.append('updated_at')
+                staff_row.save(update_fields=staff_update_fields)
 
         after_snapshot = {
             'first_name': user_obj.first_name,

@@ -77,20 +77,36 @@ def compute_workload_item_diffs(
 
     Each snapshot item must have keys: category, unit_code, description, allocated_hours.
     Missing / added rows produce a diff where the absent side is shown as empty.
+
+    Duplicate keys (e.g. two TEACHING rows for the same unit_code) are disambiguated by
+    their appearance index within the side they belong to. This preserves every row in
+    the diff instead of collapsing duplicates and silently dropping added/removed rows.
     """
-    def _key(item: dict) -> tuple:
+    def _base_key(item: dict) -> tuple:
         return (item.get('category', ''), item.get('unit_code') or item.get('description') or '')
 
     def _label(item: dict) -> str:
         name = item.get('unit_code') or item.get('description') or item.get('category', '')
         return f"{item.get('category', '')}: {name} hours"
 
-    before_map = {_key(i): i for i in before_items}
-    after_map = {_key(i): i for i in after_items}
+    def _keyed(items: Iterable[dict]) -> list[tuple]:
+        seen: dict[tuple, int] = {}
+        indexed: list[tuple] = []
+        for it in items:
+            base = _base_key(it)
+            occurrence = seen.get(base, 0)
+            seen[base] = occurrence + 1
+            indexed.append(((*base, occurrence), it))
+        return indexed
+
+    before_keyed = _keyed(before_items)
+    after_keyed = _keyed(after_items)
+    before_map = dict(before_keyed)
+    after_map = dict(after_keyed)
 
     diffs: list[dict] = []
-    # Removed + modified rows
-    for k, b_item in before_map.items():
+    # Removed + modified rows — walk the original order so audit output is stable.
+    for k, b_item in before_keyed:
         a_item = after_map.get(k)
         if a_item is None:
             diffs.append({
@@ -105,7 +121,7 @@ def compute_workload_item_diffs(
                 'after': _stringify(a_item.get('allocated_hours')),
             })
     # Added rows (in after but not before)
-    for k, a_item in after_map.items():
+    for k, a_item in after_keyed:
         if k not in before_map:
             diffs.append({
                 'field': _label(a_item),
