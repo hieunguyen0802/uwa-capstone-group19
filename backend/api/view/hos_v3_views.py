@@ -127,6 +127,7 @@ def _normalize_staff_import_row(row, row_number):
     first_name = str(_row_value(row, 'firstName', 'first_name', 'First Name')).strip()
     last_name = str(_row_value(row, 'lastName', 'last_name', 'Last Name')).strip()
     email = str(_row_value(row, 'email', 'Email')).strip()
+    title = str(_row_value(row, 'title', 'Title')).strip()
     department = str(_row_value(row, 'department', 'Department')).strip() or 'Computer Science & Software Engineering'
     active_raw = _row_value(row, 'isActive', 'active_status', 'Active Status', default='Active')
     is_active = active_raw if isinstance(active_raw, bool) else str(active_raw).strip().lower() in (
@@ -135,15 +136,17 @@ def _normalize_staff_import_row(row, row_number):
         'yes',
         'active',
     )
+    is_new_raw = _row_value(row, 'isNewEmployee', 'is_new_employee', 'new_employee', 'New Employee', default='')
+    is_new_employee = (
+        is_new_raw if isinstance(is_new_raw, bool)
+        else str(is_new_raw).strip().lower() in ('true', '1', 'yes', 'y')
+    )
+    notes = str(_row_value(row, 'notes', 'Notes')).strip()
 
     messages = []
     if not _is_valid_staff_number(staff_id):
         messages.append('staffId must be 8 characters')
-    if not first_name:
-        messages.append('firstName is required')
-    if not last_name:
-        messages.append('lastName is required')
-    if '@' not in email:
+    if email and '@' not in email:
         messages.append('email format is invalid')
     if department not in ALLOWED_STAFF_DEPARTMENTS:
         messages.append('department is not in allowed values')
@@ -154,8 +157,11 @@ def _normalize_staff_import_row(row, row_number):
         'firstName': first_name,
         'lastName': last_name,
         'email': email,
+        'title': title,
         'department': department,
         'isActive': bool(is_active),
+        'isNewEmployee': bool(is_new_employee),
+        'notes': notes,
         'messages': messages,
         'valid': not messages,
     }
@@ -467,14 +473,18 @@ def hos_staff_directory_import(request):
             continue
 
         department, _ = Department.objects.get_or_create(name=parsed['department'])
-        user, created_user = User.objects.get_or_create(
-            username=parsed['staffId'],
-            defaults={
-                'first_name': parsed['firstName'],
-                'last_name': parsed['lastName'],
-                'email': parsed['email'],
-            },
-        )
+        existing_staff = Staff.objects.select_related('user').filter(staff_number=parsed['staffId']).first()
+        user = existing_staff.user if existing_staff else None
+        created_user = False
+        if user is None:
+            user, created_user = User.objects.get_or_create(
+                username=parsed['staffId'],
+                defaults={
+                    'first_name': parsed['firstName'],
+                    'last_name': parsed['lastName'],
+                    'email': parsed['email'],
+                },
+            )
         if created_user:
             user.set_unusable_password()
             user.save()
@@ -484,15 +494,34 @@ def hos_staff_directory_import(request):
             user.email = parsed['email']
             user.save(update_fields=['first_name', 'last_name', 'email'])
 
-        Staff.objects.update_or_create(
-            staff_number=parsed['staffId'],
-            defaults={
-                'user': user,
-                'role': 'ACADEMIC',
-                'department': department,
-                'is_active': parsed['isActive'],
-            },
-        )
+        if existing_staff is None:
+            Staff.objects.create(
+                staff_number=parsed['staffId'],
+                user=user,
+                role='ACADEMIC',
+                department=department,
+                is_active=parsed['isActive'],
+                title=parsed['title'],
+                is_new_employee=parsed['isNewEmployee'],
+                notes=parsed['notes'],
+            )
+        else:
+            staff = existing_staff
+            staff.user = user
+            staff.department = department
+            staff.is_active = parsed['isActive']
+            staff.title = parsed['title']
+            staff.is_new_employee = parsed['isNewEmployee']
+            staff.notes = parsed['notes']
+            staff.save(update_fields=[
+                'user',
+                'department',
+                'is_active',
+                'title',
+                'is_new_employee',
+                'notes',
+                'updated_at',
+            ])
         parsed['imported'] = True
         imported_count += 1
 

@@ -1,93 +1,94 @@
 import { useEffect, useState } from "react";
 import { useNavigate } from "react-router-dom";
+import type { AxiosError } from "axios";
 import AuthLayoutFrame from "../components/common/AuthLayoutFrame";
+import { requestOtp, verifyOtp } from "../api/auth";
+import { ACCESS_TOKEN_KEY, REFRESH_TOKEN_KEY } from "../api/client";
+import { useAuth } from "../auth/AuthContext";
 
-type StaffAuthRecord = {
-  staffId: string;
-  email: string;
-  roles: string[];
-};
-
-const KNOWN_STAFF: StaffAuthRecord[] = [
-  { staffId: "50123451", email: "ann.culhane@uwa.edu.au", roles: ["HOD", "ACADEMIC"] },
-  { staffId: "50123462", email: "oliver.stone@uwa.edu.au", roles: ["ACADEMIC"] },
-  { staffId: "50123473", email: "ahmed.adhyyasar@uwa.edu.au", roles: ["ACADEMIC"] },
-  { staffId: "50123484", email: "lisa.brown@uwa.edu.au", roles: ["ACADEMIC"] },
-  { staffId: "50123495", email: "mary.smith@uwa.edu.au", roles: ["ACADEMIC"] },
-];
+const MAX_IDENTIFIER_LENGTH = 254;
+const STAFF_NUMBER_REGEX = /^\d{6,12}$/;
 
 export default function Login() {
-  const MAX_IDENTIFIER_LENGTH = 254;
   const [identifier, setIdentifier] = useState("");
   const [otpCode, setOtpCode] = useState("");
-  const [generatedCode, setGeneratedCode] = useState("");
   const [sendCooldown, setSendCooldown] = useState(0);
   const [successMessage, setSuccessMessage] = useState("");
   const [loginError, setLoginError] = useState("");
+  const [busy, setBusy] = useState(false);
   const navigate = useNavigate();
+  const { reload } = useAuth();
 
   useEffect(() => {
     if (sendCooldown <= 0) return;
-    const timer = window.setTimeout(() => setSendCooldown((prev) => prev - 1), 1000);
+    const timer = window.setTimeout(
+      () => setSendCooldown((prev) => prev - 1),
+      1000
+    );
     return () => window.clearTimeout(timer);
   }, [sendCooldown]);
 
-  function resolveStaff(input: string) {
-    const normalized = input.trim().toLowerCase();
-    return KNOWN_STAFF.find(
-      (item) => item.staffId.toLowerCase() === normalized || item.email.toLowerCase() === normalized
-    );
+  /**
+   * Accept either a UWA staff number or an email. The backend's OTP endpoint
+   * keys on email, so a staff-number input is rejected here with a helpful
+   * message; user is asked to use their email. Future enhancement: backend
+   * resolves staff_number → email, and this branch disappears.
+   */
+  function resolveEmail(input: string): string | null {
+    const trimmed = input.trim();
+    if (!trimmed) return null;
+    if (trimmed.includes("@")) return trimmed;
+    if (STAFF_NUMBER_REGEX.test(trimmed)) {
+      // UWA student-style: "24140443" → "24140443@student.uwa.edu.au"
+      // Staff-style falls through as invalid; user must enter email.
+      return `${trimmed}@student.uwa.edu.au`;
+    }
+    return null;
   }
 
-  const handleSendOtp = () => {
-    const normalizedInput = identifier.trim();
-    if (normalizedInput.length > MAX_IDENTIFIER_LENGTH) {
-      setLoginError(`Staff ID or Email Address must be no more than ${MAX_IDENTIFIER_LENGTH} characters.`);
+  const handleSendOtp = async () => {
+    const email = resolveEmail(identifier);
+    if (!email) {
+      setLoginError("Please enter a valid email or 6–12 digit staff/student ID.");
       return;
     }
-    const staff = resolveStaff(normalizedInput);
-    if (!staff) {
-      setLoginError("该员工当前不存在系统中，请先联系行政管理人员。");
-      return;
-    }
-    const code = String(Math.floor(100000 + Math.random() * 900000));
-    setGeneratedCode(code);
+    setBusy(true);
     setLoginError("");
-    setSuccessMessage(`验证码已发送至 ${staff.email}`);
-    setSendCooldown(60);
-    alert(`Demo OTP code: ${code}`);
+    try {
+      await requestOtp(email);
+      setSuccessMessage(`Verification code sent to ${email}`);
+      setSendCooldown(60);
+    } catch (err) {
+      setLoginError(extractErrorMessage(err, "Failed to send verification code."));
+    } finally {
+      setBusy(false);
+    }
   };
 
-  const handleLogin = () => {
-    const normalizedInput = identifier.trim();
-    const staff = resolveStaff(normalizedInput);
-    if (!staff) {
-      setLoginError("该员工当前不存在系统中，请先联系行政管理人员。");
-      return;
-    }
-    if (!generatedCode) {
-      setLoginError("请先发送验证码。");
+  const handleLogin = async () => {
+    const email = resolveEmail(identifier);
+    if (!email) {
+      setLoginError("Please enter a valid email or staff/student ID.");
       return;
     }
     if (!/^\d{6}$/.test(otpCode.trim())) {
-      setLoginError("验证码必须是 6 位数字。");
-      return;
-    }
-    if (otpCode.trim() !== generatedCode) {
-      setLoginError("验证码错误，请重新输入。");
+      setLoginError("Verification code must be 6 digits.");
       return;
     }
 
-    const userPayload = {
-      username: staff.email,
-      role: staff.roles[0],
-      roles: staff.roles,
-    };
-    localStorage.setItem("user", JSON.stringify(userPayload));
-    localStorage.setItem("auth_identifier", normalizedInput);
+    setBusy(true);
     setLoginError("");
-    setSuccessMessage("");
-    navigate("/role");
+    try {
+      const result = await verifyOtp(email, otpCode.trim());
+      localStorage.setItem(ACCESS_TOKEN_KEY, result.access);
+      localStorage.setItem(REFRESH_TOKEN_KEY, result.refresh);
+      await reload();
+      navigate(homeRouteForRole(result.role), { replace: true });
+    } catch (err) {
+      setLoginError(extractErrorMessage(err, "Invalid or expired code."));
+    } finally {
+      setBusy(false);
+    }
   };
 
   return (
@@ -109,11 +110,13 @@ export default function Login() {
 
       <div className="mx-auto mt-8 max-w-md space-y-4 text-left">
         <div>
-          <label className="mb-1 block text-sm text-slate-700">Staff ID or Email Address</label>
+          <label className="mb-1 block text-sm text-slate-700">
+            Staff ID or Email Address
+          </label>
           <input
             type="text"
             value={identifier}
-            placeholder="8-digit staff ID or john.doe@example.com"
+            placeholder="e.g. 24140443 or jiaao@uwa.edu.au"
             onChange={(e) => setIdentifier(e.target.value)}
             maxLength={MAX_IDENTIFIER_LENGTH}
             className="w-full rounded border border-slate-300 bg-white px-3 py-2 text-sm outline-none focus:border-[#2f4d9c]"
@@ -121,20 +124,24 @@ export default function Login() {
         </div>
 
         <div>
-          <label className="mb-1 block text-sm text-slate-700">Verification Code</label>
+          <label className="mb-1 block text-sm text-slate-700">
+            Verification Code
+          </label>
           <div className="flex items-center gap-2">
             <input
               type="text"
               value={otpCode}
               placeholder="Enter 6-digit code"
-              onChange={(e) => setOtpCode(e.target.value.replace(/\D/g, "").slice(0, 6))}
+              onChange={(e) =>
+                setOtpCode(e.target.value.replace(/\D/g, "").slice(0, 6))
+              }
               maxLength={6}
               className="flex-1 rounded border border-slate-300 bg-white px-3 py-2 text-sm outline-none focus:border-[#2f4d9c]"
             />
             <button
               type="button"
               onClick={handleSendOtp}
-              disabled={sendCooldown > 0}
+              disabled={busy || sendCooldown > 0}
               className="rounded bg-[#2f4d9c] px-3 py-2 text-xs font-semibold text-white disabled:cursor-not-allowed disabled:bg-slate-400"
             >
               {sendCooldown > 0 ? `${sendCooldown}s` : "Send Code"}
@@ -144,14 +151,39 @@ export default function Login() {
 
         <button
           onClick={handleLogin}
-          className="w-full rounded bg-[#2f4d9c] px-4 py-2 text-sm font-semibold text-white hover:bg-[#264183]"
+          disabled={busy}
+          className="w-full rounded bg-[#2f4d9c] px-4 py-2 text-sm font-semibold text-white hover:bg-[#264183] disabled:bg-slate-400"
         >
           Sign In
         </button>
 
-        {successMessage ? <p className="text-sm text-green-600">{successMessage}</p> : null}
-        {loginError ? <p className="text-sm text-red-600">{loginError}</p> : null}
+        {successMessage ? (
+          <p className="text-sm text-green-600">{successMessage}</p>
+        ) : null}
+        {loginError ? (
+          <p className="text-sm text-red-600">{loginError}</p>
+        ) : null}
       </div>
     </AuthLayoutFrame>
   );
+}
+
+function extractErrorMessage(err: unknown, fallback: string): string {
+  const axiosErr = err as AxiosError<{ error?: string }>;
+  return axiosErr?.response?.data?.error ?? fallback;
+}
+
+/** HOD is the only role that lands on the chooser; everyone else jumps home. */
+function homeRouteForRole(role: string): string {
+  switch (role) {
+    case "HOS":
+      return "/school-head";
+    case "SCHOOL_OPS":
+      return "/school-operations";
+    case "ACADEMIC":
+      return "/academic";
+    case "HOD":
+    default:
+      return "/role";
+  }
 }
