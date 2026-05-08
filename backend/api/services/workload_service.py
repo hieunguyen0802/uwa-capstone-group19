@@ -163,11 +163,13 @@ def _parse_year_range(request):
         yf_raw = (
             request.GET.get('year_from')
             or request.GET.get('from_year')
+            or request.GET.get('fromYear')
             or ''
         )
         yt_raw = (
             request.GET.get('year_to')
             or request.GET.get('to_year')
+            or request.GET.get('toYear')
             or ''
         )
         year_from = int(yf_raw) if yf_raw else None
