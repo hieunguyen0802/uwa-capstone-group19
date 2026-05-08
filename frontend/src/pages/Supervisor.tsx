@@ -1,7 +1,6 @@
 import { useEffect, useMemo, useState, type ChangeEvent } from "react";
 import * as XLSX from "xlsx";
 import DashboardHeader from "../components/common/DashboardHeader";
-import { MOCK_DASHBOARD_USER } from "../data/mockDashboardUser";
 import LineMetricChartCard from "../components/common/LineMetricChartCard";
 import PaginationControls from "../components/common/PaginationControls";
 import ProfileModal from "../components/common/ProfileModal";
@@ -16,6 +15,7 @@ import WorkHoursBadge from "../components/common/WorkHoursBadge";
 
 type MockRequest = {
   id: number;
+  sourceWorkloadId?: number;
   studentId: string;
   semesterLabel: string;
   periodLabel: string;
@@ -29,26 +29,64 @@ type MockRequest = {
   rate: number;
   status: "pending" | "approved" | "rejected";
   hours: number;
+  detailSnapshot?: {
+    breakdown: BreakdownData;
+  };
   supervisorNote?: string;
   /** When true (from API), row is read-only and detail is blocked — superseded by a newer version. */
   cancelled?: boolean;
 };
 
-type BreakdownCategory = "Teaching" | "Assigned Roles" | "HDR" | "Service";
+type BreakdownCategory = "Teaching" | "Assigned Roles" | "HDR" | "Service" | "Research (residual)";
 type BreakdownEntry = { name: string; hours: number };
 type BreakdownData = Record<BreakdownCategory, BreakdownEntry[]>;
 
 const SUPERVISOR_DRAFT_KEY = "academic_to_supervisor_requests_v1";
 const SUPERVISOR_STATE_KEY = "supervisor_requests_state_v1";
+const OPS_ACADEMIC_DISTRIBUTED_KEY = "ops_academic_distributed_workloads_v1";
 const ACADEMIC_STATUS_SYNC_KEY = "academic_status_sync_v1";
 const ACADEMIC_NOTES_SYNC_KEY = "academic_notes_sync_v1";
 const SUPERVISOR_SYNC_EVENT = "supervisor-status-updated";
 const ACADEMIC_DRAFT_EVENT = "academic-drafts-updated";
+const HOD_ANNUAL_REPORTS_KEY = "hod_annual_report_inbox_v1";
+
+type HodAnnualReportItem = {
+  id: string;
+  year: number;
+  department: string;
+  title: string;
+  createdAt: string;
+  readAt?: string;
+  isDemo?: boolean;
+  rows: Record<string, string | number>[];
+};
+
+function readHodAnnualReports(): HodAnnualReportItem[] {
+  if (typeof window === "undefined") return [];
+  try {
+    const raw = window.localStorage.getItem(HOD_ANNUAL_REPORTS_KEY);
+    if (!raw) return [];
+    const parsed = JSON.parse(raw);
+    if (!Array.isArray(parsed)) return [];
+    return parsed as HodAnnualReportItem[];
+  } catch {
+    return [];
+  }
+}
+
+function writeHodAnnualReports(items: HodAnnualReportItem[]) {
+  if (typeof window === "undefined") return;
+  window.localStorage.setItem(HOD_ANNUAL_REPORTS_KEY, JSON.stringify(items));
+}
 
 function submittedTimeById(id: number) {
   const day = ((id - 1) % 28) + 1;
   const hour = 8 + (id % 9);
   return `2026-03-${String(day).padStart(2, "0")} ${String(hour).padStart(2, "0")}:00`;
+}
+
+function displayNameWithoutComma(raw: string) {
+  return raw.replace(/,/g, " ").replace(/\s+/g, " ").trim();
 }
 
 function readAcademicDrafts(): MockRequest[] {
@@ -85,11 +123,20 @@ function readSupervisorState(): MockRequest[] {
 }
 
 function mergeDraftsIntoRequests(current: MockRequest[], drafts: MockRequest[]) {
-  if (!drafts.length) return current;
-  const existingIds = new Set(current.map((row) => row.id));
-  const incoming = drafts.filter((row) => !existingIds.has(row.id));
-  if (!incoming.length) return current;
-  return [...incoming, ...current];
+  const merged = [...drafts, ...current];
+  if (!merged.length) return merged;
+  const seen = new Set<string>();
+  const next: MockRequest[] = [];
+  for (const row of merged) {
+    const sourceId = Number(row.sourceWorkloadId);
+    const key = Number.isFinite(sourceId)
+      ? `src:${sourceId}`
+      : `legacy:${String(row.studentId).trim()}|${String(row.periodLabel).trim()}|${String(row.requestReason ?? "").trim()}`;
+    if (seen.has(key)) continue;
+    seen.add(key);
+    next.push(row);
+  }
+  return next;
 }
 
 function breakdownById(id: number, totalHours: number): BreakdownData {
@@ -130,6 +177,7 @@ function breakdownById(id: number, totalHours: number): BreakdownData {
       { name: studentB, hours: hdr2 },
     ],
     Service: [{ name: "Committee support", hours: service }],
+    "Research (residual)": [{ name: "Research (residual)", hours: 0 }],
   };
 }
 
@@ -151,6 +199,14 @@ function workloadModalNotes(row: Pick<MockRequest, "notes" | "description">) {
   const n = row.notes?.trim();
   if (n) return n;
   return cleanDescription(row.description ?? "");
+}
+
+function requestReasonText(row: Pick<MockRequest, "requestReason" | "description">) {
+  return row.requestReason?.trim() || extractRequestReason(row.description ?? "").trim();
+}
+
+function reportStatusText(status: MockRequest["status"]) {
+  return status === "approved" ? "Approved" : status === "rejected" ? "Rejected" : "Pending";
 }
 
 function parsePeriod(periodLabel: string) {
@@ -206,34 +262,72 @@ function reseedSemestersIfNeeded(items: MockRequest[]) {
   });
 }
 
+function annualReportAvailableOn(year: number) {
+  return new Date(year + 1, 0, 1, 0, 0, 0, 0);
+}
+
+function buildHodAnnualReportRows(rows: MockRequest[], department: string) {
+  return rows
+    .filter((row) => !row.cancelled && row.department === department)
+    .sort((a, b) => a.periodLabel.localeCompare(b.periodLabel) || a.name.localeCompare(b.name))
+    .map((row) => {
+      const parsed = parsePeriod(row.periodLabel);
+      return {
+        "Staff ID": row.studentId,
+        Name: displayNameWithoutComma(row.name),
+        Department: row.department,
+        Title: row.title,
+        Semester: parsed.semester || row.semesterLabel || row.periodLabel,
+        Status: reportStatusText(row.status),
+        "Total Work Hours": row.hours,
+        "Submitted Time": submittedTimeById(row.id),
+        "Application Reason": requestReasonText(row) || "—",
+        "HoD Review Note": row.supervisorNote?.trim() || "—",
+      };
+    });
+}
+
+function createHodAnnualDemoReport(department: string): HodAnnualReportItem {
+  return {
+    id: `hod-report-demo-2025-${department.replace(/\s+/g, "-").toLowerCase()}`,
+    year: 2025,
+    department,
+    title: `2025 ${department} annual report generated`,
+    createdAt: "2026-01-01T09:00:00.000Z",
+    readAt: undefined,
+    isDemo: true,
+    rows: [
+      {
+        "Staff ID": "12345931",
+        Name: "Dias John",
+        Department: department,
+        Title: "Lecturer",
+        Semester: "S1",
+        Status: "Pending",
+        "Total Work Hours": 793.5,
+        "Submitted Time": "2025-11-28 09:30",
+        "Application Reason": "wrong",
+        "HoD Review Note": "—",
+      },
+    ],
+  };
+}
+
 export default function Supervisor() {
-  type ChatMessage = {
-    sender: "Sam" | "Admin";
-    message: string;
-    time: string;
-    date: string;
+  const user = {
+    surname: "Rachel",
+    firstName: "Rachel",
+    employeeId: "12345931",
+    title: "Lecturer",
+    department: "Physics",
+    email: "rachel.rachel@uwa.edu.au",
   };
 
-  const user = MOCK_DASHBOARD_USER;
-
-  const [hasNewMessage, setHasNewMessage] = useState(true);
-  const [messagePanelOpen, setMessagePanelOpen] = useState(false);
   const [profileOpen, setProfileOpen] = useState(false);
   const [avatarSrc, setAvatarSrc] = useState<string | null>(null);
-  const [chatInput, setChatInput] = useState("");
-  const [chatHistory, setChatHistory] = useState<ChatMessage[]>([
-    { sender: "Sam", message: "I have a question about workload item #11.", time: "09:10", date: "2026-04-22" },
-    { sender: "Admin", message: "Please check the teaching hours again.", time: "09:16", date: "2026-04-22" },
-    { sender: "Sam", message: "Thank you, I will update it.", time: "09:18", date: "2026-04-23" },
-  ]);
-  const [selectedChatDate, setSelectedChatDate] = useState("2026-04-23");
-  const [calendarOpen, setCalendarOpen] = useState(false);
-  const [calendarMonth, setCalendarMonth] = useState("2026-04");
-  const availableChatDates = useMemo(() => new Set(chatHistory.map((entry) => entry.date)), [chatHistory]);
-  const visibleChatHistory = useMemo(
-    () => chatHistory.filter((entry) => entry.date === selectedChatDate),
-    [chatHistory, selectedChatDate]
-  );
+  const [hodReportInboxOpen, setHodReportInboxOpen] = useState(false);
+  const [hodAnnualReports, setHodAnnualReports] = useState<HodAnnualReportItem[]>(() => readHodAnnualReports());
+  const [hodReportInboxPage, setHodReportInboxPage] = useState(1);
   const currentYear = useMemo(() => new Date().getFullYear(), []);
   const currentSemester = useMemo<"S1" | "S2">(() => {
     const month = new Date().getMonth() + 1;
@@ -245,7 +339,7 @@ export default function Supervisor() {
   );
 
   const [loading] = useState(false);
-  const [pending, setPending] = useState<MockRequest[]>([]);
+  const [pending, setPending] = useState<MockRequest[]>(() => mergeDraftsIntoRequests(readSupervisorState(), []));
 
   useEffect(() => {
     function mergeLatestDrafts() {
@@ -262,6 +356,8 @@ export default function Supervisor() {
       mergeLatestDrafts();
     }
 
+    // Sync existing Academic submissions when HoD page is opened after submit.
+    mergeLatestDrafts();
     window.addEventListener("storage", onStorage);
     window.addEventListener(ACADEMIC_DRAFT_EVENT, onDraftEvent as EventListener);
     return () => {
@@ -279,9 +375,30 @@ export default function Supervisor() {
     if (typeof window === "undefined") return;
     const sync: Record<string, "pending" | "approved" | "rejected"> = {};
     const notesSync: Record<string, string> = {};
+    let latestDistributedIdByStaffId: Record<string, number> = {};
+    try {
+      const raw = window.localStorage.getItem(OPS_ACADEMIC_DISTRIBUTED_KEY);
+      const parsed = raw ? (JSON.parse(raw) as MockRequest[]) : [];
+      if (Array.isArray(parsed)) {
+        parsed.forEach((row) => {
+          const sid = String(row.studentId ?? "").trim();
+          const id = Number(row.id);
+          if (!sid || !Number.isFinite(id)) return;
+          if (row.cancelled || row.status !== "approved") return;
+          latestDistributedIdByStaffId[sid] = id;
+        });
+      }
+    } catch {
+      latestDistributedIdByStaffId = {};
+    }
     pending.forEach((row) => {
-      if (row.studentId) sync[row.studentId] = row.status;
-      if (row.studentId && row.supervisorNote) notesSync[row.studentId] = row.supervisorNote;
+      const sourceId = Number(row.sourceWorkloadId);
+      const fallbackId = latestDistributedIdByStaffId[String(row.studentId ?? "").trim()];
+      const effectiveSourceId = Number.isFinite(sourceId) ? sourceId : fallbackId;
+      if (Number.isFinite(effectiveSourceId)) sync[String(effectiveSourceId)] = row.status;
+      if (Number.isFinite(effectiveSourceId) && row.supervisorNote) {
+        notesSync[String(effectiveSourceId)] = row.supervisorNote;
+      }
     });
     window.localStorage.setItem(ACADEMIC_STATUS_SYNC_KEY, JSON.stringify(sync));
     window.localStorage.setItem(ACADEMIC_NOTES_SYNC_KEY, JSON.stringify(notesSync));
@@ -313,6 +430,7 @@ export default function Supervisor() {
   const [detailsItem, setDetailsItem] = useState<MockRequest | null>(null);
   const [detailsBreakdown, setDetailsBreakdown] = useState<BreakdownData | null>(null);
   const [detailsTab, setDetailsTab] = useState<BreakdownCategory>("Teaching");
+  const [detailsEditMode, setDetailsEditMode] = useState(false);
   const [descriptionExpanded, setDescriptionExpanded] = useState(false);
   const [noteModalOpen, setNoteModalOpen] = useState(false);
   const [noteDraft, setNoteDraft] = useState("");
@@ -322,16 +440,12 @@ export default function Supervisor() {
   const [noteTargetId, setNoteTargetId] = useState<number | null>(null);
 
   const [searchEmployeeIdInput, setSearchEmployeeIdInput] = useState("");
-  const [searchLastNameInput, setSearchLastNameInput] = useState("");
-  const [searchFirstNameInput, setSearchFirstNameInput] = useState("");
-  const [searchTitleInput, setSearchTitleInput] = useState("");
+  const [searchNameInput, setSearchNameInput] = useState("");
   const [searchYearInput, setSearchYearInput] = useState("");
   const [searchSemesterInput, setSearchSemesterInput] = useState<"" | "S1" | "S2">("");
   const [searchFilters, setSearchFilters] = useState({
     employeeId: "",
-    lastName: "",
-    firstName: "",
-    title: "",
+    name: "",
     year: "",
     semester: "",
   });
@@ -354,16 +468,110 @@ export default function Supervisor() {
   const [exportYearToInput, setExportYearToInput] = useState("");
   const [exportSemesterInput, setExportSemesterInput] = useState<"All" | "S1" | "S2">("All");
   const [exportMessage, setExportMessage] = useState("");
-  const selectedYear = Number(searchYearInput) || currentYear;
-  const yearOptions = useMemo(
-    () => Array.from({ length: 11 }, (_, i) => String(selectedYear - 5 + i)),
-    [selectedYear]
+  const hodReportsPerPage = 10;
+  const hodUnreadReportCount = useMemo(
+    () => hodAnnualReports.filter((item) => !item.readAt).length,
+    [hodAnnualReports]
   );
+  const hodReportTotalPages = Math.max(1, Math.ceil(hodAnnualReports.length / hodReportsPerPage));
+  const pagedHodAnnualReports = useMemo(() => {
+    const start = (hodReportInboxPage - 1) * hodReportsPerPage;
+    return hodAnnualReports.slice(start, start + hodReportsPerPage);
+  }, [hodAnnualReports, hodReportInboxPage]);
+
+  function handleDownloadHodAnnualReport(report: HodAnnualReportItem) {
+    if (!report.rows.length) return;
+    const ws = XLSX.utils.json_to_sheet(report.rows);
+    const wb = XLSX.utils.book_new();
+    XLSX.utils.book_append_sheet(wb, ws, `${report.year}`);
+    XLSX.writeFile(
+      wb,
+      `hod_${report.department.replace(/[^a-z0-9]+/gi, "_").toLowerCase()}_annual_report_${report.year}.xlsx`
+    );
+  }
 
   const pendingCount = useMemo(
     () => pending.filter((it) => it.status === "pending").length,
     [pending]
   );
+
+  useEffect(() => {
+    setHodAnnualReports((prev) => {
+      const base = (prev.length ? prev : readHodAnnualReports()).map((item) => ({
+        ...item,
+        title: `${item.year} ${item.department} annual report generated`,
+      }));
+      if (base.length) {
+        writeHodAnnualReports(base);
+        return base;
+      }
+      const seeded = [createHodAnnualDemoReport(user.department)];
+      writeHodAnnualReports(seeded);
+      return seeded;
+    });
+  }, [user.department]);
+
+  useEffect(() => {
+    const now = new Date();
+    const existing = readHodAnnualReports();
+    const existingByKey = new Map<string, HodAnnualReportItem>(
+      existing.map((item) => [`${item.year}-${item.department}`, item] as const)
+    );
+    const availableYears = new Set<number>();
+
+    pending.forEach((row) => {
+      if (row.cancelled || row.department !== user.department) return;
+      const parsed = parsePeriod(row.periodLabel);
+      if (!Number.isFinite(parsed.year)) return;
+      if (now < annualReportAvailableOn(parsed.year)) return;
+      availableYears.add(parsed.year);
+    });
+
+    const newReports: HodAnnualReportItem[] = [];
+    const replacedDemoKeys = new Set<string>();
+    availableYears.forEach((year) => {
+      const key = `${year}-${user.department}`;
+      const existingItem = existingByKey.get(key);
+      if (existingItem && !existingItem.isDemo) return;
+      const yearRows = buildHodAnnualReportRows(
+        pending.filter((row) => parsePeriod(row.periodLabel).year === year),
+        user.department
+      );
+      if (!yearRows.length) return;
+      if (existingItem?.isDemo) replacedDemoKeys.add(key);
+      newReports.push({
+        id: `hod-report-${year}-${user.department.replace(/\s+/g, "-").toLowerCase()}-${Date.now()}`,
+        year,
+        department: user.department,
+        title: `${year} ${user.department} annual report generated`,
+        createdAt: new Date().toISOString(),
+        rows: yearRows,
+      });
+    });
+
+    if (!newReports.length) return;
+    const retainedExisting = existing.filter((item) => !replacedDemoKeys.has(`${item.year}-${item.department}`));
+    const next = [...newReports, ...retainedExisting].sort(
+      (a, b) => Date.parse(b.createdAt || "") - Date.parse(a.createdAt || "")
+    );
+    writeHodAnnualReports(next);
+    setHodAnnualReports(next);
+  }, [pending, user.department]);
+
+  useEffect(() => {
+    if (!hodReportInboxOpen) return;
+    setHodAnnualReports((prev) => {
+      const now = new Date().toISOString();
+      const next = prev.map((item) => (item.readAt ? item : { ...item, readAt: now }));
+      writeHodAnnualReports(next);
+      return next;
+    });
+  }, [hodReportInboxOpen]);
+
+  useEffect(() => {
+    const total = Math.max(1, Math.ceil(hodAnnualReports.length / hodReportsPerPage));
+    setHodReportInboxPage((prev) => Math.min(Math.max(1, prev), total));
+  }, [hodAnnualReports.length]);
 
   const itemsForFilter = useMemo(() => {
     const byStatus =
@@ -387,16 +595,13 @@ export default function Supervisor() {
         return false;
       }
 
-      if (searchFilters.firstName && !firstName.includes(searchFilters.firstName)) {
-        return false;
-      }
-
-      if (searchFilters.lastName && !lastName.includes(searchFilters.lastName)) {
-        return false;
-      }
-
-      if (searchFilters.title && !it.title.toLowerCase().includes(searchFilters.title)) {
-        return false;
+      if (searchFilters.name) {
+        const q = searchFilters.name;
+        const matchByFull = fullName.includes(q);
+        const matchByFirst = firstName.includes(q);
+        const matchByLast = lastName.includes(q);
+        const matchByReversed = `${lastName} ${firstName}`.includes(q);
+        if (!(matchByFull || matchByFirst || matchByLast || matchByReversed)) return false;
       }
 
       const submittedText = submittedTimeById(it.id);
@@ -697,9 +902,7 @@ export default function Supervisor() {
   function handleSearch() {
     setSearchFilters({
       employeeId: searchEmployeeIdInput.trim().toLowerCase(),
-      lastName: searchLastNameInput.trim().toLowerCase(),
-      firstName: searchFirstNameInput.trim().toLowerCase(),
-      title: searchTitleInput.trim().toLowerCase(),
+      name: searchNameInput.trim().toLowerCase(),
       year: searchYearInput.trim().toLowerCase(),
       semester: searchSemesterInput.trim().toLowerCase(),
     });
@@ -716,14 +919,15 @@ export default function Supervisor() {
       return;
     }
     setDetailsItem(item);
-    setDetailsBreakdown(breakdownById(item.id, item.hours));
+    setDetailsBreakdown(item.detailSnapshot?.breakdown ?? breakdownById(item.id, item.hours));
     setDetailsOpen(true);
+    setDetailsEditMode(false);
     setDescriptionExpanded(false);
     setDetailsModalError("");
   }
 
   function requestCloseDetails() {
-    if (detailsBreakdown) {
+    if (detailsEditMode && detailsBreakdown) {
       const hasEmptyRow = (Object.keys(detailsBreakdown) as BreakdownCategory[]).some((tab) =>
         detailsBreakdown[tab].some((row) => row.name.trim() === "")
       );
@@ -739,6 +943,7 @@ export default function Supervisor() {
     setDetailsOpen(false);
     setDetailsItem(null);
     setDetailsBreakdown(null);
+    setDetailsEditMode(false);
     setDetailsModalError("");
     setNoteModalOpen(false);
     setNoteDraft("");
@@ -785,39 +990,11 @@ export default function Supervisor() {
     });
   }
 
-  function handleYearWheel(event: React.WheelEvent<HTMLSelectElement>) {
-    event.preventDefault();
-    const delta = event.deltaY > 0 ? 1 : -1;
-    const nextYear = (Number(searchYearInput) || currentYear) + delta;
-    setSearchYearInput(String(nextYear));
-  }
-
   function handleSearchKeyDown(event: React.KeyboardEvent<HTMLInputElement | HTMLSelectElement>) {
     if (event.key === "Enter") {
       event.preventDefault();
       handleSearch();
     }
-  }
-
-  function openMessagePanel() {
-    setMessagePanelOpen(true);
-    setHasNewMessage(false);
-  }
-
-  function handleSendMessage() {
-    const trimmed = chatInput.trim();
-    if (!trimmed) return;
-    const now = new Date();
-    const hh = String(now.getHours()).padStart(2, "0");
-    const mm = String(now.getMinutes()).padStart(2, "0");
-    const today = now.toISOString().slice(0, 10);
-    setChatHistory((prev) => [
-      ...prev,
-      { sender: "Sam", message: trimmed, time: `${hh}:${mm}`, date: today },
-    ]);
-    setSelectedChatDate(today);
-    setCalendarMonth(today.slice(0, 7));
-    setChatInput("");
   }
 
   function handleAvatarUpload(event: ChangeEvent<HTMLInputElement>) {
@@ -832,167 +1009,87 @@ export default function Supervisor() {
     event.target.value = "";
   }
 
-  function changeCalendarMonth(offset: number) {
-    const [yearStr, monthStr] = calendarMonth.split("-");
-    const date = new Date(Number(yearStr), Number(monthStr) - 1 + offset, 1);
-    setCalendarMonth(
-      `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, "0")}`
-    );
-  }
-
   return (
     <div className="min-h-screen bg-[#f3f4f6] font-serif">
       <div className="mx-auto max-w-7xl px-3 pb-10 pt-8">
         <DashboardHeader
           title="HoD Dashboard"
-          hasNewMessage={hasNewMessage}
-          onMessageClick={openMessagePanel}
+          hasNewMessage={hodUnreadReportCount > 0}
+          onMessageClick={() => setHodReportInboxOpen(true)}
           greetingName={user.surname}
           onAvatarClick={() => setProfileOpen(true)}
           avatarSrc={avatarSrc}
         />
 
-        {messagePanelOpen && (
+        {hodReportInboxOpen && (
           <div
             className="fixed inset-0 z-[70] flex items-center justify-center bg-black/30 p-4"
-            onClick={() => setMessagePanelOpen(false)}
+            onClick={() => setHodReportInboxOpen(false)}
           >
             <div
-              className="w-full max-w-3xl rounded-2xl border border-slate-200 bg-slate-50 p-6 shadow-xl"
+              className="w-full max-w-3xl rounded-2xl border-2 border-[#2f4d9c] bg-slate-50 p-6 shadow-xl"
               onClick={(e) => e.stopPropagation()}
             >
-              <div className="mb-4 flex items-center justify-between">
-                <div className="text-3xl font-semibold text-slate-800">Contact Admin</div>
+              <div className="-mx-6 -mt-6 mb-4 flex items-center justify-between rounded-t-2xl bg-[#2f4d9c] px-6 py-4 text-white">
+                <div className="text-2xl font-semibold">Annual Department Reports</div>
                 <button
                   type="button"
-                  aria-label="Close"
-                  className="rounded p-1 text-slate-500 hover:bg-slate-200"
-                  onClick={() => setMessagePanelOpen(false)}
+                  aria-label="Close report inbox"
+                  className="rounded p-1 text-white/90 hover:bg-white/20"
+                  onClick={() => setHodReportInboxOpen(false)}
                 >
                   ✕
                 </button>
               </div>
-
-              <div className="mb-4 rounded-lg border border-slate-200 bg-white p-4">
-                <div className="mb-3 flex items-center gap-3">
-                  <div className="text-sm font-semibold text-slate-700">Chat Record Date</div>
-                  <div className="relative">
+              {hodAnnualReports.length === 0 ? (
+                <div className="rounded-md border border-[#2f4d9c]/30 bg-white px-4 py-5 text-sm text-slate-700">
+                  No annual department report generated yet.
+                </div>
+              ) : (
+                <>
+                  <div className="max-h-80 overflow-y-auto rounded-md border border-[#2f4d9c]/40 bg-white">
+                    {pagedHodAnnualReports.map((report) => (
+                      <div
+                        key={report.id}
+                        className="flex items-center justify-between gap-3 border-b border-[#2f4d9c]/10 px-4 py-3"
+                      >
+                        <div className="text-sm font-semibold text-slate-800">{report.title}</div>
+                        <button
+                          type="button"
+                          onClick={() => handleDownloadHodAnnualReport(report)}
+                          className="inline-flex items-center gap-2 rounded border border-[#2f4d9c]/40 bg-[#eef3ff] px-3 py-1 text-xs font-semibold text-[#2f4d9c] hover:bg-[#e0e9ff]"
+                        >
+                          ⬇ Download
+                        </button>
+                      </div>
+                    ))}
+                  </div>
+                  <div className="mt-3 flex items-center justify-between px-1 text-sm">
                     <button
                       type="button"
-                      onClick={() => setCalendarOpen((v) => !v)}
-                      className="inline-flex items-center gap-2 rounded border border-slate-300 bg-white px-3 py-1 text-sm text-slate-800"
+                      onClick={() => setHodReportInboxPage((p) => Math.max(1, p - 1))}
+                      disabled={hodReportInboxPage <= 1}
+                      className="rounded border border-[#2f4d9c]/35 bg-[#eef3ff] px-3 py-1 font-semibold text-[#2f4d9c] disabled:cursor-not-allowed disabled:opacity-50"
                     >
-                      {selectedChatDate}
-                      <span aria-hidden="true">📅</span>
+                      Previous
                     </button>
-                    {calendarOpen && (
-                      <div className="absolute z-20 mt-2 w-72 rounded-lg border border-slate-200 bg-white p-3 shadow-lg">
-                        <div className="mb-2 flex items-center justify-between">
-                          <button
-                            type="button"
-                            onClick={() => changeCalendarMonth(-1)}
-                            className="rounded px-2 py-1 text-sm hover:bg-slate-100"
-                          >
-                            ‹
-                          </button>
-                          <div className="text-sm font-semibold text-slate-700">{calendarMonth}</div>
-                          <button
-                            type="button"
-                            onClick={() => changeCalendarMonth(1)}
-                            className="rounded px-2 py-1 text-sm hover:bg-slate-100"
-                          >
-                            ›
-                          </button>
-            </div>
-
-                        <div className="mb-1 grid grid-cols-7 gap-1 text-center text-xs font-semibold text-slate-500">
-                          {["Su", "Mo", "Tu", "We", "Th", "Fr", "Sa"].map((d) => (
-                            <div key={d}>{d}</div>
-                          ))}
-                        </div>
-
-                        <div className="grid grid-cols-7 gap-1">
-                          {(() => {
-                            const [yearStr, monthStr] = calendarMonth.split("-");
-                            const year = Number(yearStr);
-                            const month = Number(monthStr) - 1;
-                            const firstDay = new Date(year, month, 1).getDay();
-                            const totalDays = new Date(year, month + 1, 0).getDate();
-                            const cells = [];
-
-                            for (let i = 0; i < firstDay; i += 1) {
-                              cells.push(<div key={`empty-${i}`} />);
-                            }
-
-                            for (let day = 1; day <= totalDays; day += 1) {
-                              const dateKey = `${year}-${String(month + 1).padStart(2, "0")}-${String(day).padStart(
-                                2,
-                                "0"
-                              )}`;
-                              const selectable = availableChatDates.has(dateKey);
-                              const isSelected = selectedChatDate === dateKey;
-
-                              cells.push(
-                                <button
-                                  key={dateKey}
-                                  type="button"
-                                  disabled={!selectable}
-                                  onClick={() => {
-                                    setSelectedChatDate(dateKey);
-                                    setCalendarOpen(false);
-                                  }}
-                                  className={`h-8 rounded text-xs ${
-                                    !selectable
-                                      ? "cursor-not-allowed bg-slate-100 text-slate-300"
-                                      : isSelected
-                                        ? "bg-[#2f4d9c] text-white"
-                                        : "text-slate-700 hover:bg-slate-100"
-                                  }`}
-                                >
-                                  {day}
-                                </button>
-                              );
-                            }
-
-                            return cells;
-                          })()}
-            </div>
-                      </div>
-                    )}
+                    <span className="text-slate-600">
+                      Page {hodReportInboxPage} / {hodReportTotalPages}
+                    </span>
+                    <button
+                      type="button"
+                      onClick={() => setHodReportInboxPage((p) => Math.min(hodReportTotalPages, p + 1))}
+                      disabled={hodReportInboxPage >= hodReportTotalPages}
+                      className="rounded border border-[#2f4d9c]/35 bg-[#eef3ff] px-3 py-1 font-semibold text-[#2f4d9c] disabled:cursor-not-allowed disabled:opacity-50"
+                    >
+                      Next
+                    </button>
                   </div>
-                </div>
-                <div className="max-h-72 space-y-2 overflow-y-auto pr-1 font-mono text-[15px] leading-6 text-slate-800">
-                  {visibleChatHistory.length > 0 ? (
-                    visibleChatHistory.map((entry, idx) => (
-                      <div key={idx}>
-                        <span className="text-slate-500">[{entry.time}]</span>{" "}
-                        <span className="font-semibold">{entry.sender}:</span> {entry.message}
-                      </div>
-                    ))
-                  ) : (
-                    <div className="text-sm text-slate-500">No chat records for this date.</div>
-                  )}
-                </div>
-              </div>
-
-              <div className="flex items-end gap-3">
-                <textarea
-                  value={chatInput}
-                  onChange={(e) => setChatInput(e.target.value)}
-                  placeholder="Write your message..."
-                  className="h-16 flex-1 resize-none rounded-lg border border-slate-300 bg-white px-3 py-2 text-base text-slate-800 outline-none focus:border-[#2f4d9c]"
-                />
-                <button
-                  type="button"
-                  onClick={handleSendMessage}
-                  className="rounded-lg bg-[#2f4d9c] px-5 py-2 text-sm font-semibold text-white hover:bg-[#264183]"
-                >
-                  Send
-                </button>
+                </>
+              )}
             </div>
-            </div>
-        </div>
-      )}
+          </div>
+        )}
 
         <ProfileModal
           open={profileOpen}
@@ -1068,26 +1165,17 @@ export default function Supervisor() {
           {activeSection === "approval" && (
             <section>
           {/* Search Fields */}
-          <div className="grid grid-cols-3 gap-6">
+          <div className="flex items-end gap-4">
+            <div className="grid flex-1 grid-cols-3 gap-4">
             <div className="flex flex-col gap-1">
               <div className="w-fit rounded bg-[#2f4d9c] px-3 py-1 text-xs font-bold text-white">
-                Last name
-              </div>
-          <input
-                value={searchLastNameInput}
-                onChange={(e) => setSearchLastNameInput(e.target.value)}
-                onKeyDown={handleSearchKeyDown}
-                className="rounded border border-slate-300 px-3 py-2 text-sm"
-              />
-            </div>
-            <div className="flex flex-col gap-1">
-              <div className="w-fit rounded bg-[#2f4d9c] px-3 py-1 text-xs font-bold text-white">
-                First name
+                Name
               </div>
               <input
-                value={searchFirstNameInput}
-                onChange={(e) => setSearchFirstNameInput(e.target.value)}
+                value={searchNameInput}
+                onChange={(e) => setSearchNameInput(e.target.value)}
                 onKeyDown={handleSearchKeyDown}
+                placeholder="First, last, or full name"
                 className="rounded border border-slate-300 px-3 py-2 text-sm"
               />
             </div>
@@ -1104,39 +1192,23 @@ export default function Supervisor() {
             </div>
             <div className="flex flex-col gap-1">
               <div className="w-fit rounded bg-[#2f4d9c] px-3 py-1 text-xs font-bold text-white">
-                Title
-              </div>
-              <input
-                value={searchTitleInput}
-                onChange={(e) => setSearchTitleInput(e.target.value)}
-                onKeyDown={handleSearchKeyDown}
-                className="rounded border border-slate-300 px-3 py-2 text-sm"
-              />
-            </div>
-            <div className="flex flex-col gap-1">
-              <div className="w-fit rounded bg-[#2f4d9c] px-3 py-1 text-xs font-bold text-white">
                 Year & Semester
               </div>
               <div className="flex items-center gap-2">
-                <select
+                <input
                   value={searchYearInput}
                   onChange={(e) => setSearchYearInput(e.target.value)}
                   onKeyDown={handleSearchKeyDown}
-                  onWheel={handleYearWheel}
-                  className="w-full rounded border border-slate-300 px-2 py-2 text-sm"
-                >
-                  <option value="">Year</option>
-                  {yearOptions.map((year) => (
-                    <option key={year} value={year}>
-                      {year}
-                    </option>
-                  ))}
-                </select>
+                  placeholder="Year"
+                  maxLength={4}
+                  inputMode="numeric"
+                  className="w-1/2 min-w-[88px] rounded border border-slate-300 px-2 py-2 text-sm"
+                />
                 <select
                   value={searchSemesterInput}
                   onChange={(e) => setSearchSemesterInput(e.target.value as "" | "S1" | "S2")}
                   onKeyDown={handleSearchKeyDown}
-                  className="w-full rounded border border-slate-300 px-2 py-2 text-sm"
+                  className="w-1/2 min-w-[104px] rounded border border-slate-300 px-2 py-2 text-sm"
                 >
                   <option value="">Semester</option>
                   <option value="S1">S1</option>
@@ -1144,7 +1216,8 @@ export default function Supervisor() {
                 </select>
               </div>
             </div>
-            <div className="flex items-end justify-start">
+            </div>
+            <div className="pb-[1px]">
               <SearchButton onClick={handleSearch} />
             </div>
           </div>
@@ -1250,7 +1323,8 @@ export default function Supervisor() {
                     <th className="w-14 px-2 py-2">Task</th>
                     <th className="px-3 py-2">NAME</th>
                     <th className="px-3 py-2">TITLE</th>
-                    <th className="px-3 py-2">REASONS</th>
+                    <th className="w-[180px] px-3 py-2">REASONS</th>
+                    <th className="px-3 py-2">DEPARTMENT</th>
                     <th className="px-3 py-2">STATUS</th>
                     <th className="px-3 py-2 text-center">TOTAL WORK HOURS</th>
                     <th className="px-3 py-2 text-right">SUBMITTED TIME</th>
@@ -1259,7 +1333,7 @@ export default function Supervisor() {
                 <tbody className="divide-y divide-slate-200 bg-white">
                   {loading && (
                     <tr>
-                      <td colSpan={8} className="px-3 py-6 text-center text-sm text-slate-500">
+                      <td colSpan={9} className="px-3 py-6 text-center text-sm text-slate-500">
                         Loading...
                       </td>
                     </tr>
@@ -1267,7 +1341,7 @@ export default function Supervisor() {
 
                   {!loading && pageItems.length === 0 && (
                     <tr>
-                      <td colSpan={8} className="px-3 py-6 text-center text-sm text-slate-500">
+                      <td colSpan={9} className="px-3 py-6 text-center text-sm text-slate-500">
                         {statusFilter === "pending"
                           ? "No pending requests"
                           : "No items found"}
@@ -1324,10 +1398,14 @@ export default function Supervisor() {
                           </td>
                           <td className="px-3 py-3 text-slate-700">{item.title}</td>
                           <td className="px-3 py-3 text-slate-600">
-                            {item.requestReason ||
-                              extractRequestReason(item.description ?? "") ||
-                              "- no reason provided -"}
+                            <div
+                              className="max-w-[180px] truncate"
+                              title={requestReasonText(item) || "No reason provided"}
+                            >
+                              {requestReasonText(item) || "—"}
+                            </div>
                           </td>
+                          <td className="px-3 py-3 text-slate-600">{item.department || "—"}</td>
                           <td className="px-3 py-3">
                             <StatusPill status={item.status} variant="supervisor" />
                           </td>
@@ -1366,29 +1444,21 @@ export default function Supervisor() {
                 >
                   <div className="rounded-sm border border-black">
                     {/* Header */}
-                    <div className="flex items-center justify-between gap-4 border-b border-black/30 bg-white px-5 py-3">
-                      <div className="flex items-center gap-3">
-                        {/* Student identifier block */}
-                        <div className="rounded-sm bg-[#2f4d9c] px-4 py-2 text-sm font-bold text-white tabular-nums font-sans">
-                          {detailsItem.studentId}-{detailsItem.semesterLabel}
-                          {detailsItem.periodLabel}
-                        </div>
+                    <div className="flex items-center justify-between rounded-t-sm bg-[#2f4d9c] px-5 py-3 text-white">
+                      <div className="text-lg font-bold">
+                        {(() => {
+                          const matched = detailsItem.periodLabel.match(/^(\d{4})-(1|2)$/);
+                          const period = matched ? `${matched[1]}-${matched[2] === "1" ? "S1" : "S2"}` : detailsItem.semesterLabel;
+                          return `${period}-${detailsItem.department}-Academic`;
+                        })()}
                       </div>
-                      <div className="flex items-center gap-3 text-sm font-semibold text-slate-800">
-                        <div className="flex items-center gap-2">
-                          <div className="flex h-8 w-8 items-center justify-center rounded-full bg-white ring-1 ring-black">
-                            ☁
-                          </div>
-                          <span className="text-base">{statusLabel(detailsItem.status)}</span>
-                        </div>
-                        <button
-                          type="button"
-                          onClick={requestCloseDetails}
-                          className="rounded bg-slate-200 px-3 py-1 text-xs font-bold text-slate-700 hover:bg-slate-300"
-                        >
-                          Close
-                        </button>
-                      </div>
+                      <button
+                        type="button"
+                        onClick={requestCloseDetails}
+                        className="inline-flex h-9 w-9 items-center justify-center rounded-md bg-white/10 hover:bg-white/20"
+                      >
+                        <span className="text-xl leading-none">×</span>
+                      </button>
                     </div>
 
                     {/* Form body */}
@@ -1399,67 +1469,109 @@ export default function Supervisor() {
                       <div className="grid grid-cols-2 gap-5">
                         <div className="flex items-center gap-3">
                           <div className="w-32 rounded-sm bg-[#2f4d9c] px-3 py-2 text-center text-base font-semibold text-white">
-                            Full name
+                            Name
                           </div>
-          <input
-                            readOnly
-                            value={detailsItem.name}
-                            className="w-full flex-1 rounded-sm border border-[#2f4d9c] px-3 py-2 text-base"
-                          />
+                          <input readOnly value={detailsItem.name} className="w-full flex-1 rounded-sm border border-[#2f4d9c] px-3 py-2 text-base" />
                         </div>
 
                         <div className="flex items-center gap-3">
                           <div className="w-32 rounded-sm bg-[#2f4d9c] px-3 py-2 text-center text-base font-semibold text-white">
-                            Title
+                            Staff ID
                           </div>
-          <input
-                            readOnly
-                            value={detailsItem.title}
-                            className="w-full flex-1 rounded-sm border border-[#2f4d9c] px-3 py-2 text-base"
-                          />
+                          <input readOnly value={detailsItem.studentId} className="w-full flex-1 rounded-sm border border-[#2f4d9c] px-3 py-2 text-base" />
                         </div>
 
                         <div className="flex items-center gap-3">
                           <div className="w-32 rounded-sm bg-[#2f4d9c] px-3 py-2 text-center text-base font-semibold text-white">
-                            Total Work Hours
+                            Target teaching ratio
+                          </div>
+                          <input readOnly value="50.0%" className="w-full flex-1 rounded-sm border border-[#2f4d9c] px-3 py-2 text-base" />
+                        </div>
+
+                        <div className="flex items-center gap-3">
+                          <div className="w-32 rounded-sm bg-[#2f4d9c] px-3 py-2 text-center text-base font-semibold text-white">
+                            Actual teaching ratio
                           </div>
                           {(() => {
-                            const totalHours =
-                              detailsBreakdown
-                                ? (["Teaching", "Assigned Roles", "HDR", "Service"] as BreakdownCategory[]).reduce(
-                                    (tabSum, tab) =>
-                                      tabSum + detailsBreakdown[tab].reduce((sum, row) => sum + row.hours, 0),
-                                    0
-                                  )
-                                : detailsItem.hours;
+                            const source = detailsBreakdown ?? breakdownById(detailsItem.id, detailsItem.hours);
+                            const teaching = source.Teaching.reduce((sum, row) => sum + row.hours, 0);
+                            const total = (["Teaching", "Assigned Roles", "HDR", "Service", "Research (residual)"] as BreakdownCategory[]).reduce(
+                              (tabSum, tab) => tabSum + source[tab].reduce((sum, row) => sum + row.hours, 0),
+                              0
+                            );
+                            const ratio = total <= 0 ? "0.0%" : `${((teaching / total) * 100).toFixed(1)}%`;
                             return (
-          <input
-                            readOnly
-                            value={totalHours}
-                            className="w-full flex-1 rounded-sm border border-[#2f4d9c] px-3 py-2 text-base tabular-nums font-sans"
-                          />
+                              <input readOnly value={ratio} className="w-full flex-1 rounded-sm border border-[#2f4d9c] px-3 py-2 text-base tabular-nums font-sans" />
                             );
                           })()}
                         </div>
 
                         <div className="flex items-center gap-3">
                           <div className="w-32 rounded-sm bg-[#2f4d9c] px-3 py-2 text-center text-base font-semibold text-white">
-                            Department
+                            Total work hours
                           </div>
-          <input
-                            readOnly
-                            value={detailsItem.department}
-                            className="w-full flex-1 rounded-sm border border-[#2f4d9c] px-3 py-2 text-base"
-                          />
+                          {(() => {
+                            const totalHours = detailsBreakdown
+                              ? (["Teaching", "Assigned Roles", "HDR", "Service", "Research (residual)"] as BreakdownCategory[]).reduce(
+                                  (tabSum, tab) => tabSum + detailsBreakdown[tab].reduce((sum, row) => sum + row.hours, 0),
+                                  0
+                                )
+                              : detailsItem.hours;
+                            return (
+                              <input readOnly value={totalHours} className="w-full flex-1 rounded-sm border border-[#2f4d9c] px-3 py-2 text-base tabular-nums font-sans" />
+                            );
+                          })()}
                         </div>
 
+                        <div className="flex items-center gap-3">
+                          <div className="w-32 rounded-sm bg-[#2f4d9c] px-3 py-2 text-center text-base font-semibold text-white">
+                            Employment type
+                          </div>
+                          {(() => {
+                            const totalHours = detailsBreakdown
+                              ? (["Teaching", "Assigned Roles", "HDR", "Service", "Research (residual)"] as BreakdownCategory[]).reduce(
+                                  (tabSum, tab) => tabSum + detailsBreakdown[tab].reduce((sum, row) => sum + row.hours, 0),
+                                  0
+                                )
+                              : detailsItem.hours;
+                            return (
+                              <input readOnly value={totalHours >= 800 ? "Full-time" : "Part-time"} className="w-full flex-1 rounded-sm border border-[#2f4d9c] px-3 py-2 text-base" />
+                            );
+                          })()}
+                        </div>
+
+                        <div className="flex items-center gap-3">
+                          <div className="w-32 rounded-sm bg-[#2f4d9c] px-3 py-2 text-center text-base font-semibold text-white">
+                            New Staff
+                          </div>
+                          <input readOnly value="No" className="w-full flex-1 rounded-sm border border-[#2f4d9c] px-3 py-2 text-base" />
+                        </div>
+
+                        <div className="flex items-center gap-3">
+                          <div className="w-32 rounded-sm bg-[#2f4d9c] px-3 py-2 text-center text-base font-semibold text-white">
+                            HoD Review
+                          </div>
+                          <input readOnly value="No" className="w-full flex-1 rounded-sm border border-[#2f4d9c] px-3 py-2 text-base" />
+                        </div>
                       </div>
 
                       <div>
-                        <div className="text-sm font-semibold uppercase text-slate-700">Workload Breakdown</div>
+                        <div className="flex items-center justify-between">
+                          <div className="text-sm font-semibold uppercase text-slate-700">Workload Breakdown</div>
+                          <button
+                            type="button"
+                            onClick={() => {
+                              setDetailsEditMode((v) => !v);
+                              setDetailsModalError("");
+                            }}
+                            className="rounded bg-[#2f4d9c] px-3 py-1 text-xs font-bold text-white hover:bg-[#264183]"
+                          >
+                            {detailsEditMode ? "Done" : "Edit"}
+                          </button>
+                        </div>
                         <div className="mt-2 overflow-hidden rounded-sm border border-slate-300">
                           <div className="flex flex-wrap gap-2 border-b border-slate-200 bg-slate-50 px-3 py-2">
-                            {(["Teaching", "Assigned Roles", "HDR", "Service"] as BreakdownCategory[]).map((tab) => (
+                            {(["Teaching", "Assigned Roles", "HDR", "Service", "Research (residual)"] as BreakdownCategory[]).map((tab) => (
                               <button
                                 key={tab}
                                 type="button"
@@ -1479,53 +1591,65 @@ export default function Supervisor() {
                               <tr className="text-left text-xs font-semibold uppercase text-slate-600">
                                 <th className="px-3 py-2">{detailsTab}</th>
                                 <th className="w-[120px] px-3 py-2 text-right">Hours</th>
-                                <th className="w-[88px] px-3 py-2 text-center">Action</th>
+                                {detailsEditMode ? <th className="w-[88px] px-3 py-2 text-center">Action</th> : null}
                               </tr>
                             </thead>
                             <tbody className="divide-y divide-slate-200 bg-white text-sm text-slate-700">
                               {(detailsBreakdown?.[detailsTab] ?? breakdownById(detailsItem.id, detailsItem.hours)[detailsTab]).map((row, idx) => (
                                 <tr key={`${detailsItem.id}-${detailsTab}-${idx}`}>
                                   <td className="px-3 py-2">
-          <input
-                                      value={row.name}
-                                      onChange={(e) => updateBreakdownRow(detailsTab, idx, "name", e.target.value)}
-                                      maxLength={60}
-                                      className="w-[240px] max-w-full overflow-hidden text-ellipsis whitespace-nowrap rounded border border-slate-300 px-2 py-1 text-sm"
-                                    />
+                                    {detailsEditMode ? (
+                                      <input
+                                        value={row.name}
+                                        onChange={(e) => updateBreakdownRow(detailsTab, idx, "name", e.target.value)}
+                                        maxLength={60}
+                                        className="w-[240px] max-w-full overflow-hidden text-ellipsis whitespace-nowrap rounded border border-slate-300 px-2 py-1 text-sm"
+                                      />
+                                    ) : (
+                                      <span className="block px-1 py-1">{row.name}</span>
+                                    )}
                                   </td>
                                   <td className="px-3 py-2">
-                                    <input
-                                      type="text"
-                                      inputMode="decimal"
-                                      maxLength={8}
-                                      value={String(row.hours)}
-                                      onChange={(e) => updateBreakdownRow(detailsTab, idx, "hours", e.target.value)}
-                                      className="ml-auto w-24 rounded border border-slate-300 px-2 py-1 text-right tabular-nums font-sans text-sm"
-                                    />
+                                    {detailsEditMode ? (
+                                      <input
+                                        type="text"
+                                        inputMode="decimal"
+                                        maxLength={8}
+                                        value={String(row.hours)}
+                                        onChange={(e) => updateBreakdownRow(detailsTab, idx, "hours", e.target.value)}
+                                        className="ml-auto w-24 rounded border border-slate-300 px-2 py-1 text-right tabular-nums font-sans text-sm"
+                                      />
+                                    ) : (
+                                      <div className="text-right tabular-nums font-sans">{row.hours}</div>
+                                    )}
                                   </td>
-                                  <td className="px-3 py-2 text-center">
+                                  {detailsEditMode ? (
+                                    <td className="px-3 py-2 text-center">
+                                      <button
+                                        type="button"
+                                        onClick={() => removeBreakdownRow(detailsTab, idx)}
+                                        className="rounded bg-slate-200 px-2 py-1 text-xs font-semibold text-slate-700 hover:bg-slate-300 disabled:opacity-50"
+                                        disabled={(detailsBreakdown?.[detailsTab] ?? []).length <= 1}
+                                      >
+                                        Delete
+                                      </button>
+                                    </td>
+                                  ) : null}
+                                </tr>
+                              ))}
+                              {detailsEditMode ? (
+                                <tr>
+                                  <td colSpan={3} className="px-3 py-2">
                                     <button
                                       type="button"
-                                      onClick={() => removeBreakdownRow(detailsTab, idx)}
-                                      className="rounded bg-slate-200 px-2 py-1 text-xs font-semibold text-slate-700 hover:bg-slate-300 disabled:opacity-50"
-                                      disabled={(detailsBreakdown?.[detailsTab] ?? []).length <= 1}
+                                      onClick={() => addBreakdownRow(detailsTab)}
+                                      className="rounded bg-[#2f4d9c] px-3 py-1 text-xs font-semibold text-white hover:bg-[#264183]"
                                     >
-                                      Delete
+                                      + Add Row
                                     </button>
                                   </td>
                                 </tr>
-                              ))}
-                              <tr>
-                                <td colSpan={3} className="px-3 py-2">
-                                  <button
-                                    type="button"
-                                    onClick={() => addBreakdownRow(detailsTab)}
-                                    className="rounded bg-[#2f4d9c] px-3 py-1 text-xs font-semibold text-white hover:bg-[#264183]"
-                                  >
-                                    + Add Row
-                                  </button>
-                                </td>
-                              </tr>
+                              ) : null}
                               <tr className="bg-slate-50">
                                 <td className="px-3 py-2 font-semibold">Total</td>
                                 <td className="px-3 py-2 text-right font-semibold tabular-nums font-sans">
@@ -1534,7 +1658,7 @@ export default function Supervisor() {
                                     0
                                   )}
                                 </td>
-                                <td />
+                                {detailsEditMode ? <td /> : null}
                               </tr>
                             </tbody>
                           </table>
@@ -1547,7 +1671,7 @@ export default function Supervisor() {
                           onClick={() => setDescriptionExpanded((v) => !v)}
                           className="flex w-full items-center justify-between rounded-sm border border-slate-300 bg-slate-50 px-3 py-2 text-left text-sm font-semibold uppercase text-slate-700"
                         >
-                          <span>Note</span>
+                          <span>School of Operations notes</span>
                           <span className="text-base leading-none">{descriptionExpanded ? "−" : "+"}</span>
                         </button>
                         {descriptionExpanded && (
@@ -1563,11 +1687,7 @@ export default function Supervisor() {
                         <div className="text-sm font-semibold text-slate-700">Application Reason</div>
                         <textarea
                           readOnly
-                          value={
-                            detailsItem.requestReason ||
-                            extractRequestReason(detailsItem.description ?? "") ||
-                            "- no reason provided -"
-                          }
+                          value={requestReasonText(detailsItem) || "- no reason provided -"}
                           className="mt-2 h-24 w-full resize-none rounded-sm border border-slate-300 bg-white px-4 py-3 text-sm text-slate-700"
                         />
                       </div>
