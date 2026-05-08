@@ -20,6 +20,7 @@ from rest_framework.response import Response
 
 from api.decorators import require_role
 from api.models import AuditLog, WorkloadItem, WorkloadReport
+from api.services.workload_service import stale_report_response_payload
 from api.view.hod_views import (
     _first,
     _parse_breakdown,
@@ -163,7 +164,15 @@ def hos_workload_request_decision(request, id):
         )
 
     qs = _hos_visible_qs()
-    report = get_object_or_404(qs, report_id=id)
+    report = qs.filter(report_id=id).first()
+    if report is None:
+        stale = WorkloadReport.objects.filter(report_id=id, is_current=False).first()
+        if stale is not None:
+            return Response(stale_report_response_payload(), status=http_status.HTTP_409_CONFLICT)
+        return Response(
+            {'success': False, 'message': 'Report not found'},
+            status=http_status.HTTP_404_NOT_FOUND,
+        )
 
     if report.status != 'PENDING':
         return Response(
