@@ -398,6 +398,48 @@ function workloadModalNotes(row: Pick<MockRequest, "notes" | "description">) {
   return combined;
 }
 
+type ChangeHistoryEntry = {
+  changeId: string;
+  staff: string;
+  field: string;
+  oldValue: string;
+  newValue: string;
+  by: string;
+  time: string;
+};
+
+function generateMockChangeHistory(item: MockRequest): ChangeHistoryEntry[] {
+  const FIELDS = [
+    { field: "Total work hours", old: () => String(item.hours + 30), new: () => String(item.hours) },
+    { field: "Status", old: () => "Unconfirmed", new: () => "Pending" },
+    { field: "Employment type", old: () => "Full-time", new: () => "Part-time" },
+    { field: "New Staff", old: () => "Yes", new: () => "No" },
+    { field: "Target teaching ratio", old: () => "40.0%", new: () => "50.0%" },
+    { field: "HoD Review", old: () => "No", new: () => "Yes" },
+    { field: "Notes", old: () => "(empty)", new: () => (item.notes ?? "").slice(0, 40) || "(empty)" },
+    { field: "Total work hours", old: () => String(item.hours - 50), new: () => String(item.hours + 30) },
+    { field: "Status", old: () => "Pending", new: () => "Approved" },
+    { field: "Teaching hours", old: () => "120.0", new: () => "173.0" },
+    { field: "Actual teaching ratio", old: () => "20.0%", new: () => "27.3%" },
+    { field: "HoD Review", old: () => "Yes", new: () => "No" },
+  ];
+  const OPERATORS = ["Yaka Bronte", "Admin User", "System", "Bronte Chen"];
+  return FIELDS.map((f, idx) => {
+    const day = ((item.id + idx) % 28) + 1;
+    const hour = 8 + ((item.id + idx) % 10);
+    const min = String((item.id * 3 + idx * 7) % 60).padStart(2, "0");
+    return {
+      changeId: `CHG-${String(item.id).padStart(3, "0")}${String(idx + 1).padStart(3, "0")}`,
+      staff: item.name,
+      field: f.field,
+      oldValue: f.old(),
+      newValue: f.new(),
+      by: OPERATORS[(item.id + idx) % OPERATORS.length],
+      time: `2026-03-${String(day).padStart(2, "0")} ${String(hour).padStart(2, "0")}:${min}`,
+    };
+  });
+}
+
 /** Workload detail modal header: reporting period only, e.g. "2026-S1" (no staff id). */
 function workloadDetailReportingPeriodLabel(row: MockRequest): string {
   const period = row.periodLabel.trim();
@@ -1069,6 +1111,8 @@ export default function SchoolofOperations() {
   const [distributeYearInput, setDistributeYearInput] = useState(String(currentYear));
   const [distributeSemesterInput, setDistributeSemesterInput] = useState<"S1" | "S2">("S1");
   const [distributeError, setDistributeError] = useState("");
+  const [changeHistoryOpen, setChangeHistoryOpen] = useState(false);
+  const [changeHistoryPage, setChangeHistoryPage] = useState(1);
 
   const [searchEmployeeIdInput, setSearchEmployeeIdInput] = useState("");
   const [searchNameInput, setSearchNameInput] = useState("");
@@ -3791,12 +3835,132 @@ export default function SchoolofOperations() {
                             className="w-full resize-y rounded border border-slate-300 bg-white px-3 py-2 text-sm text-slate-700 outline-none placeholder:text-slate-500 read-only:bg-slate-50"
                           />
                         </div>
+                        <div className="flex justify-end pt-1">
+                          <button
+                            type="button"
+                            onClick={() => { setChangeHistoryPage(1); setChangeHistoryOpen(true); }}
+                            className="rounded border border-[#2f4d9c] px-4 py-2 text-sm font-semibold text-[#2f4d9c] hover:bg-[#eef2ff]"
+                          >
+                            追溯修改记录
+                          </button>
+                        </div>
                         <div className="h-2" />
                       </div>
                     </div>
                   </div>
                 </div>
               )}
+
+              {changeHistoryOpen && detailsItem && (() => {
+                const HISTORY_PAGE_SIZE = 10;
+                const allHistory = generateMockChangeHistory(detailsItem);
+                const historyTotalPages = Math.max(1, Math.ceil(allHistory.length / HISTORY_PAGE_SIZE));
+                const pagedHistory = allHistory.slice(
+                  (changeHistoryPage - 1) * HISTORY_PAGE_SIZE,
+                  changeHistoryPage * HISTORY_PAGE_SIZE
+                );
+                return (
+                  <div
+                    className="fixed inset-0 z-[90] flex items-center justify-center bg-black/40 p-4"
+                    onClick={() => setChangeHistoryOpen(false)}
+                  >
+                    <div
+                      className="w-full max-w-5xl rounded-md bg-white shadow-xl"
+                      onClick={(e) => e.stopPropagation()}
+                    >
+                      <div className="flex items-center justify-between rounded-t-md bg-[#2f4d9c] px-5 py-3 text-white">
+                        <div className="text-base font-bold">修改记录 — {detailsItem.name}</div>
+                        <button
+                          type="button"
+                          onClick={() => setChangeHistoryOpen(false)}
+                          className="inline-flex h-8 w-8 items-center justify-center rounded bg-white/10 hover:bg-white/20"
+                        >
+                          <span className="text-xl leading-none">×</span>
+                        </button>
+                      </div>
+                      <div className="p-4">
+                        <div className="overflow-x-auto rounded border border-slate-200">
+                          <div className="max-h-[480px] overflow-y-auto">
+                            <table className="min-w-full text-sm">
+                              <thead className="sticky top-0 bg-slate-50">
+                                <tr className="border-b border-slate-200 text-left text-xs font-semibold uppercase tracking-wide text-slate-600">
+                                  <th className="px-3 py-2 whitespace-nowrap">Change ID</th>
+                                  <th className="px-3 py-2 whitespace-nowrap">Staff</th>
+                                  <th className="px-3 py-2 whitespace-nowrap">Field</th>
+                                  <th className="px-3 py-2 whitespace-nowrap">Old</th>
+                                  <th className="px-3 py-2 whitespace-nowrap">New</th>
+                                  <th className="px-3 py-2 whitespace-nowrap">By</th>
+                                  <th className="px-3 py-2 whitespace-nowrap">Time</th>
+                                  <th className="px-3 py-2 w-8">
+                                    <svg xmlns="http://www.w3.org/2000/svg" className="h-4 w-4 text-slate-400" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
+                                      <path strokeLinecap="round" strokeLinejoin="round" d="M8 16H6a2 2 0 01-2-2V6a2 2 0 012-2h8a2 2 0 012 2v2m-6 12h8a2 2 0 002-2v-8a2 2 0 00-2-2h-8a2 2 0 00-2 2v8a2 2 0 002 2z" />
+                                    </svg>
+                                  </th>
+                                </tr>
+                              </thead>
+                              <tbody className="divide-y divide-slate-100 bg-white text-slate-700">
+                                {pagedHistory.map((entry) => (
+                                  <tr key={entry.changeId} className="hover:bg-slate-50">
+                                    <td className="px-3 py-2 font-mono text-xs text-slate-500">{entry.changeId}</td>
+                                    <td className="px-3 py-2 whitespace-nowrap">{entry.staff}</td>
+                                    <td className="px-3 py-2 whitespace-nowrap font-medium">{entry.field}</td>
+                                    <td className="px-3 py-2 text-slate-400">{entry.oldValue}</td>
+                                    <td className="px-3 py-2 font-semibold text-slate-800">{entry.newValue}</td>
+                                    <td className="px-3 py-2 whitespace-nowrap">{entry.by}</td>
+                                    <td className="px-3 py-2 font-mono text-xs tabular-nums whitespace-nowrap">{entry.time}</td>
+                                    <td className="px-3 py-2">
+                                      <button
+                                        type="button"
+                                        title="Copy row"
+                                        onClick={() =>
+                                          navigator.clipboard?.writeText(
+                                            [entry.changeId, entry.staff, entry.field, entry.oldValue, entry.newValue, entry.by, entry.time].join("\t")
+                                          )
+                                        }
+                                        className="rounded p-1 text-slate-400 hover:bg-slate-100 hover:text-slate-700"
+                                      >
+                                        <svg xmlns="http://www.w3.org/2000/svg" className="h-4 w-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
+                                          <path strokeLinecap="round" strokeLinejoin="round" d="M8 16H6a2 2 0 01-2-2V6a2 2 0 012-2h8a2 2 0 012 2v2m-6 12h8a2 2 0 002-2v-8a2 2 0 00-2-2h-8a2 2 0 00-2 2v8a2 2 0 002 2z" />
+                                        </svg>
+                                      </button>
+                                    </td>
+                                  </tr>
+                                ))}
+                                {pagedHistory.length === 0 && (
+                                  <tr>
+                                    <td colSpan={8} className="px-3 py-6 text-center text-sm text-slate-400">
+                                      No change records found.
+                                    </td>
+                                  </tr>
+                                )}
+                              </tbody>
+                            </table>
+                          </div>
+                        </div>
+                        <div className="mt-3 flex items-center justify-between px-1 text-sm text-slate-600">
+                          <button
+                            type="button"
+                            onClick={() => setChangeHistoryPage((p) => Math.max(1, p - 1))}
+                            disabled={changeHistoryPage <= 1}
+                            className="rounded border border-[#2f4d9c]/35 bg-[#eef3ff] px-3 py-1 font-semibold text-[#2f4d9c] disabled:cursor-not-allowed disabled:opacity-40"
+                          >
+                            Previous
+                          </button>
+                          <span>Page {changeHistoryPage} / {historyTotalPages}</span>
+                          <button
+                            type="button"
+                            onClick={() => setChangeHistoryPage((p) => Math.min(historyTotalPages, p + 1))}
+                            disabled={changeHistoryPage >= historyTotalPages}
+                            className="rounded border border-[#2f4d9c]/35 bg-[#eef3ff] px-3 py-1 font-semibold text-[#2f4d9c] disabled:cursor-not-allowed disabled:opacity-40"
+                          >
+                            Next
+                          </button>
+                        </div>
+                      </div>
+                    </div>
+                  </div>
+                );
+              })()}
 
               {distributeModalOpen && (
                 <div className="fixed inset-0 z-[82] flex items-center justify-center bg-black/40 p-4">
