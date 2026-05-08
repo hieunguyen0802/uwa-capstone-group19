@@ -15,9 +15,25 @@ export type PostWorkloadSpreadsheetImportResponse = {
   ok: boolean;
   /** Server job id / reference */
   referenceId?: string;
+  created?: number;
+  updated?: number;
+  failed?: number;
+  errors?: Array<{ staffId?: string; sheet?: string; message?: string }>;
+  message?: string;
 };
 
-// const API_BASE = process.env.REACT_APP_API_BASE_URL ?? "";
+const API_BASE = process.env.REACT_APP_API_BASE_URL ?? "";
+
+function readAccessToken(): string {
+  if (typeof window === "undefined") return "";
+  return (
+    window.localStorage.getItem("access") ||
+    window.sessionStorage.getItem("access") ||
+    window.localStorage.getItem("token") ||
+    window.sessionStorage.getItem("token") ||
+    ""
+  );
+}
 
 /**
  * POST full parsed workbook (all cells + derived teaching/role fields) to the backend.
@@ -36,19 +52,21 @@ export async function postWorkloadSpreadsheetImport(
     importedAtIso: new Date().toISOString(),
   };
 
-  // TODO(backend):
-  // const response = await fetch(`${API_BASE}/api/workload/spreadsheet/import`, {
-  //   method: "POST",
-  //   headers: { "Content-Type": "application/json" },
-  //   body: JSON.stringify(payload),
-  // });
-  // if (!response.ok) throw new Error(await response.text());
-  // return (await response.json()) as PostWorkloadSpreadsheetImportResponse;
-
-  console.info("[postWorkloadSpreadsheetImport] stub payload", {
-    fileName: payload.fileName,
-    rowCount: payload.sheets.reduce((n, s) => n + s.rows.length, 0),
-    teachingHoursFactor: payload.teachingHoursFactor,
+  const token = readAccessToken();
+  const response = await fetch(`${API_BASE}/api/school-operations/workloads/import`, {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      ...(token ? { Authorization: `Bearer ${token}` } : {}),
+    },
+    credentials: "include",
+    body: JSON.stringify(payload),
   });
-  return { ok: true, referenceId: "stub-workload-import" };
+
+  if (!response.ok) {
+    const detail = await response.text();
+    throw new Error(detail || `School Operations import failed (${response.status})`);
+  }
+
+  return (await response.json()) as PostWorkloadSpreadsheetImportResponse;
 }

@@ -1,5 +1,4 @@
 import { useEffect, useMemo, useState, type ChangeEvent } from "react";
-import * as XLSX from "xlsx";
 import DashboardHeader from "../components/common/DashboardHeader";
 import LineMetricChartCard from "../components/common/LineMetricChartCard";
 import PaginationControls from "../components/common/PaginationControls";
@@ -12,6 +11,7 @@ import StatusPill from "../components/common/StatusPill";
 import VisualizationSummaryCards from "../components/common/VisualizationSummaryCards";
 import ThemedNoticeModal, { SUPERSEDED_RECORD_MESSAGE } from "../components/common/ThemedNoticeModal";
 import WorkHoursBadge from "../components/common/WorkHoursBadge";
+import { apiJson, clearLocalStorageKeys, downloadApiFile, isAbortError } from "../api/runtimeApi";
 
 type MockRequest = {
   id: number;
@@ -29,6 +29,13 @@ type MockRequest = {
   rate: number;
   status: "pending" | "approved" | "rejected";
   hours: number;
+  submittedAt?: string;
+  version?: string;
+  targetTeachingRatio?: number;
+  employmentType?: string;
+  newStaff?: "Yes" | "No";
+  hodReviewRequired?: boolean;
+  actualTeachingRatio?: number;
   detailSnapshot?: {
     breakdown: BreakdownData;
   };
@@ -46,140 +53,106 @@ const SUPERVISOR_STATE_KEY = "supervisor_requests_state_v1";
 const OPS_ACADEMIC_DISTRIBUTED_KEY = "ops_academic_distributed_workloads_v1";
 const ACADEMIC_STATUS_SYNC_KEY = "academic_status_sync_v1";
 const ACADEMIC_NOTES_SYNC_KEY = "academic_notes_sync_v1";
-const SUPERVISOR_SYNC_EVENT = "supervisor-status-updated";
-const ACADEMIC_DRAFT_EVENT = "academic-drafts-updated";
 const HOD_ANNUAL_REPORTS_KEY = "hod_annual_report_inbox_v1";
+const LEGACY_HOD_STORAGE_KEYS = [
+  SUPERVISOR_DRAFT_KEY,
+  SUPERVISOR_STATE_KEY,
+  OPS_ACADEMIC_DISTRIBUTED_KEY,
+  ACADEMIC_STATUS_SYNC_KEY,
+  ACADEMIC_NOTES_SYNC_KEY,
+  HOD_ANNUAL_REPORTS_KEY,
+] as const;
 
 type HodAnnualReportItem = {
   id: string;
-  year: number;
-  department: string;
   title: string;
   createdAt: string;
   readAt?: string;
-  isDemo?: boolean;
-  rows: Record<string, string | number>[];
+  downloadUrl?: string;
 };
 
-function readHodAnnualReports(): HodAnnualReportItem[] {
-  if (typeof window === "undefined") return [];
-  try {
-    const raw = window.localStorage.getItem(HOD_ANNUAL_REPORTS_KEY);
-    if (!raw) return [];
-    const parsed = JSON.parse(raw);
-    if (!Array.isArray(parsed)) return [];
-    return parsed as HodAnnualReportItem[];
-  } catch {
-    return [];
-  }
-}
+type HodWorkloadRowResponse = {
+  id: string;
+  employee_id: string;
+  name: string;
+  title: string;
+  department: string;
+  request_reason?: string;
+  status: "pending" | "approved" | "rejected";
+  total_hours: number;
+  submitted_time?: string | null;
+  semester_label?: string;
+  period_label: string;
+  is_anomaly?: boolean;
+};
 
-function writeHodAnnualReports(items: HodAnnualReportItem[]) {
-  if (typeof window === "undefined") return;
-  window.localStorage.setItem(HOD_ANNUAL_REPORTS_KEY, JSON.stringify(items));
-}
-
-function submittedTimeById(id: number) {
-  const day = ((id - 1) % 28) + 1;
-  const hour = 8 + (id % 9);
-  return `2026-03-${String(day).padStart(2, "0")} ${String(hour).padStart(2, "0")}:00`;
-}
-
-function displayNameWithoutComma(raw: string) {
-  return raw.replace(/,/g, " ").replace(/\s+/g, " ").trim();
-}
-
-function readAcademicDrafts(): MockRequest[] {
-  if (typeof window === "undefined") return [];
-  try {
-    const raw = window.localStorage.getItem(SUPERVISOR_DRAFT_KEY);
-    if (!raw) return [];
-    const parsed = JSON.parse(raw);
-    if (!Array.isArray(parsed)) return [];
-    return parsed as MockRequest[];
-  } catch {
-    return [];
-  }
-}
-
-function consumeAcademicDrafts(): MockRequest[] {
-  if (typeof window === "undefined") return [];
-  const drafts = readAcademicDrafts();
-  window.localStorage.removeItem(SUPERVISOR_DRAFT_KEY);
-  return drafts;
-}
-
-function readSupervisorState(): MockRequest[] {
-  if (typeof window === "undefined") return [];
-  try {
-    const raw = window.localStorage.getItem(SUPERVISOR_STATE_KEY);
-    if (!raw) return [];
-    const parsed = JSON.parse(raw);
-    if (!Array.isArray(parsed)) return [];
-    return parsed as MockRequest[];
-  } catch {
-    return [];
-  }
-}
-
-function mergeDraftsIntoRequests(current: MockRequest[], drafts: MockRequest[]) {
-  const merged = [...drafts, ...current];
-  if (!merged.length) return merged;
-  const seen = new Set<string>();
-  const next: MockRequest[] = [];
-  for (const row of merged) {
-    const sourceId = Number(row.sourceWorkloadId);
-    const key = Number.isFinite(sourceId)
-      ? `src:${sourceId}`
-      : `legacy:${String(row.studentId).trim()}|${String(row.periodLabel).trim()}|${String(row.requestReason ?? "").trim()}`;
-    if (seen.has(key)) continue;
-    seen.add(key);
-    next.push(row);
-  }
-  return next;
-}
-
-function breakdownById(id: number, totalHours: number): BreakdownData {
-  const safeTotal = Math.max(0, Math.round(totalHours));
-  const teaching1 = Math.max(0, Math.floor(safeTotal * 0.3));
-  const teaching2 = Math.max(0, Math.floor(safeTotal * 0.15));
-  const role1 = Math.max(0, Math.floor(safeTotal * 0.2));
-  const role2 = Math.max(0, Math.floor(safeTotal * 0.1));
-  const hdr1 = Math.max(0, Math.floor(safeTotal * 0.1));
-  const hdr2 = Math.max(0, Math.floor(safeTotal * 0.05));
-  const used = teaching1 + teaching2 + role1 + role2 + hdr1 + hdr2;
-  const service = Math.max(0, safeTotal - used);
-
-  const teachingUnits = [
-    ["CITS2401", "CITS2200"],
-    ["CITS3002", "CITS1401"],
-    ["CITS1001", "CITS2005"],
-  ] as const;
-  const hdrStudents = [
-    ["Student A", "Student B"],
-    ["Student C", "Student D"],
-    ["Student E", "Student F"],
-  ] as const;
-  const [unitA, unitB] = teachingUnits[id % teachingUnits.length];
-  const [studentA, studentB] = hdrStudents[id % hdrStudents.length];
-
-  return {
-    Teaching: [
-      { name: unitA, hours: teaching1 },
-      { name: unitB, hours: teaching2 },
-    ],
-    "Assigned Roles": [
-      { name: "Program Chair", hours: role1 },
-      { name: "Outreach Chair", hours: role2 },
-    ],
-    HDR: [
-      { name: studentA, hours: hdr1 },
-      { name: studentB, hours: hdr2 },
-    ],
-    Service: [{ name: "Committee support", hours: service }],
-    "Research (residual)": [{ name: "Research (residual)", hours: 0 }],
+type HodWorkloadListResponse = {
+  success?: boolean;
+  message?: string;
+  data?: {
+    items?: HodWorkloadRowResponse[];
+    page?: number;
+    page_size?: number;
+    total?: number;
+    summary?: {
+      pending?: number;
+      approved?: number;
+      rejected?: number;
+    };
   };
-}
+};
+
+type HodWorkloadDetailPayload = {
+  id: string;
+  employee_id: string;
+  name: string;
+  title: string;
+  department: string;
+  total_hours: number;
+  request_reason?: string | null;
+  description?: string | null;
+  supervisor_note?: string | null;
+  status: "pending" | "approved" | "rejected";
+  breakdown: Partial<Record<BreakdownCategory, BreakdownEntry[]>>;
+  is_anomaly?: boolean;
+};
+
+type HodWorkloadDetailResponse = {
+  success?: boolean;
+  message?: string;
+  data?: HodWorkloadDetailPayload;
+};
+
+type HodVisualizationResponse = {
+  success?: boolean;
+  data?: {
+    reporting_period_label?: string;
+    summary?: {
+      total_academics?: number;
+      total_work_hours?: number;
+      pending_requests?: number;
+      approved_requests?: number;
+      rejected_requests?: number;
+      work_hours_per_academic?: number;
+    };
+    total_work_hours_trend?: Array<{ semester: string; total_hours: number }>;
+    average_work_hours_by_semester?: Array<{ semester: string; average_hours: number }>;
+  };
+};
+
+type HodVisualizationState = {
+  reportingPeriodLabel: string;
+  summary: {
+    totalAcademics: number;
+    totalWorkHours: number;
+    pendingRequests: number;
+    approvedRequests: number;
+    rejectedRequests: number;
+    workHoursPerAcademic: number;
+  };
+  totalWorkHoursTrend: Array<{ period: string; totalWorkHours: number }>;
+  averageWorkHoursBySemester: Array<{ period: string; averageWorkHours: number }>;
+};
 
 function extractRequestReason(description: string) {
   const marker = "Request reason:";
@@ -205,34 +178,6 @@ function requestReasonText(row: Pick<MockRequest, "requestReason" | "description
   return row.requestReason?.trim() || extractRequestReason(row.description ?? "").trim();
 }
 
-function reportStatusText(status: MockRequest["status"]) {
-  return status === "approved" ? "Approved" : status === "rejected" ? "Rejected" : "Pending";
-}
-
-function parsePeriod(periodLabel: string) {
-  const matched = periodLabel.match(/(\d{4})-(1|2)/);
-  if (!matched) return { year: NaN, semester: "" as "" | "S1" | "S2" };
-  return {
-    year: Number(matched[1]),
-    semester: matched[2] === "1" ? ("S1" as const) : ("S2" as const),
-  };
-}
-
-type SemesterSlot = { key: string; year: number; semester: "S1" | "S2"; label: string };
-
-function buildSemesterSlots(yearFrom: number, yearTo: number, semesterFilter: "All" | "S1" | "S2") {
-  const slots: SemesterSlot[] = [];
-  for (let year = yearFrom; year <= yearTo; year += 1) {
-    if (semesterFilter === "All" || semesterFilter === "S1") {
-      slots.push({ key: `${year}-S1`, year, semester: "S1", label: `${year} S1` });
-    }
-    if (semesterFilter === "All" || semesterFilter === "S2") {
-      slots.push({ key: `${year}-S2`, year, semester: "S2", label: `${year} S2` });
-    }
-  }
-  return slots;
-}
-
 function computeYAxisDomain(values: Array<number | null>) {
   const nums = values.filter((v): v is number => typeof v === "number" && Number.isFinite(v));
   if (!nums.length) return [0, 10] as [number, number];
@@ -247,70 +192,69 @@ function computeYAxisDomain(values: Array<number | null>) {
   return [Math.max(0, min - pad), max + pad] as [number, number];
 }
 
-function reseedSemestersIfNeeded(items: MockRequest[]) {
-  const uniquePeriods = new Set(items.map((item) => item.periodLabel));
-  // Old cached data often has only one semester; reseed it for visualization readability.
-  if (uniquePeriods.size >= 5) return items;
-  const semesterPool = ["2024-1", "2024-2", "2025-1", "2025-2", "2026-1"] as const;
-  return items.map((item, idx) => {
-    const periodLabel = semesterPool[idx % semesterPool.length];
-    return {
-      ...item,
-      periodLabel,
-      semesterLabel: periodLabel.endsWith("-2") ? "Sem2" : "Sem1",
-    };
-  });
-}
-
-function annualReportAvailableOn(year: number) {
-  return new Date(year + 1, 0, 1, 0, 0, 0, 0);
-}
-
-function buildHodAnnualReportRows(rows: MockRequest[], department: string) {
-  return rows
-    .filter((row) => !row.cancelled && row.department === department)
-    .sort((a, b) => a.periodLabel.localeCompare(b.periodLabel) || a.name.localeCompare(b.name))
-    .map((row) => {
-      const parsed = parsePeriod(row.periodLabel);
-      return {
-        "Staff ID": row.studentId,
-        Name: displayNameWithoutComma(row.name),
-        Department: row.department,
-        Title: row.title,
-        Semester: parsed.semester || row.semesterLabel || row.periodLabel,
-        Status: reportStatusText(row.status),
-        "Total Work Hours": row.hours,
-        "Submitted Time": submittedTimeById(row.id),
-        "Application Reason": requestReasonText(row) || "—",
-        "HoD Review Note": row.supervisorNote?.trim() || "—",
-      };
-    });
-}
-
-function createHodAnnualDemoReport(department: string): HodAnnualReportItem {
+function normalizeHodBreakdown(
+  breakdown?: Partial<Record<BreakdownCategory, BreakdownEntry[]>>
+): BreakdownData {
+  const source = breakdown ?? {};
   return {
-    id: `hod-report-demo-2025-${department.replace(/\s+/g, "-").toLowerCase()}`,
-    year: 2025,
-    department,
-    title: `2025 ${department} annual report generated`,
-    createdAt: "2026-01-01T09:00:00.000Z",
-    readAt: undefined,
-    isDemo: true,
-    rows: [
-      {
-        "Staff ID": "12345931",
-        Name: "Dias John",
-        Department: department,
-        Title: "Lecturer",
-        Semester: "S1",
-        Status: "Pending",
-        "Total Work Hours": 793.5,
-        "Submitted Time": "2025-11-28 09:30",
-        "Application Reason": "wrong",
-        "HoD Review Note": "—",
-      },
-    ],
+    Teaching: Array.isArray(source.Teaching) ? source.Teaching : [],
+    "Assigned Roles": Array.isArray(source["Assigned Roles"]) ? source["Assigned Roles"] ?? [] : [],
+    HDR: Array.isArray(source.HDR) ? source.HDR : [],
+    Service: Array.isArray(source.Service) ? source.Service : [],
+    "Research (residual)": Array.isArray(source["Research (residual)"])
+      ? source["Research (residual)"] ?? []
+      : [],
   };
+}
+
+function mapHodRowToRequest(row: HodWorkloadRowResponse): MockRequest {
+  const numericId = Number.parseInt(String(row.id), 10);
+  return {
+    id: Number.isFinite(numericId) ? numericId : Date.now(),
+    studentId: row.employee_id,
+    semesterLabel: row.semester_label || row.period_label,
+    periodLabel: row.period_label,
+    name: row.name,
+    unit: "",
+    notes: "",
+    requestReason: row.request_reason || "",
+    title: row.title || "",
+    department: row.department || "",
+    rate: 0,
+    status: row.status,
+    hours: Number(row.total_hours ?? 0),
+    submittedAt: row.submitted_time ?? "",
+    cancelled: false,
+  };
+}
+
+function mapHodDetailToRequest(detail: HodWorkloadDetailPayload): MockRequest {
+  const base = mapHodRowToRequest({
+    id: detail.id,
+    employee_id: detail.employee_id,
+    name: detail.name,
+    title: detail.title,
+    department: detail.department,
+    request_reason: detail.request_reason || "",
+    status: detail.status,
+    total_hours: detail.total_hours,
+    submitted_time: "",
+    semester_label: "",
+    period_label: "",
+  });
+  return {
+    ...base,
+    notes: detail.description ?? "",
+    supervisorNote: detail.supervisor_note ?? "",
+    detailSnapshot: {
+      breakdown: normalizeHodBreakdown(detail.breakdown),
+    },
+    cancelled: false,
+  };
+}
+
+function submittedAtDisplay(item: Pick<MockRequest, "submittedAt">): string {
+  return item.submittedAt?.trim() || "—";
 }
 
 export default function Supervisor() {
@@ -326,84 +270,16 @@ export default function Supervisor() {
   const [profileOpen, setProfileOpen] = useState(false);
   const [avatarSrc, setAvatarSrc] = useState<string | null>(null);
   const [hodReportInboxOpen, setHodReportInboxOpen] = useState(false);
-  const [hodAnnualReports, setHodAnnualReports] = useState<HodAnnualReportItem[]>(() => readHodAnnualReports());
+  const [hodAnnualReports, setHodAnnualReports] = useState<HodAnnualReportItem[]>([]);
   const [hodReportInboxPage, setHodReportInboxPage] = useState(1);
   const currentYear = useMemo(() => new Date().getFullYear(), []);
-  const currentSemester = useMemo<"S1" | "S2">(() => {
+  const currentSemesterLabel = useMemo(() => {
     const month = new Date().getMonth() + 1;
-    return month <= 6 ? "S1" : "S2";
-  }, []);
-  const currentSemesterLabel = useMemo(
-    () => `${currentYear} ${currentSemester}`,
-    [currentYear, currentSemester]
-  );
-
-  const [loading] = useState(false);
-  const [pending, setPending] = useState<MockRequest[]>(() => mergeDraftsIntoRequests(readSupervisorState(), []));
-
-  useEffect(() => {
-    function mergeLatestDrafts() {
-      const drafts = consumeAcademicDrafts();
-      if (!drafts.length) return;
-      setPending((prev) => mergeDraftsIntoRequests(prev, drafts));
-    }
-
-    function onStorage(e: StorageEvent) {
-      if (e.key === SUPERVISOR_DRAFT_KEY) mergeLatestDrafts();
-    }
-
-    function onDraftEvent() {
-      mergeLatestDrafts();
-    }
-
-    // Sync existing Academic submissions when HoD page is opened after submit.
-    mergeLatestDrafts();
-    window.addEventListener("storage", onStorage);
-    window.addEventListener(ACADEMIC_DRAFT_EVENT, onDraftEvent as EventListener);
-    return () => {
-      window.removeEventListener("storage", onStorage);
-      window.removeEventListener(ACADEMIC_DRAFT_EVENT, onDraftEvent as EventListener);
-    };
-  }, []);
-
-  useEffect(() => {
-    if (typeof window === "undefined") return;
-    window.localStorage.setItem(SUPERVISOR_STATE_KEY, JSON.stringify(pending));
-  }, [pending]);
-
-  useEffect(() => {
-    if (typeof window === "undefined") return;
-    const sync: Record<string, "pending" | "approved" | "rejected"> = {};
-    const notesSync: Record<string, string> = {};
-    let latestDistributedIdByStaffId: Record<string, number> = {};
-    try {
-      const raw = window.localStorage.getItem(OPS_ACADEMIC_DISTRIBUTED_KEY);
-      const parsed = raw ? (JSON.parse(raw) as MockRequest[]) : [];
-      if (Array.isArray(parsed)) {
-        parsed.forEach((row) => {
-          const sid = String(row.studentId ?? "").trim();
-          const id = Number(row.id);
-          if (!sid || !Number.isFinite(id)) return;
-          if (row.cancelled || row.status !== "approved") return;
-          latestDistributedIdByStaffId[sid] = id;
-        });
-      }
-    } catch {
-      latestDistributedIdByStaffId = {};
-    }
-    pending.forEach((row) => {
-      const sourceId = Number(row.sourceWorkloadId);
-      const fallbackId = latestDistributedIdByStaffId[String(row.studentId ?? "").trim()];
-      const effectiveSourceId = Number.isFinite(sourceId) ? sourceId : fallbackId;
-      if (Number.isFinite(effectiveSourceId)) sync[String(effectiveSourceId)] = row.status;
-      if (Number.isFinite(effectiveSourceId) && row.supervisorNote) {
-        notesSync[String(effectiveSourceId)] = row.supervisorNote;
-      }
-    });
-    window.localStorage.setItem(ACADEMIC_STATUS_SYNC_KEY, JSON.stringify(sync));
-    window.localStorage.setItem(ACADEMIC_NOTES_SYNC_KEY, JSON.stringify(notesSync));
-    window.dispatchEvent(new Event(SUPERVISOR_SYNC_EVENT));
-  }, [pending]);
+    return `${currentYear} ${month <= 6 ? "S1" : "S2"}`;
+  }, [currentYear]);
+  const [loading, setLoading] = useState(true);
+  const [pageError, setPageError] = useState("");
+  const [pending, setPending] = useState<MockRequest[]>([]);
   const [selectedIds, setSelectedIds] = useState<Set<number>>(new Set());
   const [page, setPage] = useState(1);
   const pageSize = 10; // Items per page
@@ -459,10 +335,24 @@ export default function Supervisor() {
   const [visualYearToInput, setVisualYearToInput] = useState("");
   const [visualSemesterInput, setVisualSemesterInput] = useState<"All" | "S1" | "S2">("All");
   const [visualError, setVisualError] = useState("");
+  const [visualizationLoading, setVisualizationLoading] = useState(false);
   const [appliedVisualFilters, setAppliedVisualFilters] = useState({
     yearFrom: "",
     yearTo: "",
     semester: "All" as "All" | "S1" | "S2",
+  });
+  const [visualizationData, setVisualizationData] = useState<HodVisualizationState>({
+    reportingPeriodLabel: "N/A",
+    summary: {
+      totalAcademics: 0,
+      totalWorkHours: 0,
+      pendingRequests: 0,
+      approvedRequests: 0,
+      rejectedRequests: 0,
+      workHoursPerAcademic: 0,
+    },
+    totalWorkHoursTrend: [],
+    averageWorkHoursBySemester: [],
   });
   const [exportYearFromInput, setExportYearFromInput] = useState("");
   const [exportYearToInput, setExportYearToInput] = useState("");
@@ -479,15 +369,112 @@ export default function Supervisor() {
     return hodAnnualReports.slice(start, start + hodReportsPerPage);
   }, [hodAnnualReports, hodReportInboxPage]);
 
-  function handleDownloadHodAnnualReport(report: HodAnnualReportItem) {
-    if (!report.rows.length) return;
-    const ws = XLSX.utils.json_to_sheet(report.rows);
-    const wb = XLSX.utils.book_new();
-    XLSX.utils.book_append_sheet(wb, ws, `${report.year}`);
-    XLSX.writeFile(
-      wb,
-      `hod_${report.department.replace(/[^a-z0-9]+/gi, "_").toLowerCase()}_annual_report_${report.year}.xlsx`
-    );
+  async function loadHodRequests() {
+    setLoading(true);
+    setPageError("");
+    try {
+      const response = await apiJson<HodWorkloadListResponse>("/api/supervisor/workload-requests/?page=1&page_size=200");
+      setPending((response.data?.items ?? []).map(mapHodRowToRequest));
+    } catch (error) {
+      if (!isAbortError(error)) {
+        setPending([]);
+        setPageError(error instanceof Error ? error.message : "Failed to load HoD requests.");
+      }
+    } finally {
+      setLoading(false);
+    }
+  }
+
+  async function loadHodReports() {
+    setHodAnnualReports([]);
+  }
+
+  async function loadHodVisualization(yearFrom: string, yearTo: string, semester: "All" | "S1" | "S2") {
+    setVisualizationLoading(true);
+    setVisualError("");
+    try {
+      const params = new URLSearchParams();
+      if (yearFrom) params.set("year_from", yearFrom);
+      if (yearTo) params.set("year_to", yearTo);
+      params.set("semester", semester);
+      const response = await apiJson<HodVisualizationResponse>(`/api/supervisor/visualization/?${params.toString()}`);
+      setVisualizationData({
+        reportingPeriodLabel: response.data?.reporting_period_label ?? "N/A",
+        summary: {
+          totalAcademics: response.data?.summary?.total_academics ?? 0,
+          totalWorkHours: response.data?.summary?.total_work_hours ?? 0,
+          pendingRequests: response.data?.summary?.pending_requests ?? 0,
+          approvedRequests: response.data?.summary?.approved_requests ?? 0,
+          rejectedRequests: response.data?.summary?.rejected_requests ?? 0,
+          workHoursPerAcademic: response.data?.summary?.work_hours_per_academic ?? 0,
+        },
+        totalWorkHoursTrend: (response.data?.total_work_hours_trend ?? []).map((item) => ({
+          period: item.semester,
+          totalWorkHours: item.total_hours,
+        })),
+        averageWorkHoursBySemester: (response.data?.average_work_hours_by_semester ?? []).map((item) => ({
+          period: item.semester,
+          averageWorkHours: item.average_hours,
+        })),
+      });
+    } catch (error) {
+      if (!isAbortError(error)) {
+        setVisualizationData({
+          reportingPeriodLabel: "N/A",
+          summary: {
+            totalAcademics: 0,
+            totalWorkHours: 0,
+            pendingRequests: 0,
+            approvedRequests: 0,
+            rejectedRequests: 0,
+            workHoursPerAcademic: 0,
+          },
+          totalWorkHoursTrend: [],
+          averageWorkHoursBySemester: [],
+        });
+        setVisualError(error instanceof Error ? error.message : "Failed to load visualization.");
+      }
+    } finally {
+      setVisualizationLoading(false);
+    }
+  }
+
+  async function loadHodDetail(id: number) {
+    const response = await apiJson<HodWorkloadDetailResponse>(`/api/supervisor/workload-requests/${id}/`);
+    const mapped = mapHodDetailToRequest(response.data as HodWorkloadDetailPayload);
+    const existing = pending.find((row) => row.id === id);
+    const merged = existing
+      ? {
+          ...existing,
+          ...mapped,
+          semesterLabel: existing.semesterLabel,
+          periodLabel: existing.periodLabel,
+          submittedAt: existing.submittedAt,
+        }
+      : mapped;
+    setPending((prev) => prev.map((row) => (row.id === id ? { ...row, ...merged } : row)));
+    return merged;
+  }
+
+  useEffect(() => {
+    clearLocalStorageKeys([...LEGACY_HOD_STORAGE_KEYS]);
+    const defaultFrom = String(currentYear - 2);
+    const defaultTo = String(currentYear);
+    setVisualYearFromInput(defaultFrom);
+    setVisualYearToInput(defaultTo);
+    setAppliedVisualFilters({
+      yearFrom: defaultFrom,
+      yearTo: defaultTo,
+      semester: "All",
+    });
+    void loadHodRequests();
+    void loadHodReports();
+    void loadHodVisualization(defaultFrom, defaultTo, "All");
+  }, [currentYear]);
+
+  async function handleDownloadHodAnnualReport(report: HodAnnualReportItem) {
+    if (!report.downloadUrl) return;
+    await downloadApiFile(report.downloadUrl, `${report.id}.xlsx`);
   }
 
   const pendingCount = useMemo(
@@ -496,76 +483,8 @@ export default function Supervisor() {
   );
 
   useEffect(() => {
-    setHodAnnualReports((prev) => {
-      const base = (prev.length ? prev : readHodAnnualReports()).map((item) => ({
-        ...item,
-        title: `${item.year} ${item.department} annual report generated`,
-      }));
-      if (base.length) {
-        writeHodAnnualReports(base);
-        return base;
-      }
-      const seeded = [createHodAnnualDemoReport(user.department)];
-      writeHodAnnualReports(seeded);
-      return seeded;
-    });
-  }, [user.department]);
-
-  useEffect(() => {
-    const now = new Date();
-    const existing = readHodAnnualReports();
-    const existingByKey = new Map<string, HodAnnualReportItem>(
-      existing.map((item) => [`${item.year}-${item.department}`, item] as const)
-    );
-    const availableYears = new Set<number>();
-
-    pending.forEach((row) => {
-      if (row.cancelled || row.department !== user.department) return;
-      const parsed = parsePeriod(row.periodLabel);
-      if (!Number.isFinite(parsed.year)) return;
-      if (now < annualReportAvailableOn(parsed.year)) return;
-      availableYears.add(parsed.year);
-    });
-
-    const newReports: HodAnnualReportItem[] = [];
-    const replacedDemoKeys = new Set<string>();
-    availableYears.forEach((year) => {
-      const key = `${year}-${user.department}`;
-      const existingItem = existingByKey.get(key);
-      if (existingItem && !existingItem.isDemo) return;
-      const yearRows = buildHodAnnualReportRows(
-        pending.filter((row) => parsePeriod(row.periodLabel).year === year),
-        user.department
-      );
-      if (!yearRows.length) return;
-      if (existingItem?.isDemo) replacedDemoKeys.add(key);
-      newReports.push({
-        id: `hod-report-${year}-${user.department.replace(/\s+/g, "-").toLowerCase()}-${Date.now()}`,
-        year,
-        department: user.department,
-        title: `${year} ${user.department} annual report generated`,
-        createdAt: new Date().toISOString(),
-        rows: yearRows,
-      });
-    });
-
-    if (!newReports.length) return;
-    const retainedExisting = existing.filter((item) => !replacedDemoKeys.has(`${item.year}-${item.department}`));
-    const next = [...newReports, ...retainedExisting].sort(
-      (a, b) => Date.parse(b.createdAt || "") - Date.parse(a.createdAt || "")
-    );
-    writeHodAnnualReports(next);
-    setHodAnnualReports(next);
-  }, [pending, user.department]);
-
-  useEffect(() => {
     if (!hodReportInboxOpen) return;
-    setHodAnnualReports((prev) => {
-      const now = new Date().toISOString();
-      const next = prev.map((item) => (item.readAt ? item : { ...item, readAt: now }));
-      writeHodAnnualReports(next);
-      return next;
-    });
+    setHodAnnualReports((prev) => prev.map((item) => (item.readAt ? item : { ...item, readAt: new Date().toISOString() })));
   }, [hodReportInboxOpen]);
 
   useEffect(() => {
@@ -604,7 +523,7 @@ export default function Supervisor() {
         if (!(matchByFull || matchByFirst || matchByLast || matchByReversed)) return false;
       }
 
-      const submittedText = submittedTimeById(it.id);
+      const submittedText = submittedAtDisplay(it);
       const submittedDate = new Date(submittedText.replace(" ", "T"));
       const hasValidSubmittedDate = !Number.isNaN(submittedDate.getTime());
       const selectedYear = Number(searchFilters.year);
@@ -634,68 +553,22 @@ export default function Supervisor() {
     const start = (page - 1) * pageSize;
     return itemsForFilter.slice(start, start + pageSize);
   }, [itemsForFilter, page]);
-  const filteredVisualizationItems = useMemo(() => {
-    return pending.filter((item) => {
-      const { year, semester } = parsePeriod(item.periodLabel);
-      if (appliedVisualFilters.semester !== "All" && semester !== appliedVisualFilters.semester) {
-        return false;
-      }
-      if (appliedVisualFilters.yearFrom && Number.isFinite(year) && year < Number(appliedVisualFilters.yearFrom)) {
-        return false;
-      }
-      if (appliedVisualFilters.yearTo && Number.isFinite(year) && year > Number(appliedVisualFilters.yearTo)) {
-        return false;
-      }
-      return true;
-    });
-  }, [pending, appliedVisualFilters]);
-  const visualizationSemesterSlots = useMemo(() => {
-    const parsedYears = filteredVisualizationItems
-      .map((item) => parsePeriod(item.periodLabel).year)
-      .filter((year) => Number.isFinite(year));
-    const dataMaxYear = parsedYears.length > 0 ? Math.max(...parsedYears) : currentYear;
-    const defaultTo = dataMaxYear;
-    const defaultFrom = dataMaxYear - 2;
-    const from = appliedVisualFilters.yearFrom ? Number(appliedVisualFilters.yearFrom) : defaultFrom;
-    const to = appliedVisualFilters.yearTo ? Number(appliedVisualFilters.yearTo) : defaultTo;
-    const safeFrom = Number.isFinite(from) ? from : defaultFrom;
-    const safeTo = Number.isFinite(to) ? to : defaultTo;
-    return buildSemesterSlots(Math.min(safeFrom, safeTo), Math.max(safeFrom, safeTo), appliedVisualFilters.semester);
-  }, [appliedVisualFilters, currentYear, filteredVisualizationItems]);
-  const averageWorkHoursBySemesterData = useMemo(() => {
-    const bucket = new Map<string, { totalHours: number; records: number }>();
-    filteredVisualizationItems.forEach((item) => {
-      const { year, semester } = parsePeriod(item.periodLabel);
-      if (!Number.isFinite(year) || !semester) return;
-      const key = `${year}-${semester}`;
-      const existing = bucket.get(key) ?? { totalHours: 0, records: 0 };
-      existing.totalHours += item.hours;
-      existing.records += 1;
-      bucket.set(key, existing);
-    });
-    return visualizationSemesterSlots.map((slot) => {
-      const value = bucket.get(slot.key);
-      return {
-        semester: slot.label,
-        averageHours: value && value.records > 0 ? Number((value.totalHours / value.records).toFixed(2)) : null,
-      };
-    });
-  }, [filteredVisualizationItems, visualizationSemesterSlots]);
-  const trendChartData = useMemo(() => {
-    const bucket = new Map<string, { totalHours: number }>();
-    filteredVisualizationItems.forEach((item) => {
-      const { year, semester } = parsePeriod(item.periodLabel);
-      if (!Number.isFinite(year) || !semester) return;
-      const key = `${year}-${semester}`;
-      const existing = bucket.get(key) ?? { totalHours: 0 };
-      existing.totalHours += item.hours;
-      bucket.set(key, existing);
-    });
-    return visualizationSemesterSlots.map((slot) => ({
-      semester: slot.label,
-      totalHours: bucket.get(slot.key)?.totalHours ?? null,
-    }));
-  }, [filteredVisualizationItems, visualizationSemesterSlots]);
+  const averageWorkHoursBySemesterData = useMemo(
+    () =>
+      (visualizationData.averageWorkHoursBySemester ?? []).map((item) => ({
+        semester: item.period,
+        averageHours: item.averageWorkHours,
+      })),
+    [visualizationData]
+  );
+  const trendChartData = useMemo(
+    () =>
+      (visualizationData.totalWorkHoursTrend ?? []).map((item) => ({
+        semester: item.period,
+        totalHours: item.totalWorkHours,
+      })),
+    [visualizationData]
+  );
   const averageHoursDomain = useMemo(
     () => computeYAxisDomain(averageWorkHoursBySemesterData.map((item) => item.averageHours)),
     [averageWorkHoursBySemesterData]
@@ -704,34 +577,21 @@ export default function Supervisor() {
     () => computeYAxisDomain(trendChartData.map((item) => item.totalHours)),
     [trendChartData]
   );
-  const visualizationSummary = useMemo(() => {
-    const totalAcademics = filteredVisualizationItems.length;
-    const totalWorkHours = filteredVisualizationItems.reduce((sum, item) => sum + item.hours, 0);
-    const pendingRequests = filteredVisualizationItems.filter((item) => item.status === "pending").length;
-    const approvedRequests = filteredVisualizationItems.filter((item) => item.status === "approved").length;
-    const rejectedRequests = filteredVisualizationItems.filter((item) => item.status === "rejected").length;
-    const workHoursPerAcademic =
-      totalAcademics > 0 ? Number((totalWorkHours / totalAcademics).toFixed(1)) : 0;
-    return {
-      totalAcademics,
-      totalWorkHours,
-      pendingRequests,
-      approvedRequests,
-      rejectedRequests,
-      workHoursPerAcademic,
-    };
-  }, [filteredVisualizationItems]);
-  const reportingPeriodLabel = useMemo(() => {
-    if (visualizationSemesterSlots.length === 0) return "N/A";
-    const first = visualizationSemesterSlots[0];
-    const last = visualizationSemesterSlots[visualizationSemesterSlots.length - 1];
-    if (first.year === last.year) {
-      return `${first.year} ${appliedVisualFilters.semester === "All" ? "All Semesters" : appliedVisualFilters.semester}`;
-    }
-    return `${first.year}-${last.year} ${
-      appliedVisualFilters.semester === "All" ? "All Semesters" : appliedVisualFilters.semester
-    }`;
-  }, [visualizationSemesterSlots, appliedVisualFilters.semester]);
+  const visualizationSummary = useMemo(
+    () => ({
+      totalAcademics: visualizationData.summary?.totalAcademics ?? 0,
+      totalWorkHours: visualizationData.summary?.totalWorkHours ?? 0,
+      pendingRequests: visualizationData.summary?.pendingRequests ?? 0,
+      approvedRequests: visualizationData.summary?.approvedRequests ?? 0,
+      rejectedRequests: visualizationData.summary?.rejectedRequests ?? 0,
+      workHoursPerAcademic: visualizationData.summary?.workHoursPerAcademic ?? 0,
+    }),
+    [visualizationData]
+  );
+  const reportingPeriodLabel = useMemo(
+    () => visualizationData.reportingPeriodLabel || "N/A",
+    [visualizationData]
+  );
 
   function toggleSelected(id: number) {
     setSelectedIds((prev) => {
@@ -749,7 +609,7 @@ export default function Supervisor() {
     return status;
   }
 
-  function handleApplyVisualizationFilter() {
+  async function handleApplyVisualizationFilter() {
     setVisualError("");
     const fromYear = Number(visualYearFromInput);
     const toYear = Number(visualYearToInput);
@@ -768,34 +628,21 @@ export default function Supervisor() {
       yearTo: String(endYear),
       semester: visualSemesterInput,
     });
+    await loadHodVisualization(String(startYear), String(endYear), visualSemesterInput);
   }
 
-  function handleExportExcel() {
+  async function handleExportExcel() {
     setExportMessage("");
-    const rows = pending
-      .filter((item) => {
-        const { year, semester } = parsePeriod(item.periodLabel);
-        if (exportSemesterInput !== "All" && semester !== exportSemesterInput) return false;
-        if (exportYearFromInput && Number.isFinite(year) && year < Number(exportYearFromInput)) return false;
-        if (exportYearToInput && Number.isFinite(year) && year > Number(exportYearToInput)) return false;
-        return true;
-      })
-      .map((item) => ({
-        Name: item.name,
-        StaffID: item.studentId,
-        Title: item.title,
-        Department: item.department,
-        YearSemester: item.periodLabel,
-        Status: statusLabel(item.status),
-        TotalHours: item.hours,
-        SubmittedTime: submittedTimeById(item.id),
-      }));
-
-    const sheet = XLSX.utils.json_to_sheet(rows);
-    const workbook = XLSX.utils.book_new();
-    XLSX.utils.book_append_sheet(workbook, sheet, "Supervisor Workload");
-    XLSX.writeFile(workbook, "Supervisor_Workload.xlsx");
-    setExportMessage(`Exported ${rows.length} records to Supervisor_Workload.xlsx.`);
+    try {
+      const params = new URLSearchParams();
+      if (exportYearFromInput) params.set("year_from", exportYearFromInput);
+      if (exportYearToInput) params.set("year_to", exportYearToInput);
+      params.set("semester", exportSemesterInput);
+      await downloadApiFile(`/api/supervisor/export/?${params.toString()}`, "HoD_Workloads.xlsx");
+      setExportMessage("HoD workload export downloaded.");
+    } catch (error) {
+      setExportMessage(error instanceof Error ? error.message : "Failed to export workloads.");
+    }
   }
 
   const canSubmit =
@@ -804,21 +651,29 @@ export default function Supervisor() {
   async function handleDecision(kind: "approve" | "reject") {
     if (!canSubmit) return;
     setSubmitting(true);
-
-    // Fake: update status locally
-    const nextStatus: MockRequest["status"] =
-      kind === "approve" ? "approved" : "rejected";
     const count = selectedIds.size;
-    const next: MockRequest[] = pending.map((it) => {
-      if (!selectedIds.has(it.id)) return it;
-      return { ...it, status: nextStatus };
-    });
-
-    // Small delay to feel like a real request
-    await new Promise((r) => setTimeout(r, 300));
-    setPending(next);
-    setSelectedIds(new Set());
-    setSubmitting(false);
+    try {
+      await apiJson("/api/supervisor/workload-requests/batch-decision/", {
+        method: "POST",
+        body: JSON.stringify({
+          request_ids: Array.from(selectedIds).map(String),
+          decision: kind === "approve" ? "approved" : "rejected",
+        }),
+      });
+      setSelectedIds(new Set());
+      await loadHodRequests();
+    } catch (error) {
+      setPopup({
+        open: true,
+        title: "Request Failed",
+        message: error instanceof Error ? error.message : "Failed to update HoD decisions.",
+        status: "pending",
+      });
+      setSubmitting(false);
+      return;
+    } finally {
+      setSubmitting(false);
+    }
 
     setPopup({
       open: true,
@@ -836,22 +691,34 @@ export default function Supervisor() {
   async function handleDecisionForId(kind: "approve" | "reject", id: number, note: string) {
     setSubmitting(true);
     try {
-      const nextStatus: MockRequest["status"] =
-        kind === "approve" ? "approved" : "rejected";
-      setPending((prev) =>
-        prev.map((it) =>
-          it.id === id
-            ? { ...it, status: nextStatus, supervisorNote: note.trim() }
-            : it
-        )
-      );
-      // Clear selection if it contains the same row.
+      await apiJson(`/api/supervisor/workload-requests/${id}/decision/`, {
+        method: "POST",
+        body: JSON.stringify({
+          decision: kind === "approve" ? "approved" : "rejected",
+          note: note.trim(),
+          breakdown: detailsBreakdown,
+        }),
+      });
+      await loadHodRequests();
       setSelectedIds((prev) => {
         if (!prev.has(id)) return prev;
         const next = new Set(prev);
         next.delete(id);
         return next;
       });
+      if (detailsItem) {
+        const refreshed = await loadHodDetail(id);
+        setDetailsItem(refreshed);
+        setDetailsBreakdown(refreshed.detailSnapshot?.breakdown ?? normalizeHodBreakdown());
+      }
+    } catch (error) {
+      setPopup({
+        open: true,
+        title: "Request Failed",
+        message: error instanceof Error ? error.message : "Failed to update HoD decision.",
+        status: "pending",
+      });
+      return;
     } finally {
       setSubmitting(false);
     }
@@ -913,17 +780,27 @@ export default function Supervisor() {
     setDetailsBreakdown(null);
   }
 
-  function openDetails(item: MockRequest) {
+  async function openDetails(item: MockRequest) {
     if (item.cancelled) {
       setSupersededNoticeOpen(true);
       return;
     }
-    setDetailsItem(item);
-    setDetailsBreakdown(item.detailSnapshot?.breakdown ?? breakdownById(item.id, item.hours));
-    setDetailsOpen(true);
-    setDetailsEditMode(false);
-    setDescriptionExpanded(false);
-    setDetailsModalError("");
+    try {
+      const detail = await loadHodDetail(item.id);
+      setDetailsItem(detail);
+      setDetailsBreakdown(detail.detailSnapshot?.breakdown ?? normalizeHodBreakdown());
+      setDetailsOpen(true);
+      setDetailsEditMode(false);
+      setDescriptionExpanded(false);
+      setDetailsModalError("");
+    } catch (error) {
+      setPopup({
+        open: true,
+        title: "Load Failed",
+        message: error instanceof Error ? error.message : "Failed to load HoD request detail.",
+        status: "pending",
+      });
+    }
   }
 
   function requestCloseDetails() {
@@ -1031,7 +908,7 @@ export default function Supervisor() {
               onClick={(e) => e.stopPropagation()}
             >
               <div className="-mx-6 -mt-6 mb-4 flex items-center justify-between rounded-t-2xl bg-[#2f4d9c] px-6 py-4 text-white">
-                <div className="text-2xl font-semibold">Annual Department Reports</div>
+                <div className="text-2xl font-semibold">Semester Department Reports</div>
                 <button
                   type="button"
                   aria-label="Close report inbox"
@@ -1043,7 +920,7 @@ export default function Supervisor() {
               </div>
               {hodAnnualReports.length === 0 ? (
                 <div className="rounded-md border border-[#2f4d9c]/30 bg-white px-4 py-5 text-sm text-slate-700">
-                  No annual department report generated yet.
+                  No semester department report generated yet.
                 </div>
               ) : (
                 <>
@@ -1339,7 +1216,15 @@ export default function Supervisor() {
                     </tr>
                   )}
 
-                  {!loading && pageItems.length === 0 && (
+                  {!loading && pageError && (
+                    <tr>
+                      <td colSpan={9} className="px-3 py-6 text-center text-sm font-semibold text-[#dc2626]">
+                        {pageError}
+                      </td>
+                    </tr>
+                  )}
+
+                  {!loading && !pageError && pageItems.length === 0 && (
                     <tr>
                       <td colSpan={9} className="px-3 py-6 text-center text-sm text-slate-500">
                         {statusFilter === "pending"
@@ -1413,7 +1298,7 @@ export default function Supervisor() {
                             <WorkHoursBadge hours={item.hours} />
                           </td>
                           <td className="px-3 py-3 text-right tabular-nums font-sans font-semibold text-slate-800">
-                            {submittedTimeById(item.id)}
+                            {submittedAtDisplay(item)}
                           </td>
                         </tr>
                       );
@@ -1485,7 +1370,15 @@ export default function Supervisor() {
                           <div className="w-32 rounded-sm bg-[#2f4d9c] px-3 py-2 text-center text-base font-semibold text-white">
                             Target teaching ratio
                           </div>
-                          <input readOnly value="50.0%" className="w-full flex-1 rounded-sm border border-[#2f4d9c] px-3 py-2 text-base" />
+                          <input
+                            readOnly
+                            value={
+                              typeof detailsItem.targetTeachingRatio === "number"
+                                ? `${detailsItem.targetTeachingRatio.toFixed(1)}%`
+                                : "—"
+                            }
+                            className="w-full flex-1 rounded-sm border border-[#2f4d9c] px-3 py-2 text-base"
+                          />
                         </div>
 
                         <div className="flex items-center gap-3">
@@ -1493,13 +1386,18 @@ export default function Supervisor() {
                             Actual teaching ratio
                           </div>
                           {(() => {
-                            const source = detailsBreakdown ?? breakdownById(detailsItem.id, detailsItem.hours);
+                            const source = detailsBreakdown ?? detailsItem.detailSnapshot?.breakdown ?? normalizeHodBreakdown();
                             const teaching = source.Teaching.reduce((sum, row) => sum + row.hours, 0);
                             const total = (["Teaching", "Assigned Roles", "HDR", "Service", "Research (residual)"] as BreakdownCategory[]).reduce(
                               (tabSum, tab) => tabSum + source[tab].reduce((sum, row) => sum + row.hours, 0),
                               0
                             );
-                            const ratio = total <= 0 ? "0.0%" : `${((teaching / total) * 100).toFixed(1)}%`;
+                            const ratio =
+                              typeof detailsItem.actualTeachingRatio === "number" && !detailsEditMode
+                                ? `${detailsItem.actualTeachingRatio.toFixed(1)}%`
+                                : total <= 0
+                                  ? "0.0%"
+                                  : `${((teaching / total) * 100).toFixed(1)}%`;
                             return (
                               <input readOnly value={ratio} className="w-full flex-1 rounded-sm border border-[#2f4d9c] px-3 py-2 text-base tabular-nums font-sans" />
                             );
@@ -1535,7 +1433,11 @@ export default function Supervisor() {
                                 )
                               : detailsItem.hours;
                             return (
-                              <input readOnly value={totalHours >= 800 ? "Full-time" : "Part-time"} className="w-full flex-1 rounded-sm border border-[#2f4d9c] px-3 py-2 text-base" />
+                              <input
+                                readOnly
+                                value={detailsItem.employmentType || "—"}
+                                className="w-full flex-1 rounded-sm border border-[#2f4d9c] px-3 py-2 text-base"
+                              />
                             );
                           })()}
                         </div>
@@ -1544,14 +1446,18 @@ export default function Supervisor() {
                           <div className="w-32 rounded-sm bg-[#2f4d9c] px-3 py-2 text-center text-base font-semibold text-white">
                             New Staff
                           </div>
-                          <input readOnly value="No" className="w-full flex-1 rounded-sm border border-[#2f4d9c] px-3 py-2 text-base" />
+                          <input readOnly value={detailsItem.newStaff || "—"} className="w-full flex-1 rounded-sm border border-[#2f4d9c] px-3 py-2 text-base" />
                         </div>
 
                         <div className="flex items-center gap-3">
                           <div className="w-32 rounded-sm bg-[#2f4d9c] px-3 py-2 text-center text-base font-semibold text-white">
                             HoD Review
                           </div>
-                          <input readOnly value="No" className="w-full flex-1 rounded-sm border border-[#2f4d9c] px-3 py-2 text-base" />
+                          <input
+                            readOnly
+                            value={typeof detailsItem.hodReviewRequired === "boolean" ? (detailsItem.hodReviewRequired ? "Yes" : "No") : "—"}
+                            className="w-full flex-1 rounded-sm border border-[#2f4d9c] px-3 py-2 text-base"
+                          />
                         </div>
                       </div>
 
@@ -1595,7 +1501,7 @@ export default function Supervisor() {
                               </tr>
                             </thead>
                             <tbody className="divide-y divide-slate-200 bg-white text-sm text-slate-700">
-                              {(detailsBreakdown?.[detailsTab] ?? breakdownById(detailsItem.id, detailsItem.hours)[detailsTab]).map((row, idx) => (
+                              {(detailsBreakdown?.[detailsTab] ?? detailsItem.detailSnapshot?.breakdown?.[detailsTab] ?? []).map((row, idx) => (
                                 <tr key={`${detailsItem.id}-${detailsTab}-${idx}`}>
                                   <td className="px-3 py-2">
                                     {detailsEditMode ? (
@@ -1653,7 +1559,7 @@ export default function Supervisor() {
                               <tr className="bg-slate-50">
                                 <td className="px-3 py-2 font-semibold">Total</td>
                                 <td className="px-3 py-2 text-right font-semibold tabular-nums font-sans">
-                                  {(detailsBreakdown?.[detailsTab] ?? breakdownById(detailsItem.id, detailsItem.hours)[detailsTab]).reduce(
+                                  {(detailsBreakdown?.[detailsTab] ?? detailsItem.detailSnapshot?.breakdown?.[detailsTab] ?? []).reduce(
                                     (sum, row) => sum + row.hours,
                                     0
                                   )}
@@ -1834,6 +1740,11 @@ export default function Supervisor() {
               </div>
 
               <ReportingPeriodBar periodLabel={reportingPeriodLabel} />
+              {visualizationLoading && (
+                <div className="rounded-md border border-slate-200 bg-white px-4 py-3 text-sm text-slate-500">
+                  Loading visualization...
+                </div>
+              )}
               <VisualizationSummaryCards summary={visualizationSummary} />
 
               <div className="grid grid-cols-1 gap-4 lg:grid-cols-2">

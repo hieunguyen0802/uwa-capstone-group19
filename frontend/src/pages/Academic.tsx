@@ -1,5 +1,4 @@
 import { useEffect, useMemo, useState } from "react";
-import * as XLSX from "xlsx";
 import {
   CartesianGrid,
   Legend,
@@ -23,13 +22,14 @@ import YearRangeSemesterActionRow from "../components/common/YearRangeSemesterAc
 import ThemedNoticeModal, { SUPERSEDED_RECORD_MESSAGE } from "../components/common/ThemedNoticeModal";
 import WorkHoursBadge from "../components/common/WorkHoursBadge";
 import type { ProfileModalUser } from "../components/common/ProfileModalFieldGrid";
+import { apiJson, clearLocalStorageKeys, downloadApiFile, isAbortError } from "../api/runtimeApi";
 
 type AcademicItem = {
   id: number;
   name: string;
   employeeId: string;
   department?: string;
-  /** Job title (shown in detail modal; optional — falls back to generated title by id). */
+  /** Job title returned by the backend. */
   title?: string;
   notes: string;
   hours: number;
@@ -44,6 +44,7 @@ type AcademicItem = {
   supervisorNote?: string;
   /** Admin (or delegate) who assigned this workload task to the staff member. */
   assignedBy?: string;
+  pushedAt?: string;
   /** Display-only field for Academic detail modal (mirrors School Ops detail layout). */
   employmentType?: "Full-time" | "Part-time" | string;
   /** Display-only field for Academic detail modal (mirrors School Ops detail layout). */
@@ -134,36 +135,19 @@ function isDetailHoursAbnormal(item: AcademicItem, breakdown: BreakdownData): bo
   return false;
 }
 
-type SupervisorDraftRequest = {
-  id: number;
-  sourceWorkloadId?: number;
-  studentId: string;
-  semesterLabel: string;
-  periodLabel: string;
-  name: string;
-  unit: string;
-  notes?: string;
-  /** Legacy drafts from localStorage may still use this key. */
-  description?: string;
-  requestReason?: string;
-  title: string;
-  department: string;
-  rate: number;
-  status: "pending";
-  hours: number;
-  targetTeachingRatio?: number;
-  teachingTargetHours?: number;
-  detailSnapshot?: WorkloadDetailSnapshot;
-};
-
 const SUPERVISOR_DRAFT_KEY = "academic_to_supervisor_requests_v1";
 const ACADEMIC_STATUS_SYNC_KEY = "academic_status_sync_v1";
 const ACADEMIC_NOTES_SYNC_KEY = "academic_notes_sync_v1";
-const SUPERVISOR_SYNC_EVENT = "supervisor-status-updated";
-const ACADEMIC_DRAFT_EVENT = "academic-drafts-updated";
 const OPS_ACADEMIC_NOTIFICATION_KEY = "ops_to_academic_notifications_v1";
 const OPS_ACADEMIC_DISTRIBUTED_KEY = "ops_academic_distributed_workloads_v1";
 const REQUEST_REASON_MAX_LENGTH = 240;
+const LEGACY_ACADEMIC_STORAGE_KEYS = [
+  SUPERVISOR_DRAFT_KEY,
+  ACADEMIC_STATUS_SYNC_KEY,
+  ACADEMIC_NOTES_SYNC_KEY,
+  OPS_ACADEMIC_NOTIFICATION_KEY,
+  OPS_ACADEMIC_DISTRIBUTED_KEY,
+] as const;
 const ACADEMIC_DASHBOARD_USER: ProfileModalUser = {
   surname: "Dias",
   firstName: "John",
@@ -171,25 +155,6 @@ const ACADEMIC_DASHBOARD_USER: ProfileModalUser = {
   title: "Lecturer",
   department: "Physics",
   email: "john.dias@uwa.edu.au",
-};
-
-type SupervisorStateRow = {
-  id?: number;
-  studentId?: string;
-  name?: string;
-  title?: string;
-  department?: string;
-  status?: string;
-  cancelled?: boolean;
-  operatedBy?: string;
-  hours?: number;
-  notes?: string;
-  description?: string;
-  targetTeachingRatio?: number;
-  teachingTargetHours?: number;
-  workloadNewStaff?: boolean;
-  hodReview?: string;
-  detailSnapshot?: WorkloadDetailSnapshot;
 };
 
 type AcademicNotification = {
@@ -205,143 +170,117 @@ type AcademicNotification = {
   readAt?: string;
 };
 
-function readAcademicStatusSync(): Record<string, "pending" | "approved" | "rejected"> {
-  if (typeof window === "undefined") return {};
+type AcademicWorkloadRowResponse = {
+  id: string;
+  name: string;
+  employeeId: string;
+  title?: string | null;
+  notes?: string | null;
+  hours: number;
+  targetTeachingRatio?: number | null;
+  teachingTargetHours?: number | null;
+  status: "pending" | "approved" | "rejected" | "";
+  confirmation: "confirmed" | "unconfirmed";
+  confirmationTime?: string | null;
+  supervisorNote?: string | null;
+  assignedBy?: string | null;
+  pushedAt?: string | null;
+  cancelled?: boolean;
+};
 
-  try {
-    const storedAcademicStatusJson = window.localStorage.getItem(ACADEMIC_STATUS_SYNC_KEY);
+type AcademicWorkloadListResponse = {
+  items: AcademicWorkloadRowResponse[];
+  pagination?: {
+    page: number;
+    pageSize: number;
+    totalItems: number;
+    totalPages: number;
+  };
+};
 
-    if (!storedAcademicStatusJson) return {};
+type AcademicWorkloadDetailResponse = AcademicWorkloadRowResponse & {
+  actualTeachingRatio?: number | null;
+  employmentType?: string | null;
+  isNewStaff?: boolean | null;
+  hodReviewRequired?: boolean | null;
+  schoolOperationsNotes?: string | null;
+  applicationReason?: string | null;
+  breakdown?: Partial<Record<BreakdownCategory, BreakdownEntry[]>>;
+  validation?: {
+    isAbnormal?: boolean;
+    reason?: string;
+  };
+};
 
-    const academicStatusMap = JSON.parse(storedAcademicStatusJson);
+type AcademicVisualizationResponse = {
+  reportingPeriodLabel?: string;
+  totalHoursTrend?: Array<{ semester: string; totalHours: number | null }>;
+  myVsDepartmentTrend?: Array<{ semester: string; myHours: number | null; departmentAverage: number | null }>;
+};
 
-    if (!academicStatusMap || typeof academicStatusMap !== "object") return {};
-
-    return academicStatusMap as Record<string, "pending" | "approved" | "rejected">;
-  } catch {
-    return {};
-  }
+function normalizeAcademicBreakdown(
+  breakdown?: Partial<Record<BreakdownCategory, BreakdownEntry[]>>
+): BreakdownData {
+  const source = breakdown ?? {};
+  return {
+    Teaching: Array.isArray(source.Teaching) ? source.Teaching : [],
+    "Assigned Roles": Array.isArray(source["Assigned Roles"]) ? source["Assigned Roles"] ?? [] : [],
+    HDR: Array.isArray(source.HDR) ? source.HDR : [],
+    Service: Array.isArray(source.Service) ? source.Service : [],
+    "Research (residual)": Array.isArray(source["Research (residual)"])
+      ? source["Research (residual)"] ?? []
+      : [],
+  };
 }
 
-function readAcademicNotesSync(): Record<string, string> {
-  if (typeof window === "undefined") return {};
-  try {
-    const storedAcademicNotesJson = window.localStorage.getItem(ACADEMIC_NOTES_SYNC_KEY);
-    if (!storedAcademicNotesJson) return {};
-    const academicNotesMap = JSON.parse(storedAcademicNotesJson);
-    if (!academicNotesMap || typeof academicNotesMap !== "object") return {};
-    return academicNotesMap as Record<string, string>;
-  } catch {
-    return {};
-  }
+function mapAcademicRowToItem(row: AcademicWorkloadRowResponse): AcademicItem {
+  const numericId = Number.parseInt(String(row.id), 10);
+  return {
+    id: Number.isFinite(numericId) ? numericId : Date.now(),
+    name: row.name,
+    employeeId: row.employeeId,
+    department: ACADEMIC_DASHBOARD_USER.department,
+    title: row.title ?? undefined,
+    notes: row.notes ?? "",
+    hours: Number(row.hours ?? 0),
+    targetTeachingRatio: row.targetTeachingRatio ?? undefined,
+    teachingTargetHours: row.teachingTargetHours ?? undefined,
+    status: row.status || "",
+    confirmation: row.confirmation || "unconfirmed",
+    confirmationTime: row.confirmationTime ?? undefined,
+    supervisorNote: row.supervisorNote ?? "",
+    assignedBy: row.assignedBy ?? "",
+    pushedAt: row.pushedAt ?? "",
+    cancelled: Boolean(row.cancelled),
+  };
 }
 
-function applySyncedStatus(
-  rows: AcademicItem[],
-  synced: Record<string, "pending" | "approved" | "rejected">,
-  noteMap: Record<string, string>
-) {
-  return rows.map((item) => {
-    const syncedStatus = synced[String(item.id)];
-    const syncedNote = noteMap[String(item.id)];
-    if (!syncedStatus && !syncedNote) return item;
-    // Keep "-" as initialization when no synced status; otherwise follow HoD sync.
-    const nextStatus: AcademicItem["status"] = syncedStatus || item.status;
-    return {
-      ...item,
-      status: nextStatus,
-      supervisorNote: syncedNote || item.supervisorNote || "",
-    };
-  });
+function mapAcademicDetailToItem(detail: AcademicWorkloadDetailResponse): AcademicItem {
+  const base = mapAcademicRowToItem(detail);
+  const normalizedBreakdown = normalizeAcademicBreakdown(detail.breakdown);
+  const actualTeachingRatio = typeof detail.actualTeachingRatio === "number" ? detail.actualTeachingRatio : null;
+  return {
+    ...base,
+    notes: detail.schoolOperationsNotes ?? detail.notes ?? "",
+    newStaff: typeof detail.isNewStaff === "boolean" ? (detail.isNewStaff ? "Yes" : "No") : "—",
+    hodReview: typeof detail.hodReviewRequired === "boolean" ? (detail.hodReviewRequired ? "Yes" : "No") : "—",
+    detailSnapshot: {
+      breakdown: normalizedBreakdown,
+      actualTeachingRatioDisplay:
+        actualTeachingRatio == null ? "—" : `${(Math.round(actualTeachingRatio * 10) / 10).toFixed(1)}%`,
+      actualTeachingRatioOutOfRange: Boolean(detail.validation?.isAbnormal),
+      showActualTeachingRatioBandWarning: false,
+      actualRatioHoverText: detail.validation?.reason || "",
+      totalHoursDisplay: String(detail.hours ?? base.hours),
+      adminModalHoursAbnormal: Boolean(detail.validation?.isAbnormal),
+      totalHoursTooltipText: detail.validation?.reason || "",
+      employmentType: detail.employmentType ?? "—",
+    },
+  };
 }
 
-function readDistributedItemsForAcademic(employeeId: string): AcademicItem[] {
-  if (typeof window === "undefined") return [];
-  try {
-    const raw = window.localStorage.getItem(OPS_ACADEMIC_DISTRIBUTED_KEY);
-    if (!raw) return [];
-    const parsed = JSON.parse(raw);
-    if (!Array.isArray(parsed)) return [];
-
-    const rows = parsed as SupervisorStateRow[];
-    const filtered = rows.filter((row) => {
-      const sid = String(row.studentId ?? "").trim();
-      return sid === employeeId && row.cancelled !== true && row.status === "approved";
-    });
-    return filtered.map((row, idx) => {
-      const sid = String(row.studentId ?? "").trim();
-      const rawHodReview = String(row.hodReview ?? "").trim().toLowerCase();
-      return {
-        id: Number.isFinite(row.id) ? Number(row.id) : idx + 1,
-        name: String(row.name ?? "").trim() || `Staff ${sid}`,
-        employeeId: sid,
-        department: String(row.department ?? "").trim() || ACADEMIC_DASHBOARD_USER.department,
-        title: String(row.title ?? "").trim() || undefined,
-        notes: String(row.notes ?? row.description ?? "").trim(),
-        hours: typeof row.hours === "number" && Number.isFinite(row.hours) ? row.hours : 0,
-        status: "",
-        confirmation: "unconfirmed",
-        assignedBy: String(row.operatedBy ?? "").trim() || "School Operations",
-        targetTeachingRatio:
-          typeof row.targetTeachingRatio === "number" && Number.isFinite(row.targetTeachingRatio)
-            ? row.targetTeachingRatio
-            : undefined,
-        teachingTargetHours:
-          typeof row.teachingTargetHours === "number" && Number.isFinite(row.teachingTargetHours)
-            ? row.teachingTargetHours
-            : undefined,
-        newStaff: row.workloadNewStaff ? "Yes" : "No",
-        hodReview: rawHodReview === "yes" ? "Yes" : "No",
-        detailSnapshot: row.detailSnapshot,
-      };
-    });
-  } catch {
-    return [];
-  }
-}
-
-function readAcademicNotifications(employeeId: string): AcademicNotification[] {
-  if (typeof window === "undefined") return [];
-  try {
-    const raw = window.localStorage.getItem(OPS_ACADEMIC_NOTIFICATION_KEY);
-    if (!raw) return [];
-    const parsed = JSON.parse(raw);
-    if (!Array.isArray(parsed)) return [];
-    return (parsed as AcademicNotification[])
-      .filter((n) => String(n.recipientStaffId ?? "").trim() === employeeId)
-      .sort((a, b) => {
-        const ta = Date.parse(a.sentAt ?? "");
-        const tb = Date.parse(b.sentAt ?? "");
-        return (Number.isFinite(tb) ? tb : 0) - (Number.isFinite(ta) ? ta : 0);
-      });
-  } catch {
-    return [];
-  }
-}
-
-function markAcademicNotificationRead(employeeId: string, notificationId: string) {
-  if (typeof window === "undefined") return;
-  try {
-    const raw = window.localStorage.getItem(OPS_ACADEMIC_NOTIFICATION_KEY);
-    if (!raw) return;
-    const parsed = JSON.parse(raw);
-    if (!Array.isArray(parsed)) return;
-    const now = new Date().toISOString();
-    const next = (parsed as AcademicNotification[]).map((n) => {
-      if (String(n.recipientStaffId ?? "").trim() !== employeeId) return n;
-      if (n.id !== notificationId) return n;
-      return n.readAt ? n : { ...n, readAt: now };
-    });
-    window.localStorage.setItem(OPS_ACADEMIC_NOTIFICATION_KEY, JSON.stringify(next));
-  } catch {
-    // no-op for local mock state
-  }
-}
-
-function pushedTimeById(id: number) {
-  const day = ((id - 1) % 28) + 1;
-  const hour = 9 + (id % 8);
-  return `2026-03-${String(day).padStart(2, "0")} ${String(hour).padStart(2, "0")}:30`;
+function academicPushedAt(item: AcademicItem): string {
+  return item.pushedAt?.trim() || "";
 }
 
 function formatLocalDateTime(d: Date) {
@@ -353,18 +292,9 @@ function formatLocalDateTime(d: Date) {
   return `${y}-${m}-${day} ${hh}:${mm}`;
 }
 
-function titleById(id: number) {
-  const titles = ["Professor", "Associate Professor", "Senior Lecturer", "Lecturer"];
-  return titles[id % titles.length];
-}
-
-function academicItemTitle(item: AcademicItem) {
-  return item.title ?? titleById(item.id);
-}
-
 function academicConfirmationTimeCell(item: AcademicItem): string {
   if (item.confirmation !== "confirmed") return "";
-  return item.confirmationTime ?? pushedTimeById(item.id);
+  return item.confirmationTime ?? "";
 }
 
 function academicAssignedBy(item: AcademicItem) {
@@ -375,21 +305,11 @@ function parseDateTime(value: string) {
   return new Date(value.replace(" ", "T"));
 }
 
-function yearSemesterById(id: number) {
-  const dt = parseDateTime(pushedTimeById(id));
+function yearSemesterByItem(item: AcademicItem) {
+  const pushedAt = academicPushedAt(item);
+  const dt = pushedAt ? parseDateTime(pushedAt) : new Date("");
   if (Number.isNaN(dt.getTime())) return { year: NaN, semester: "" as "" | "S1" | "S2" };
   return { year: dt.getFullYear(), semester: dt.getMonth() < 6 ? ("S1" as const) : ("S2" as const) };
-}
-
-type SemesterSlot = { key: string; label: string };
-
-function buildSemesterSlots(yearFrom: number, yearTo: number, semesterFilter: "All" | "S1" | "S2") {
-  const slots: SemesterSlot[] = [];
-  for (let year = yearFrom; year <= yearTo; year += 1) {
-    if (semesterFilter === "All" || semesterFilter === "S1") slots.push({ key: `${year}-S1`, label: `${year} S1` });
-    if (semesterFilter === "All" || semesterFilter === "S2") slots.push({ key: `${year}-S2`, label: `${year} S2` });
-  }
-  return slots;
 }
 
 function computeYAxisDomain(values: Array<number | null>) {
@@ -490,8 +410,8 @@ function AcademicDetailModal({
   const [descriptionExpanded, setDescriptionExpanded] = useState(true);
   const [hodNotesExpanded, setHodNotesExpanded] = useState(false);
   const breakdown = useMemo(
-    () => item.detailSnapshot?.breakdown ?? breakdownById(item.id, item.hours),
-    [item.detailSnapshot, item.id, item.hours]
+    () => item.detailSnapshot?.breakdown ?? normalizeAcademicBreakdown(),
+    [item.detailSnapshot]
   );
   const hasHodReviewContent = useMemo(() => {
     const note = item.supervisorNote?.trim() ?? "";
@@ -540,7 +460,7 @@ function AcademicDetailModal({
       <div className="w-full max-w-2xl rounded-md bg-white shadow-lg" onClick={(e) => e.stopPropagation()}>
         <div className="flex items-center justify-between rounded-t-md bg-[#2f4d9c] px-5 py-3 text-white">
           <div className="text-lg font-bold">
-            {`${yearSemesterById(item.id).year}-${yearSemesterById(item.id).semester}-${item.department || "Department N/A"}-Academic`}
+            {`${yearSemesterByItem(item).year}-${yearSemesterByItem(item).semester}-${item.department || "Department N/A"}-Academic`}
           </div>
           <button
             type="button"
@@ -692,14 +612,10 @@ function AcademicDetailModal({
 export default function Academic() {
   const user = ACADEMIC_DASHBOARD_USER;
 
-  const [items, setItems] = useState<AcademicItem[]>(() => {
-    const base = readDistributedItemsForAcademic(ACADEMIC_DASHBOARD_USER.employeeId);
-    const synced = readAcademicStatusSync();
-    const syncedNotes = readAcademicNotesSync();
-    return applySyncedStatus(base, synced, syncedNotes);
-  });
-
-  const [selectedIds, setSelectedIds] = useState<Set<number>>(new Set([1]));
+  const [items, setItems] = useState<AcademicItem[]>([]);
+  const [loadingItems, setLoadingItems] = useState(true);
+  const [pageError, setPageError] = useState("");
+  const [selectedIds, setSelectedIds] = useState<Set<number>>(new Set());
   const [page, setPage] = useState(1);
   const pageSize = 10;
   const [filter, setFilter] = useState<"all" | "pending" | "approved" | "rejected">("all");
@@ -712,15 +628,11 @@ export default function Academic() {
   const [confirmationFilter, setConfirmationFilter] = useState<"" | "confirmed" | "unconfirmed">("");
   const [profileOpen, setProfileOpen] = useState(false);
   const [avatarSrc, setAvatarSrc] = useState<string | null>(null);
-  const [notifications, setNotifications] = useState<AcademicNotification[]>(() =>
-    readAcademicNotifications(ACADEMIC_DASHBOARD_USER.employeeId)
-  );
+  const [notifications] = useState<AcademicNotification[]>([]);
   const [notificationPage, setNotificationPage] = useState(1);
   const [activeNotificationId, setActiveNotificationId] = useState<string | null>(null);
   const [notificationDetailOpen, setNotificationDetailOpen] = useState(false);
-  const [hasNewMessage, setHasNewMessage] = useState(() =>
-    readAcademicNotifications(ACADEMIC_DASHBOARD_USER.employeeId).some((item) => !item.readAt)
-  );
+  const [hasNewMessage] = useState(false);
   const [messagePanelOpen, setMessagePanelOpen] = useState(false);
   const currentYear = useMemo(() => new Date().getFullYear(), []);
   const currentSemester = useMemo<"S1" | "S2">(() => {
@@ -754,10 +666,16 @@ export default function Academic() {
   const [visualYearToInput, setVisualYearToInput] = useState("");
   const [visualSemesterInput, setVisualSemesterInput] = useState<"All" | "S1" | "S2">("All");
   const [visualError, setVisualError] = useState("");
+  const [visualizationLoading, setVisualizationLoading] = useState(false);
   const [appliedVisualFilters, setAppliedVisualFilters] = useState({
     yearFrom: "",
     yearTo: "",
     semester: "All" as "All" | "S1" | "S2",
+  });
+  const [visualizationData, setVisualizationData] = useState<AcademicVisualizationResponse>({
+    reportingPeriodLabel: "N/A",
+    totalHoursTrend: [],
+    myVsDepartmentTrend: [],
   });
   const [exportYearFromInput, setExportYearFromInput] = useState("");
   const [exportYearToInput, setExportYearToInput] = useState("");
@@ -784,6 +702,74 @@ export default function Academic() {
     [selectedYear]
   );
 
+  async function loadAcademicWorkloads() {
+    setLoadingItems(true);
+    setPageError("");
+    try {
+      const response = await apiJson<AcademicWorkloadListResponse>("/api/academic/workloads/");
+      setItems((response.items ?? []).map(mapAcademicRowToItem));
+    } catch (error) {
+      if (!isAbortError(error)) {
+        setItems([]);
+        setPageError(error instanceof Error ? error.message : "Failed to load workloads.");
+      }
+    } finally {
+      setLoadingItems(false);
+    }
+  }
+
+  async function loadAcademicVisualization(yearFrom: string, yearTo: string, semester: "All" | "S1" | "S2") {
+    setVisualizationLoading(true);
+    setVisualError("");
+    try {
+      const params = new URLSearchParams();
+      if (yearFrom) params.set("year_from", yearFrom);
+      if (yearTo) params.set("year_to", yearTo);
+      params.set("semester", semester);
+      const response = await apiJson<AcademicVisualizationResponse>(
+        `/api/academic/visualization/?${params.toString()}`
+      );
+      setVisualizationData({
+        reportingPeriodLabel: response.reportingPeriodLabel || "N/A",
+        totalHoursTrend: response.totalHoursTrend ?? [],
+        myVsDepartmentTrend: response.myVsDepartmentTrend ?? [],
+      });
+    } catch (error) {
+      if (!isAbortError(error)) {
+        setVisualizationData({
+          reportingPeriodLabel: "N/A",
+          totalHoursTrend: [],
+          myVsDepartmentTrend: [],
+        });
+        setVisualError(error instanceof Error ? error.message : "Failed to load visualization.");
+      }
+    } finally {
+      setVisualizationLoading(false);
+    }
+  }
+
+  async function loadAcademicWorkloadDetail(id: number) {
+    const detail = await apiJson<AcademicWorkloadDetailResponse>(`/api/academic/workloads/${id}/`);
+    const mapped = mapAcademicDetailToItem(detail);
+    setItems((prev) => prev.map((item) => (item.id === id ? { ...item, ...mapped } : item)));
+    return mapped;
+  }
+
+  useEffect(() => {
+    clearLocalStorageKeys([...LEGACY_ACADEMIC_STORAGE_KEYS]);
+    const defaultFrom = String(currentYear - 2);
+    const defaultTo = String(currentYear);
+    setVisualYearFromInput(defaultFrom);
+    setVisualYearToInput(defaultTo);
+    setAppliedVisualFilters({
+      yearFrom: defaultFrom,
+      yearTo: defaultTo,
+      semester: "All",
+    });
+    void loadAcademicWorkloads();
+    void loadAcademicVisualization(defaultFrom, defaultTo, "All");
+  }, [currentYear]);
+
   const filteredItems = useMemo(() => {
     let next = searchFilters.status === "all" ? items : items.filter((x) => x.status === searchFilters.status);
 
@@ -794,7 +780,9 @@ export default function Academic() {
     const selectedYearNumber = Number(searchFilters.year);
     if (searchFilters.year && Number.isFinite(selectedYearNumber)) {
       next = next.filter((x) => {
-        const submitted = parseDateTime(pushedTimeById(x.id));
+        const pushedAt = academicPushedAt(x);
+        if (!pushedAt) return false;
+        const submitted = parseDateTime(pushedAt);
         if (Number.isNaN(submitted.getTime())) return false;
 
         if (searchFilters.semester === "S1") {
@@ -822,73 +810,14 @@ export default function Academic() {
   }, [filteredItems, page]);
 
   const detailItem = useMemo(() => items.find((x) => x.id === detailId) || null, [items, detailId]);
-  const filteredVisualizationItems = useMemo(() => {
-    return items.filter((item) => {
-      const { year, semester } = yearSemesterById(item.id);
-      if (appliedVisualFilters.semester !== "All" && semester !== appliedVisualFilters.semester) return false;
-      if (appliedVisualFilters.yearFrom && Number.isFinite(year) && year < Number(appliedVisualFilters.yearFrom)) {
-        return false;
-      }
-      if (appliedVisualFilters.yearTo && Number.isFinite(year) && year > Number(appliedVisualFilters.yearTo)) {
-        return false;
-      }
-      return true;
-    });
-  }, [items, appliedVisualFilters]);
-  const visualizationSemesterSlots = useMemo(() => {
-    const years = filteredVisualizationItems
-      .map((item) => yearSemesterById(item.id).year)
-      .filter((year) => Number.isFinite(year));
-    const maxYear = years.length ? Math.max(...years) : currentYear;
-    const from = appliedVisualFilters.yearFrom ? Number(appliedVisualFilters.yearFrom) : maxYear - 2;
-    const to = appliedVisualFilters.yearTo ? Number(appliedVisualFilters.yearTo) : maxYear;
-    return buildSemesterSlots(Math.min(from, to), Math.max(from, to), appliedVisualFilters.semester);
-  }, [filteredVisualizationItems, appliedVisualFilters, currentYear]);
-  const myVsDepartmentTrendData = useMemo(() => {
-    // Mock comparative trend data by semester for clearer personal-vs-department insights.
-    const mockBySemester: Record<string, { myHours: number; departmentAverage: number }> = {
-      "2024-S1": { myHours: 12.2, departmentAverage: 11.4 },
-      "2024-S2": { myHours: 12.8, departmentAverage: 11.7 },
-      "2025-S1": { myHours: 13.9, departmentAverage: 12.1 },
-      "2025-S2": { myHours: 12.4, departmentAverage: 11.8 },
-      "2026-S1": { myHours: 14.3, departmentAverage: 12.6 },
-      "2026-S2": { myHours: 13.6, departmentAverage: 12.4 },
-    };
-    return visualizationSemesterSlots.map((slot) => {
-      const mock = mockBySemester[slot.key];
-      const [slotYearRaw, slotSemester] = slot.key.split("-");
-      const slotYear = Number(slotYearRaw);
-      const isFutureSemester =
-        Number.isFinite(slotYear) &&
-        (slotYear > currentYear || (slotYear === currentYear && currentSemester === "S1" && slotSemester === "S2"));
-      return {
-        semester: slot.label,
-        myHours: isFutureSemester ? null : (mock?.myHours ?? null),
-        departmentAverage: isFutureSemester ? null : (mock?.departmentAverage ?? null),
-      };
-    });
-  }, [visualizationSemesterSlots, currentYear, currentSemester]);
-  const trendChartData = useMemo(() => {
-    const mockTotalBySemester: Record<string, number> = {
-      "2024-S1": 260,
-      "2024-S2": 275,
-      "2025-S1": 289,
-      "2025-S2": 255,
-      "2026-S1": 291,
-      "2026-S2": 284,
-    };
-    return visualizationSemesterSlots.map((slot) => ({
-      semester: slot.label,
-      totalHours: (() => {
-        const [slotYearRaw, slotSemester] = slot.key.split("-");
-        const slotYear = Number(slotYearRaw);
-        const isFutureSemester =
-          Number.isFinite(slotYear) &&
-          (slotYear > currentYear || (slotYear === currentYear && currentSemester === "S1" && slotSemester === "S2"));
-        return isFutureSemester ? null : (mockTotalBySemester[slot.key] ?? null);
-      })(),
-    }));
-  }, [visualizationSemesterSlots, currentYear, currentSemester]);
+  const myVsDepartmentTrendData = useMemo(
+    () => visualizationData.myVsDepartmentTrend ?? [],
+    [visualizationData]
+  );
+  const trendChartData = useMemo(
+    () => visualizationData.totalHoursTrend ?? [],
+    [visualizationData]
+  );
   const compareTrendDomain = useMemo(
     () =>
       computeYAxisDomain(
@@ -901,56 +830,10 @@ export default function Academic() {
     [trendChartData]
   );
 
-  useEffect(() => {
-    // Safety cleanup: remove legacy blocked message from earlier client-only logic.
-    if (requestInfo.toLowerCase().startsWith("submit blocked:")) {
-      setRequestInfo("");
-    }
-  }, [requestInfo]);
-  const reportingPeriodLabel = useMemo(() => {
-    if (!visualizationSemesterSlots.length) return "N/A";
-    const firstYear = Number(visualizationSemesterSlots[0].key.split("-")[0]);
-    const lastYear = Number(visualizationSemesterSlots[visualizationSemesterSlots.length - 1].key.split("-")[0]);
-    if (!Number.isFinite(firstYear) || !Number.isFinite(lastYear)) return "N/A";
-    if (firstYear === lastYear) {
-      return `${firstYear} ${appliedVisualFilters.semester === "All" ? "All Semesters" : appliedVisualFilters.semester}`;
-    }
-    return `${firstYear}-${lastYear} ${
-      appliedVisualFilters.semester === "All" ? "All Semesters" : appliedVisualFilters.semester
-    }`;
-  }, [visualizationSemesterSlots, appliedVisualFilters.semester]);
-
-  useEffect(() => {
-    function syncFromSupervisor() {
-      const distributed = readDistributedItemsForAcademic(user.employeeId);
-      const synced = readAcademicStatusSync();
-      const syncedNotes = readAcademicNotesSync();
-      setItems(applySyncedStatus(distributed, synced, syncedNotes));
-      const nextNotifications = readAcademicNotifications(user.employeeId);
-      setNotifications(nextNotifications);
-      setHasNewMessage(nextNotifications.some((item) => !item.readAt));
-      setNotificationPage((prev) => Math.min(Math.max(1, prev), Math.max(1, Math.ceil(nextNotifications.length / 10))));
-      setActiveNotificationId((prev) => (prev && nextNotifications.some((item) => item.id === prev) ? prev : null));
-    }
-
-    function onStorage(e: StorageEvent) {
-      if (
-        e.key === OPS_ACADEMIC_DISTRIBUTED_KEY ||
-        e.key === ACADEMIC_STATUS_SYNC_KEY ||
-        e.key === ACADEMIC_NOTES_SYNC_KEY ||
-        e.key === OPS_ACADEMIC_NOTIFICATION_KEY
-      ) {
-        syncFromSupervisor();
-      }
-    }
-
-    window.addEventListener("storage", onStorage);
-    window.addEventListener(SUPERVISOR_SYNC_EVENT, syncFromSupervisor as EventListener);
-    return () => {
-      window.removeEventListener("storage", onStorage);
-      window.removeEventListener(SUPERVISOR_SYNC_EVENT, syncFromSupervisor as EventListener);
-    };
-  }, []);
+  const reportingPeriodLabel = useMemo(
+    () => visualizationData.reportingPeriodLabel || "N/A",
+    [visualizationData]
+  );
 
   function toggleRow(id: number) {
     setSelectedIds((prev) => {
@@ -959,57 +842,23 @@ export default function Academic() {
     });
   }
 
-  function submitRequestToSupervisor(reason: string) {
+  async function submitRequestToSupervisor(reason: string) {
     const rows = items.filter((x) => selectedIds.has(x.id));
     if (!rows.length) return;
-
-    const drafts: SupervisorDraftRequest[] = rows.map((row, idx) => ({
-      id: Date.now() + idx,
-      sourceWorkloadId: row.id,
-      studentId: row.employeeId,
-      semesterLabel: "Sem1",
-      periodLabel: "2025-1",
-      name: row.name,
-      unit: "CITS 2200",
-      notes: row.notes,
-      requestReason: reason,
-      title: user.title,
-      department: user.department,
-      rate: 70,
-      status: "pending",
-      hours: row.hours,
-      targetTeachingRatio: row.targetTeachingRatio,
-      teachingTargetHours: row.teachingTargetHours,
-      detailSnapshot: row.detailSnapshot,
-    }));
-
-    if (typeof window !== "undefined") {
-      const raw = window.localStorage.getItem(SUPERVISOR_DRAFT_KEY);
-      const existing = raw ? (JSON.parse(raw) as SupervisorDraftRequest[]) : [];
-      window.localStorage.setItem(SUPERVISOR_DRAFT_KEY, JSON.stringify([...drafts, ...existing]));
-
-      // Persist pending status immediately so Academic table won't fall back to "-"
-      // when other localStorage sync flows refresh rows from distributed snapshots.
-      const statusRaw = window.localStorage.getItem(ACADEMIC_STATUS_SYNC_KEY);
-      const statusMap =
-        statusRaw && typeof statusRaw === "string"
-          ? (JSON.parse(statusRaw) as Record<string, "pending" | "approved" | "rejected">)
-          : {};
-      rows.forEach((row) => {
-        statusMap[String(row.id)] = "pending";
+    try {
+      await apiJson<{ submittedCount?: number }>("/api/academic/workload-requests/", {
+        method: "POST",
+        body: JSON.stringify({
+          workloadIds: rows.map((row) => String(row.id)),
+          applicationReason: reason,
+        }),
       });
-      window.localStorage.setItem(ACADEMIC_STATUS_SYNC_KEY, JSON.stringify(statusMap));
-      window.dispatchEvent(new Event(SUPERVISOR_SYNC_EVENT));
-      window.dispatchEvent(new Event(ACADEMIC_DRAFT_EVENT));
+      setSelectedIds(new Set());
+      await loadAcademicWorkloads();
+      setRequestInfo(`${rows.length} request(s) have been submitted to Supervisor.`);
+    } catch (error) {
+      setRequestInfo(error instanceof Error ? error.message : "Failed to submit request.");
     }
-
-    setSelectedIds(new Set());
-    setItems((prev) =>
-      prev.map((x) =>
-        rows.some((r) => r.id === x.id) ? { ...x, status: "pending" } : x
-      )
-    );
-    setRequestInfo(`${rows.length} request(s) have been submitted to Supervisor.`);
   }
 
   function openRequestModal() {
@@ -1024,7 +873,7 @@ export default function Academic() {
     setRequestModalOpen(true);
   }
 
-  function handleRequestSubmit() {
+  async function handleRequestSubmit() {
     const trimmed = requestReason.trim();
     if (!trimmed) {
       setRequestReasonError("Application reason is required.");
@@ -1034,7 +883,7 @@ export default function Academic() {
       setRequestReasonError(`Application reason must be ${REQUEST_REASON_MAX_LENGTH} characters or less.`);
       return;
     }
-    submitRequestToSupervisor(trimmed);
+    await submitRequestToSupervisor(trimmed);
     setRequestModalOpen(false);
   }
 
@@ -1050,40 +899,38 @@ export default function Academic() {
     event.target.value = "";
   }
 
-  function handleConfirmFromDetail(id: number) {
-    const now = formatLocalDateTime(new Date());
-    setItems((prev) =>
-      prev.map((item) =>
-        item.id === id
-          ? {
-              ...item,
-              confirmation: "confirmed",
-              confirmationTime: item.confirmationTime ?? now,
-            }
-          : item
-      )
-    );
+  async function handleConfirmFromDetail(id: number) {
+    try {
+      const response = await apiJson<{ confirmation: "confirmed"; confirmationTime?: string }>(
+        `/api/academic/workloads/${id}/confirm/`,
+        { method: "POST" }
+      );
+      setItems((prev) =>
+        prev.map((item) =>
+          item.id === id
+            ? {
+                ...item,
+                confirmation: response.confirmation,
+                confirmationTime: response.confirmationTime || item.confirmationTime,
+              }
+            : item
+        )
+      );
+    } catch (error) {
+      setRequestInfo(error instanceof Error ? error.message : "Failed to confirm workload.");
+    }
   }
 
   function openMessagePanel() {
-    const nextNotifications = readAcademicNotifications(user.employeeId);
-    setNotifications(nextNotifications);
     setNotificationPage(1);
-    setActiveNotificationId(nextNotifications[0]?.id ?? null);
+    setActiveNotificationId(null);
     setNotificationDetailOpen(false);
     setMessagePanelOpen(true);
-    setHasNewMessage(nextNotifications.some((item) => !item.readAt));
   }
 
   function handleOpenNotification(item: AcademicNotification) {
     setActiveNotificationId(item.id);
     setNotificationDetailOpen(true);
-    if (!item.readAt) {
-      markAcademicNotificationRead(user.employeeId, item.id);
-      const nextNotifications = readAcademicNotifications(user.employeeId);
-      setNotifications(nextNotifications);
-      setHasNewMessage(nextNotifications.some((next) => !next.readAt));
-    }
   }
 
   function handleSearch() {
@@ -1096,7 +943,7 @@ export default function Academic() {
     setPage(1);
   }
 
-  function handleApplyVisualizationFilter() {
+  async function handleApplyVisualizationFilter() {
     setVisualError("");
     const fromYear = Number(visualYearFromInput);
     const toYear = Number(visualYearToInput);
@@ -1115,35 +962,21 @@ export default function Academic() {
       yearTo: String(endYear),
       semester: visualSemesterInput,
     });
+    await loadAcademicVisualization(String(startYear), String(endYear), visualSemesterInput);
   }
 
-  function handleExportExcel() {
+  async function handleExportExcel() {
     setExportMessage("");
-    const rows = items
-      .filter((item) => {
-        const { year, semester } = yearSemesterById(item.id);
-        if (exportSemesterInput !== "All" && semester !== exportSemesterInput) return false;
-        if (exportYearFromInput && Number.isFinite(year) && year < Number(exportYearFromInput)) return false;
-        if (exportYearToInput && Number.isFinite(year) && year > Number(exportYearToInput)) return false;
-        return true;
-      })
-      .map((item) => ({
-        Name: item.name,
-        EmployeeID: item.employeeId,
-        Title: academicItemTitle(item),
-        Notes: item.notes,
-        Status: statusLabel(item.status) || "-",
-        Confirmation: confirmationLabel(item.confirmation),
-        ConfirmationTime: academicConfirmationTimeCell(item) || "-",
-        TotalHours: item.hours,
-        PushTime: pushedTimeById(item.id),
-        AssignedBy: academicAssignedBy(item),
-      }));
-    const sheet = XLSX.utils.json_to_sheet(rows);
-    const workbook = XLSX.utils.book_new();
-    XLSX.utils.book_append_sheet(workbook, sheet, "Academic Workload");
-    XLSX.writeFile(workbook, "Academic_Workload.xlsx");
-    setExportMessage(`Exported ${rows.length} records to Academic_Workload.xlsx.`);
+    try {
+      const params = new URLSearchParams();
+      if (exportYearFromInput) params.set("year_from", exportYearFromInput);
+      if (exportYearToInput) params.set("year_to", exportYearToInput);
+      params.set("semester", exportSemesterInput);
+      await downloadApiFile(`/api/academic/export/?${params.toString()}`, "Academic_Workload.xlsx");
+      setExportMessage("Academic workload export downloaded.");
+    } catch (error) {
+      setExportMessage(error instanceof Error ? error.message : "Failed to export workload.");
+    }
   }
 
   return (
@@ -1385,7 +1218,11 @@ export default function Academic() {
                             setSupersededNoticeOpen(true);
                             return;
                           }
-                          setDetailId(item.id);
+                          void loadAcademicWorkloadDetail(item.id)
+                            .then(() => setDetailId(item.id))
+                            .catch((error) => {
+                              setRequestInfo(error instanceof Error ? error.message : "Failed to load workload detail.");
+                            });
                         }}
                         className={`text-sm ${
                           rowCancelled
@@ -1454,12 +1291,26 @@ export default function Academic() {
                             rowCancelled ? "text-slate-500" : "text-slate-800"
                           }`}
                         >
-                          {pushedTimeById(item.id)}
+                          {academicPushedAt(item) || "—"}
                         </td>
                       </tr>
                     );
                   })}
-                  {pageItems.length === 0 && (
+                  {loadingItems && (
+                    <tr>
+                      <td colSpan={9} className="px-3 py-6 text-center text-sm text-slate-500">
+                        Loading...
+                      </td>
+                    </tr>
+                  )}
+                  {!loadingItems && pageError && (
+                    <tr>
+                      <td colSpan={9} className="px-3 py-6 text-center text-sm font-semibold text-[#dc2626]">
+                        {pageError}
+                      </td>
+                    </tr>
+                  )}
+                  {!loadingItems && !pageError && pageItems.length === 0 && (
                     <tr>
                       <td colSpan={9} className="px-3 py-6 text-center text-sm text-slate-500">
                         No items found
@@ -1527,6 +1378,11 @@ export default function Academic() {
                 </div>
               </div>
               <ReportingPeriodBar periodLabel={reportingPeriodLabel} />
+              {visualizationLoading && (
+                <div className="rounded-md border border-slate-200 bg-white px-4 py-3 text-sm text-slate-500">
+                  Loading visualization...
+                </div>
+              )}
               <div className="grid grid-cols-1 gap-4 lg:grid-cols-2">
                 <div className="rounded-md border border-slate-200 bg-white p-4">
                   <div className="mb-2 text-base font-semibold text-slate-700">Total Work Hours Trend</div>
@@ -1663,8 +1519,8 @@ export default function Academic() {
         <AcademicDetailModal
           item={detailItem}
           onClose={() => setDetailId(null)}
-          onConfirm={() => {
-            handleConfirmFromDetail(detailItem.id);
+          onConfirm={async () => {
+            await handleConfirmFromDetail(detailItem.id);
             setDetailId(null);
           }}
         />
