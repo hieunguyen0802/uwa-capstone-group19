@@ -1305,3 +1305,108 @@ class TestAdminOpsContract(BaseTestCase):
         download = client.get(f'/api/admin/export/download/?token={token}')
         self.assertEqual(download.status_code, 200)
         self.assertIn('spreadsheetml', download['Content-Type'])
+
+
+class TestCodexAuditFixes(BaseTestCase):
+    """Regressions for the four codex findings on feature/jaffrey-auditlog-history."""
+
+    def _staff_import_row(self, staff_number, **overrides):
+        row = {
+            'staffId': staff_number,
+            'firstName': 'First',
+            'lastName': 'Last',
+            'email': 'valid@example.com',
+            'department': self.dept_csse.name,
+        }
+        row.update(overrides)
+        return row
+
+    def test_p1_report_history_unauth_returns_401_not_500(self):
+        # No JWT → must be 401 from DRF, not 500 from missing request.staff.
+        res = self.client.get(f'/api/reports/{self.report.report_id}/history/')
+        self.assertEqual(res.status_code, 401)
+
+    def test_p1_report_history_authenticated_authorized_returns_200(self):
+        # Missing @require_role previously crashed with AttributeError for any
+        # authenticated caller. An authenticated HoD on their own department must now succeed.
+        client = self._auth_client(self.hod_csse)
+        res = client.get(f'/api/reports/{self.report.report_id}/history/')
+        self.assertEqual(res.status_code, 200)
+        self.assertTrue(res.data['success'])
+
+    def test_p1_staff_import_rejects_bad_dept_without_persisting_user(self):
+        # Row with valid email + invalid department must leave user_obj untouched.
+        target = self.academic
+        original_email = target.user.email
+        client = self._auth_client(self.ops)
+        res = client.post(
+            '/api/admin/staff/import/',
+            {'rows': [self._staff_import_row(
+                target.staff_number,
+                email='new-email@example.com',
+                department='Nonexistent Department',
+            )]},
+            format='json',
+        )
+        self.assertEqual(res.status_code, 200)
+        self.assertEqual(res.data['updated'], 0)
+        self.assertEqual(len(res.data['errors']), 1)
+        self.assertEqual(res.data['errors'][0]['message'], 'department not found')
+
+        target.user.refresh_from_db()
+        self.assertEqual(target.user.email, original_email,
+                         'user_obj must not persist when a later field validation fails')
+
+    def test_p2_duplicate_workload_items_preserved_in_diff(self):
+        from api.services.audit_service import compute_workload_item_diffs
+
+        before = [
+            {'category': 'TEACHING', 'unit_code': 'CITS1001', 'description': None, 'allocated_hours': '100'},
+            {'category': 'TEACHING', 'unit_code': 'CITS1001', 'description': None, 'allocated_hours': '50'},
+        ]
+        after = [
+            {'category': 'TEACHING', 'unit_code': 'CITS1001', 'description': None, 'allocated_hours': '120'},
+        ]
+        diffs = compute_workload_item_diffs(before, after)
+        befores = [d['before'] for d in diffs]
+        afters = [d['after'] for d in diffs]
+        # Exactly two before values must appear (100 and 50) — the collapsed
+        # implementation used to keep only one.
+        self.assertIn('100', befores)
+        self.assertIn('50', befores)
+        # Removed duplicate must show up as after=''.
+        self.assertTrue(any(b == '50' and a == '' for b, a in zip(befores, afters)),
+                        f'expected removed duplicate row in diffs, got {diffs}')
+
+    def test_p2_report_history_walks_superseded_chain(self):
+        # Build a 3-report chain (v1 → v2 → v3) and audit entries on each.
+        v1 = self.report
+        v1.is_current = False
+        v2 = WorkloadReport.objects.create(
+            staff=self.academic, academic_year=2025, semester='S1',
+            snapshot_fte=self.academic.fte, snapshot_department=self.dept_csse,
+            status='INITIAL', is_current=False,
+        )
+        v3 = WorkloadReport.objects.create(
+            staff=self.academic, academic_year=2025, semester='S1',
+            snapshot_fte=self.academic.fte, snapshot_department=self.dept_csse,
+            status='INITIAL', is_current=True,
+        )
+        v1.superseded_by = v2
+        v1.save(update_fields=['is_current', 'superseded_by'])
+        v2.superseded_by = v3
+        v2.save(update_fields=['is_current', 'superseded_by'])
+
+        AuditLog.objects.create(report=v1, action_by=self.hod_csse, action_type='APPROVE', comment='v1-approve')
+        AuditLog.objects.create(report=v2, action_by=self.ops, action_type='MODIFIED_BY_REIMPORT')
+        AuditLog.objects.create(report=v3, action_by=self.ops, action_type='IMPORTED')
+
+        client = self._auth_client(self.hod_csse)
+        res = client.get(f'/api/reports/{v3.report_id}/history/')
+        self.assertEqual(res.status_code, 200)
+        action_types = [entry['action_type'] for entry in res.data['data']['items']]
+        # All three predecessors' audit rows must be merged into the timeline.
+        self.assertIn('APPROVE', action_types)
+        self.assertIn('MODIFIED_BY_REIMPORT', action_types)
+        self.assertIn('IMPORTED', action_types)
+
