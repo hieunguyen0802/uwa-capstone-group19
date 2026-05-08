@@ -331,13 +331,26 @@ def academic_confirm_workload(request, id):
 @transaction.atomic
 def academic_submit_workload_requests(request):
     """POST /api/academic/workload-requests/"""
-    # v3 contract uses camelCase keys
-    workload_ids = request.data.get('workloadIds') or []
-    reason = (request.data.get('reason') or '').strip()
+    # v3 contract uses camelCase keys. Accept cai's single-item
+    # sourceWorkloadId/applicationReason shape and the existing batch shape.
+    workload_ids = request.data.get('workloadIds') or request.data.get('workload_ids')
+    if workload_ids is None:
+        source_workload_id = (
+            request.data.get('sourceWorkloadId')
+            or request.data.get('source_workload_id')
+            or request.data.get('workloadId')
+        )
+        workload_ids = [source_workload_id] if source_workload_id else []
+    reason = (
+        request.data.get('reason')
+        or request.data.get('applicationReason')
+        or request.data.get('requestReason')
+        or ''
+    ).strip()
 
     if not isinstance(workload_ids, list) or not workload_ids:
         return Response(
-            {'detail': 'workloadIds must be a non-empty list'},
+            {'detail': 'workloadIds or sourceWorkloadId must be provided'},
             status=status.HTTP_400_BAD_REQUEST,
         )
 
@@ -349,7 +362,7 @@ def academic_submit_workload_requests(request):
 
     if not reason:
         return Response(
-            {'detail': 'reason is required'},
+            {'detail': 'reason or applicationReason is required'},
             status=status.HTTP_400_BAD_REQUEST,
         )
 
@@ -412,7 +425,11 @@ def academic_submit_workload_requests(request):
             action_by=request.staff,
             action_type='COMMENT',
             comment=reason,
-            changes={'kind': 'WORKLOAD_REQUEST', 'status': 'pending'},
+            changes={
+                'kind': 'WORKLOAD_REQUEST',
+                'status': 'pending',
+                'source_workload_id': str(report.report_id),
+            },
         )
         report.status = 'PENDING'
         report.save(update_fields=['status', 'updated_at'])
