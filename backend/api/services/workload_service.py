@@ -4,6 +4,19 @@ from api.models import WorkloadReport
 
 POINT_TO_HOURS = Decimal('17.25')
 
+STALE_REPORT_ERROR = {
+    'success': False,
+    'code': 'REPORT_SUPERSEDED',
+    'message': 'This record has been superseded by a newer import. Please reload the page and retry.',
+}
+
+
+def stale_report_response_payload(extra=None):
+    payload = dict(STALE_REPORT_ERROR)
+    if extra:
+        payload.update(extra)
+    return payload
+
 
 def get_workload_queryset(staff):
     """

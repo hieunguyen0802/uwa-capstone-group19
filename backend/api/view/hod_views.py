@@ -20,8 +20,8 @@ from rest_framework.permissions import IsAuthenticated
 from rest_framework.response import Response
 
 from api.decorators import require_role
-from api.models import AuditLog, WorkloadItem
-from api.services.workload_service import get_workload_queryset
+from api.models import AuditLog, WorkloadItem, WorkloadReport
+from api.services.workload_service import get_workload_queryset, stale_report_response_payload
 
 
 CATEGORY_LABELS = {
@@ -337,7 +337,15 @@ def hod_workload_request_decision(request, id):
         )
 
     qs = _hod_visible_qs(request.staff)
-    report = get_object_or_404(qs, report_id=id)
+    report = qs.filter(report_id=id).first()
+    if report is None:
+        stale = WorkloadReport.objects.filter(report_id=id, is_current=False).first()
+        if stale is not None:
+            return Response(stale_report_response_payload(), status=http_status.HTTP_409_CONFLICT)
+        return Response(
+            {'success': False, 'message': 'Report not found'},
+            status=http_status.HTTP_404_NOT_FOUND,
+        )
 
     if report.status != 'PENDING':
         return Response(

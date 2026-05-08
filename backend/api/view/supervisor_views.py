@@ -13,7 +13,7 @@ from rest_framework.permissions import IsAuthenticated
 from rest_framework.response import Response
 
 from api.decorators import require_role
-from api.models import AuditLog, WorkloadItem
+from api.models import AuditLog, WorkloadItem, WorkloadReport
 from api.services.audit_service import (
     compute_workload_item_diffs,
     snapshot_workload_items,
@@ -21,6 +21,7 @@ from api.services.audit_service import (
 )
 from api.services.workload_service import (
     get_workload_queryset,
+    stale_report_response_payload,
     _parse_year_range,
     _filter_reports_by_range,
     _build_semester_label,
@@ -319,6 +320,17 @@ def supervisor_batch_decision(request):
     reports = list(qs.filter(report_id__in=request_ids))
 
     if len(reports) != len(request_ids):
+        found_ids = {str(r.report_id) for r in reports}
+        missing_ids = [rid for rid in request_ids if str(rid) not in found_ids]
+        stale_ids = list(
+            WorkloadReport.objects.filter(report_id__in=missing_ids, is_current=False)
+            .values_list('report_id', flat=True)
+        )
+        if stale_ids:
+            return Response(
+                stale_report_response_payload({'errors': {'request_ids': [str(x) for x in stale_ids]}}),
+                status=http_status.HTTP_409_CONFLICT,
+            )
         return Response(
             {'success': False, 'message': 'One or more request ids are invalid or not accessible'},
             status=http_status.HTTP_400_BAD_REQUEST,
@@ -380,7 +392,15 @@ def supervisor_single_decision(request, id):
         )
 
     qs = _hod_visible_qs(request.staff)
-    report = get_object_or_404(qs, report_id=id)
+    report = qs.filter(report_id=id).first()
+    if report is None:
+        stale = WorkloadReport.objects.filter(report_id=id, is_current=False).first()
+        if stale is not None:
+            return Response(stale_report_response_payload(), status=http_status.HTTP_409_CONFLICT)
+        return Response(
+            {'success': False, 'message': 'Report not found'},
+            status=http_status.HTTP_404_NOT_FOUND,
+        )
 
     if report.status != 'PENDING':
         return Response(
