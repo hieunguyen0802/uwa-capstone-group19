@@ -27,6 +27,16 @@ from api.view.hos_views import (
     hos_visualization,
     hos_export,
 )
+from api.view.hod_views import (
+    hod_workload_requests,
+    hod_workload_request_detail,
+    hod_workload_request_decision,
+)
+from api.view.hos_v3_views import (
+    hos_workload_requests,
+    hos_workload_request_detail,
+    hos_workload_request_decision,
+)
 from api.view.academic_views import (
     academic_workloads,
     academic_workload_detail,
@@ -77,6 +87,16 @@ urlpatterns = [
 
     # Import (SCHOOL_OPS only)
     path('import/workload/', import_workload_view),
+
+    # HoD APIs (v3, aligned to frontend contract `hod-hos-frontend-api.zh-en(1).md` §5)
+    path('hod/workload-requests/', hod_workload_requests),
+    path('hod/workload-requests/<str:id>/', hod_workload_request_detail),
+    path('hod/workload-requests/<str:id>/decision/', hod_workload_request_decision),
+
+    # HoS APIs (v3, §6) — school-wide scope, distinct from HoD department scope.
+    path('hos/workload-requests/', hos_workload_requests),
+    path('hos/workload-requests/<str:id>/', hos_workload_request_detail),
+    path('hos/workload-requests/<str:id>/decision/', hos_workload_request_decision),
 
     # Supervisor — new contract (8.2–8.8)
     # batch-decision must come before <str:id>/ to avoid routing conflict
