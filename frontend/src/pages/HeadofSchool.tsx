@@ -15,13 +15,32 @@ import {
   YAxis,
 } from "recharts";
 import ExcelJS from "exceljs";
-import * as XLSX from "xlsx";
 import DashboardHeader from "../components/common/DashboardHeader";
 import FilterFormRow from "../components/common/FilterFormRow";
 import PaginationControls from "../components/common/PaginationControls";
 import ProfileModal from "../components/common/ProfileModal";
 import SearchButton from "../components/common/SearchButton";
-import { MOCK_DASHBOARD_USER } from "../data/mockDashboardUser";
+import {
+  createHosRoleAssignment,
+  decideHosWorkload,
+  disableHosRoleAssignment,
+  downloadHosSemesterReport,
+  exportHosWorkloads,
+  fetchHosAnalytics,
+  fetchHosRoleAssignments,
+  fetchHosSemesterReports,
+  fetchHosStaffDirectory,
+  fetchHosWorkloadDetail,
+  fetchHosWorkloadRequests,
+  importHosStaffDirectory,
+  type HosAnalyticsPayload,
+  type HosBreakdown,
+  type HosSemesterReport,
+  type HosWorkloadDetail,
+  type HosWorkloadRow,
+} from "../api/hos";
+import { useAuth } from "../auth/AuthContext";
+import { profileFromAuth } from "../auth/profileFromAuth";
 import SectionTabs from "../components/common/SectionTabs";
 import SectionTitleBlock from "../components/common/SectionTitleBlock";
 import StaffProfileModal, { type StaffProfileDraft } from "../components/common/StaffProfileModal";
@@ -31,7 +50,7 @@ import ThemedNoticeModal, { SUPERSEDED_RECORD_MESSAGE } from "../components/comm
 import WorkHoursBadge from "../components/common/WorkHoursBadge";
 
 type MockRequest = {
-  id: number;
+  id: string;
   studentId: string;
   semesterLabel: string;
   periodLabel: string;
@@ -46,6 +65,8 @@ type MockRequest = {
   status: "pending" | "approved" | "rejected";
   hours: number;
   supervisorNote?: string;
+  submittedAt?: string | null;
+  version?: string | null;
   /** When true (from API), row is read-only and detail is blocked — superseded by a newer version. */
   cancelled?: boolean;
 };
@@ -54,129 +75,17 @@ type BreakdownCategory = "Teaching" | "Assigned Roles" | "HDR" | "Service" | "Re
 type BreakdownEntry = { name: string; hours: number };
 type BreakdownData = Record<BreakdownCategory, BreakdownEntry[]>;
 
-const SUPERVISOR_DRAFT_KEY = "academic_to_supervisor_requests_v1";
-const SUPERVISOR_STATE_KEY = "supervisor_requests_state_v1";
-const HOD_ASSIGNMENTS_KEY = "hod_role_assignments_v1";
-const ACADEMIC_STATUS_SYNC_KEY = "academic_status_sync_v1";
-const ACADEMIC_NOTES_SYNC_KEY = "academic_notes_sync_v1";
-const SUPERVISOR_SYNC_EVENT = "supervisor-status-updated";
-const ACADEMIC_DRAFT_EVENT = "academic-drafts-updated";
-const HOS_SEMESTER_REPORTS_KEY = "hos_semester_report_inbox_v1";
-
-type HosSemesterReportItem = {
-  id: string;
-  year: number;
-  semester: "S1" | "S2";
-  title: string;
-  createdAt: string;
-  readAt?: string;
-  isDemo?: boolean;
-  rows: Record<string, string | number>[];
-};
-
-function readHosSemesterReports(): HosSemesterReportItem[] {
-  if (typeof window === "undefined") return [];
-  try {
-    const raw = window.localStorage.getItem(HOS_SEMESTER_REPORTS_KEY);
-    if (!raw) return [];
-    const parsed = JSON.parse(raw);
-    if (!Array.isArray(parsed)) return [];
-    return parsed as HosSemesterReportItem[];
-  } catch {
-    return [];
-  }
-}
-
-function writeHosSemesterReports(items: HosSemesterReportItem[]) {
-  if (typeof window === "undefined") return;
-  window.localStorage.setItem(HOS_SEMESTER_REPORTS_KEY, JSON.stringify(items));
-}
-
 function displayNameWithoutComma(raw: string): string {
   return raw.replace(/,/g, " ").replace(/\s+/g, " ").trim();
 }
 
-function reportStatusText(status: MockRequest["status"]) {
-  return status === "approved" ? "Approved" : status === "rejected" ? "Rejected" : "Pending";
-}
-
-function submittedTimeById(id: number) {
-  const day = ((id - 1) % 28) + 1;
-  const hour = 8 + (id % 9);
-  return `2026-03-${String(day).padStart(2, "0")} ${String(hour).padStart(2, "0")}:00`;
-}
-
-function readAcademicDrafts(): MockRequest[] {
-  if (typeof window === "undefined") return [];
-  try {
-    const raw = window.localStorage.getItem(SUPERVISOR_DRAFT_KEY);
-    if (!raw) return [];
-    const parsed = JSON.parse(raw);
-    if (!Array.isArray(parsed)) return [];
-    return parsed as MockRequest[];
-  } catch {
-    return [];
-  }
-}
-
-function consumeAcademicDrafts(): MockRequest[] {
-  if (typeof window === "undefined") return [];
-  const drafts = readAcademicDrafts();
-  window.localStorage.removeItem(SUPERVISOR_DRAFT_KEY);
-  return drafts;
-}
-
-function readSupervisorState(): MockRequest[] {
-  if (typeof window === "undefined") return [];
-  try {
-    const raw = window.localStorage.getItem(SUPERVISOR_STATE_KEY);
-    if (!raw) return [];
-    const parsed = JSON.parse(raw);
-    if (!Array.isArray(parsed)) return [];
-    return parsed as MockRequest[];
-  } catch {
-    return [];
-  }
-}
-
-function mergeDraftsIntoRequests(current: MockRequest[], drafts: MockRequest[]) {
-  if (!drafts.length) return current;
-  const existingIds = new Set(current.map((row) => row.id));
-  const incoming = drafts.filter((row) => !existingIds.has(row.id));
-  if (!incoming.length) return current;
-  return [...incoming, ...current];
-}
-
-function breakdownById(id: number): BreakdownData {
-  const patterns: BreakdownData[] = [
-    {
-      Teaching: [
-        { name: "CITS2401", hours: 15 },
-        { name: "CITS2200", hours: 5 },
-      ],
-      "Assigned Roles": [
-        { name: "Program Chair", hours: 20 },
-        { name: "Outreach Chair", hours: 10 },
-      ],
-      HDR: [
-        { name: "Student A", hours: 2 },
-        { name: "Student B", hours: 2 },
-      ],
-      Service: [{ name: "Committee support", hours: 10 }],
-      "Research (residual)": [{ name: "Research (residual)", hours: 0 }],
-    },
-    {
-      Teaching: [{ name: "CITS3002", hours: 15 }],
-      "Assigned Roles": [{ name: "Industry liaison", hours: 6 }],
-      HDR: [
-        { name: "Student D", hours: 3 },
-        { name: "Student E", hours: 2 },
-      ],
-      Service: [{ name: "Peer review", hours: 4 }],
-      "Research (residual)": [{ name: "Research (residual)", hours: 0 }],
-    },
-  ];
-  return patterns[id % patterns.length];
+function formatSubmittedTime(value?: string | null) {
+  if (!value) return "-";
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) return value;
+  const datePart = date.toISOString().slice(0, 10);
+  const timePart = date.toTimeString().slice(0, 5);
+  return `${datePart} ${timePart}`;
 }
 
 function extractRequestReason(description: string) {
@@ -201,45 +110,6 @@ function workloadModalNotes(row: Pick<MockRequest, "notes" | "description">) {
 
 function requestReasonText(row: Pick<MockRequest, "requestReason" | "description">) {
   return row.requestReason?.trim() || extractRequestReason(row.description ?? "").trim();
-}
-
-function buildHosSemesterReportRows(rows: MockRequest[]) {
-  return rows.map((row) => ({
-    "Staff ID": row.studentId,
-    Name: displayNameWithoutComma(row.name),
-    Department: row.department,
-    Title: row.title,
-    Status: reportStatusText(row.status),
-    "Total Work Hours": row.hours,
-    "Submitted Time": submittedTimeById(row.id),
-    "Application Reason": requestReasonText(row) || "—",
-    "HoS Review Note": row.supervisorNote?.trim() || "—",
-  }));
-}
-
-function createHosSemesterDemoReport(): HosSemesterReportItem {
-  return {
-    id: "hos-report-demo-2025-S1",
-    year: 2025,
-    semester: "S1",
-    title: "2025 S1 distribution report generated",
-    createdAt: "2025-07-01T09:00:00.000Z",
-    readAt: undefined,
-    isDemo: true,
-    rows: [
-      {
-        "Staff ID": "12345931",
-        Name: "Dias John",
-        Department: "Physics",
-        Title: "Lecturer",
-        Status: "Pending",
-        "Total Work Hours": 793.5,
-        "Submitted Time": "2025-06-24 10:00",
-        "Application Reason": "wrong",
-        "HoS Review Note": "—",
-      },
-    ],
-  };
 }
 
 /** Last name, first name, or full name (substring or order-independent tokens; commas as spaces). */
@@ -276,6 +146,53 @@ function maxValue(values: number[]) {
   return Math.max(...values);
 }
 
+function emptyBreakdown(): BreakdownData {
+  return {
+    Teaching: [],
+    "Assigned Roles": [],
+    HDR: [],
+    Service: [],
+    "Research (residual)": [],
+  };
+}
+
+function normalizeBreakdown(raw?: HosBreakdown): BreakdownData {
+  const base = emptyBreakdown();
+  if (!raw) return base;
+  (Object.keys(base) as BreakdownCategory[]).forEach((key) => {
+    const rows = raw[key];
+    base[key] = Array.isArray(rows)
+      ? rows.map((row) => ({
+          name: String(row.name ?? ""),
+          hours: Number(row.hours) || 0,
+        }))
+      : [];
+  });
+  return base;
+}
+
+function mapWorkloadRow(row: HosWorkloadRow | HosWorkloadDetail): MockRequest {
+  return {
+    id: row.id,
+    studentId: row.staffId,
+    semesterLabel: row.semesterLabel,
+    periodLabel: row.periodLabel,
+    name: displayNameWithoutComma(row.name),
+    unit: row.sourceWorkloadId || row.id,
+    notes: "schoolOperationsNotes" in row ? row.schoolOperationsNotes : undefined,
+    requestReason: "applicationReason" in row ? row.applicationReason : row.reason,
+    title: row.title,
+    department: row.department,
+    rate: 0,
+    status: row.status === "initial" ? "pending" : row.status,
+    hours: Number(row.totalWorkHours) || 0,
+    supervisorNote: "reviewerNote" in row ? row.reviewerNote : undefined,
+    submittedAt: row.submittedAt,
+    version: row.version,
+    cancelled: Boolean("cancelled" in row && row.cancelled),
+  };
+}
+
 /** Workload search filter: school departments (org chart). */
 const WORKLOAD_SEARCH_DEPARTMENT_OPTIONS = [
   "Physics",
@@ -308,20 +225,19 @@ export default function HeadofSchool() {
     email?: string;
     name: string;
     role: AssignRole;
-    department: AssignDepartment;
+    department: string;
     permissions: string[];
     assignedAt: string;
     status: "active" | "disabled";
   };
 
-  const user = MOCK_DASHBOARD_USER;
+  const { profile: authProfile } = useAuth();
+  const user = profileFromAuth(authProfile);
 
   const [hosReportInboxOpen, setHosReportInboxOpen] = useState(false);
   const [profileOpen, setProfileOpen] = useState(false);
   const [avatarSrc, setAvatarSrc] = useState<string | null>(null);
-  const [hosSemesterReports, setHosSemesterReports] = useState<HosSemesterReportItem[]>(() =>
-    readHosSemesterReports()
-  );
+  const [hosSemesterReports, setHosSemesterReports] = useState<HosSemesterReport[]>([]);
   const [hosReportInboxPage, setHosReportInboxPage] = useState(1);
   const [activeSection, setActiveSection] = useState<
     "approval" | "admin" | "visualization" | "export"
@@ -334,50 +250,10 @@ export default function HeadofSchool() {
   ];
   const currentYear = useMemo(() => new Date().getFullYear(), []);
 
-  const [loading] = useState(false);
+  const [loading, setLoading] = useState(false);
   const [pending, setPending] = useState<MockRequest[]>([]);
-
-  useEffect(() => {
-    function mergeLatestDrafts() {
-      const drafts = consumeAcademicDrafts();
-      if (!drafts.length) return;
-      setPending((prev) => mergeDraftsIntoRequests(prev, drafts));
-    }
-
-    function onStorage(e: StorageEvent) {
-      if (e.key === SUPERVISOR_DRAFT_KEY) mergeLatestDrafts();
-    }
-
-    function onDraftEvent() {
-      mergeLatestDrafts();
-    }
-
-    window.addEventListener("storage", onStorage);
-    window.addEventListener(ACADEMIC_DRAFT_EVENT, onDraftEvent as EventListener);
-    return () => {
-      window.removeEventListener("storage", onStorage);
-      window.removeEventListener(ACADEMIC_DRAFT_EVENT, onDraftEvent as EventListener);
-    };
-  }, []);
-
-  useEffect(() => {
-    if (typeof window === "undefined") return;
-    window.localStorage.setItem(SUPERVISOR_STATE_KEY, JSON.stringify(pending));
-  }, [pending]);
-
-  useEffect(() => {
-    if (typeof window === "undefined") return;
-    const sync: Record<string, "pending" | "approved" | "rejected"> = {};
-    const notesSync: Record<string, string> = {};
-    pending.forEach((row) => {
-      if (row.studentId) sync[row.studentId] = row.status;
-      if (row.studentId && row.supervisorNote) notesSync[row.studentId] = row.supervisorNote;
-    });
-    window.localStorage.setItem(ACADEMIC_STATUS_SYNC_KEY, JSON.stringify(sync));
-    window.localStorage.setItem(ACADEMIC_NOTES_SYNC_KEY, JSON.stringify(notesSync));
-    window.dispatchEvent(new Event(SUPERVISOR_SYNC_EVENT));
-  }, [pending]);
-  const [selectedIds, setSelectedIds] = useState<Set<number>>(new Set());
+  const [analyticsData, setAnalyticsData] = useState<HosAnalyticsPayload | null>(null);
+  const [selectedIds, setSelectedIds] = useState<Set<string>>(new Set());
   const [page, setPage] = useState(1);
   const pageSize = 10; // Items per page
   const [submitting, setSubmitting] = useState(false);
@@ -410,7 +286,7 @@ export default function HeadofSchool() {
   const [noteError, setNoteError] = useState("");
   const [detailsModalError, setDetailsModalError] = useState("");
   const [noteDecision, setNoteDecision] = useState<"approve" | "reject">("approve");
-  const [noteTargetId, setNoteTargetId] = useState<number | null>(null);
+  const [noteTargetId, setNoteTargetId] = useState<string | null>(null);
 
   const [searchEmployeeIdInput, setSearchEmployeeIdInput] = useState("");
   const [searchNameInput, setSearchNameInput] = useState("");
@@ -435,10 +311,13 @@ export default function HeadofSchool() {
   const [selectedPerson, setSelectedPerson] = useState<AssignablePerson | null>(null);
   const [assignRole, setAssignRole] = useState<AssignRole>("HoD");
   const [assignDepartment, setAssignDepartment] = useState<AssignDepartment>("Physics");
-  const rolePermissionMap: Record<AssignRole, string[]> = {
-    HoD: ["View Workload", "Approve Workload", "Update Workload"],
-    Admin: ["Distribute Workload to Departments", "Edit Employee Information"],
-  };
+  const rolePermissionMap = useMemo<Record<AssignRole, string[]>>(
+    () => ({
+      HoD: ["View Workload", "Approve Workload", "Update Workload"],
+      Admin: ["Distribute Workload to Departments", "Edit Employee Information"],
+    }),
+    []
+  );
   const [selectedPermissions, setSelectedPermissions] = useState<string[]>(rolePermissionMap.HoD);
   const [roleAssignments, setRoleAssignments] = useState<RoleAssignment[]>([]);
   const [assignMessage, setAssignMessage] = useState("");
@@ -479,24 +358,7 @@ export default function HeadofSchool() {
   ];
   const availablePermissions = rolePermissionMap[assignRole];
 
-  useEffect(() => {
-    try {
-      const raw = window.localStorage.getItem(HOD_ASSIGNMENTS_KEY);
-      if (!raw) return;
-      const parsed = JSON.parse(raw);
-      if (!Array.isArray(parsed)) return;
-      setRoleAssignments(parsed);
-    } catch {
-      // ignore invalid cached assignment data
-    }
-  }, []);
-
-  useEffect(() => {
-    window.localStorage.setItem(HOD_ASSIGNMENTS_KEY, JSON.stringify(roleAssignments));
-  }, [roleAssignments]);
-
-  const initialAssignablePeople: AssignablePerson[] = [];
-  const [assignablePeople, setAssignablePeople] = useState<AssignablePerson[]>(initialAssignablePeople);
+  const [assignablePeople, setAssignablePeople] = useState<AssignablePerson[]>([]);
   const [importMessage, setImportMessage] = useState("");
   const [staffModalOpen, setStaffModalOpen] = useState(false);
   const [staffDraft, setStaffDraft] = useState<StaffProfileDraft | null>(null);
@@ -509,7 +371,7 @@ export default function HeadofSchool() {
   );
   const hosReportsPerPage = 10;
   const hosUnreadReportCount = useMemo(
-    () => hosSemesterReports.filter((item) => !item.readAt).length,
+    () => hosSemesterReports.filter((item) => item.unread).length,
     [hosSemesterReports]
   );
   const hosReportTotalPages = Math.max(1, Math.ceil(hosSemesterReports.length / hosReportsPerPage));
@@ -518,91 +380,101 @@ export default function HeadofSchool() {
     return hosSemesterReports.slice(start, start + hosReportsPerPage);
   }, [hosSemesterReports, hosReportInboxPage]);
 
-  function semesterReportAvailableOn(year: number, semester: "S1" | "S2"): Date {
-    return semester === "S1" ? new Date(year, 6, 1, 0, 0, 0, 0) : new Date(year + 1, 0, 1, 0, 0, 0, 0);
-  }
-
-  function handleDownloadHosSemesterReport(report: HosSemesterReportItem) {
-    if (!report.rows.length) return;
-    const ws = XLSX.utils.json_to_sheet(report.rows);
-    const wb = XLSX.utils.book_new();
-    XLSX.utils.book_append_sheet(wb, ws, `${report.year}-${report.semester}`);
-    XLSX.writeFile(wb, `hos_distribution_report_${report.year}_${report.semester}.xlsx`);
+  async function handleDownloadHosSemesterReport(report: HosSemesterReport) {
+    if (!report.downloadUrl) return;
+    const blob = await downloadHosSemesterReport(report.downloadUrl);
+    const url = URL.createObjectURL(blob);
+    const link = document.createElement("a");
+    link.href = url;
+    link.download = `hos_distribution_report_${report.year}_${report.semester}.xlsx`;
+    document.body.appendChild(link);
+    link.click();
+    document.body.removeChild(link);
+    URL.revokeObjectURL(url);
   }
 
   useEffect(() => {
-    setHosSemesterReports((prev) => {
-      const base = (prev.length ? prev : readHosSemesterReports()).map((item) => ({
-        ...item,
-        title: `${item.year} ${item.semester} distribution report generated`,
-      }));
-      if (base.length) {
-        writeHosSemesterReports(base);
-        return base;
+    let cancelled = false;
+    async function loadHoSData() {
+      setLoading(true);
+      try {
+        const [workloadRes, reportsRes, staffRes, assignmentRes, analyticsRes] = await Promise.all([
+          fetchHosWorkloadRequests({ status: "all", page: "1", pageSize: "100" }),
+          fetchHosSemesterReports(),
+          fetchHosStaffDirectory({ page: "1", pageSize: "100" }),
+          fetchHosRoleAssignments(),
+          fetchHosAnalytics({
+            fromYear: visualFilters.fromYear,
+            toYear: visualFilters.toYear,
+            semester: visualFilters.semester,
+            department: visualFilters.department,
+          }),
+        ]);
+        if (cancelled) return;
+        setPending(workloadRes.items.map(mapWorkloadRow));
+        setHosSemesterReports(reportsRes.items);
+        setAssignablePeople(
+          staffRes.items.map((person, idx) => ({
+            id: idx + 1,
+            staffId: person.staffId,
+            firstName: person.firstName,
+            lastName: person.lastName,
+            email: person.email,
+            title: person.title,
+            currentDepartment: person.currentDepartment,
+            isActive: person.isActive,
+            isNewEmployee: person.isNewEmployee,
+            notes: person.notes,
+          }))
+        );
+        setRoleAssignments(assignmentRes.items);
+        setAnalyticsData(analyticsRes.data);
+      } catch (error) {
+        if (!cancelled) {
+          setImportMessage("Unable to load HoS data from the server.");
+        }
+      } finally {
+        if (!cancelled) setLoading(false);
       }
-      const seeded = [createHosSemesterDemoReport()];
-      writeHosSemesterReports(seeded);
-      return seeded;
-    });
-  }, []);
+    }
+    loadHoSData();
+    return () => {
+      cancelled = true;
+    };
+  }, [visualFilters]);
 
-  useEffect(() => {
-    const now = new Date();
-    const existing = readHosSemesterReports();
-    const existingByKey = new Map<string, HosSemesterReportItem>(
-      existing.map((item) => [`${item.year}-${item.semester}`, item] as const)
+  async function refreshStaffAndAssignments() {
+    const [staffRes, assignmentRes] = await Promise.all([
+      fetchHosStaffDirectory({ page: "1", pageSize: "100" }),
+      fetchHosRoleAssignments(),
+    ]);
+    setAssignablePeople(
+      staffRes.items.map((person, idx) => ({
+        id: idx + 1,
+        staffId: person.staffId,
+        firstName: person.firstName,
+        lastName: person.lastName,
+        email: person.email,
+        title: person.title,
+        currentDepartment: person.currentDepartment,
+        isActive: person.isActive,
+        isNewEmployee: person.isNewEmployee,
+        notes: person.notes,
+      }))
     );
-    const semesterKeys = new Set<string>();
+    setRoleAssignments(assignmentRes.items);
+  }
 
-    pending.forEach((row) => {
-      if (row.cancelled) return;
-      const matched = row.periodLabel.match(/^(\d{4})-(1|2)$/);
-      if (!matched) return;
-      const year = Number(matched[1]);
-      const semester = matched[2] === "1" ? "S1" : "S2";
-      if (now < semesterReportAvailableOn(year, semester)) return;
-      semesterKeys.add(`${year}-${semester}`);
-    });
-
-    const newReports: HosSemesterReportItem[] = [];
-    const replacedDemoKeys = new Set<string>();
-    semesterKeys.forEach((key) => {
-      const existingItem = existingByKey.get(key);
-      if (existingItem && !existingItem.isDemo) return;
-      const [yearText, semester] = key.split("-") as [string, "S1" | "S2"];
-      const year = Number(yearText);
-      const semesterRows = buildHosSemesterReportRows(
-        pending.filter((row) => !row.cancelled && row.periodLabel === `${year}-${semester === "S1" ? "1" : "2"}`)
-      );
-      if (!semesterRows.length) return;
-      if (existingItem?.isDemo) replacedDemoKeys.add(key);
-      newReports.push({
-        id: `hos-report-${year}-${semester}-${Date.now()}`,
-        year,
-        semester,
-        title: `${year} ${semester} distribution report generated`,
-        createdAt: new Date().toISOString(),
-        rows: semesterRows,
-      });
-    });
-
-    if (!newReports.length) return;
-    const retainedExisting = existing.filter((item) => !replacedDemoKeys.has(`${item.year}-${item.semester}`));
-    const next = [...newReports, ...retainedExisting].sort(
-      (a, b) => Date.parse(b.createdAt || "") - Date.parse(a.createdAt || "")
-    );
-    writeHosSemesterReports(next);
-    setHosSemesterReports(next);
-  }, [pending]);
+  async function refreshWorkloads() {
+    const workloadRes = await fetchHosWorkloadRequests({ status: "all", page: "1", pageSize: "100" });
+    setPending(workloadRes.items.map(mapWorkloadRow));
+    const reportsRes = await fetchHosSemesterReports();
+    setHosSemesterReports(reportsRes.items);
+  }
 
   useEffect(() => {
     if (!hosReportInboxOpen) return;
-    setHosSemesterReports((prev) => {
-      const now = new Date().toISOString();
-      const next = prev.map((item) => (item.readAt ? item : { ...item, readAt: now }));
-      writeHosSemesterReports(next);
-      return next;
-    });
+    setHosSemesterReports((prev) => prev.map((item) => ({ ...item, unread: false })));
   }, [hosReportInboxOpen]);
 
   useEffect(() => {
@@ -644,7 +516,7 @@ export default function HeadofSchool() {
         }
       }
 
-      const submittedText = submittedTimeById(it.id);
+      const submittedText = formatSubmittedTime(it.submittedAt);
       const submittedDate = new Date(submittedText.replace(" ", "T"));
       const hasValidSubmittedDate = !Number.isNaN(submittedDate.getTime());
       const selectedYear = Number(searchFilters.year);
@@ -695,33 +567,16 @@ export default function HeadofSchool() {
   }, [adminSearchFilters, assignablePeople]);
 
   const departmentStats = useMemo(
-    () => [
-      {
-        department: "Computer Science & Software Engineering",
-        totalHours: 430,
-        academics: 27,
-        pending: 17,
-        approved: 8,
-        rejected: 2,
-      },
-      {
-        department: "Mathematics & Statistics",
-        totalHours: 318,
-        academics: 19,
-        pending: 7,
-        approved: 10,
-        rejected: 2,
-      },
-      {
-        department: "Physics",
-        totalHours: 264,
-        academics: 14,
-        pending: 5,
-        approved: 7,
-        rejected: 2,
-      },
-    ],
-    []
+    () =>
+      (analyticsData?.workloadHoursDistribution ?? []).map((item) => ({
+        department: item.department,
+        totalHours: Number(item.totalWorkHours) || 0,
+        academics: 0,
+        pending: 0,
+        approved: 0,
+        rejected: 0,
+      })),
+    [analyticsData]
   );
   const filteredDepartmentStats = useMemo(() => {
     if (visualFilters.department === "All Departments") return departmentStats;
@@ -757,7 +612,7 @@ export default function HeadofSchool() {
               : item.department === "Physics"
                 ? "Physics"
                 : item.department,
-        averageWorkHours: Number((item.totalHours / Math.max(1, item.academics)).toFixed(1)),
+        averageWorkHours: item.academics > 0 ? Number((item.totalHours / item.academics).toFixed(1)) : 0,
       })),
     [filteredDepartmentStats]
   );
@@ -781,46 +636,31 @@ export default function HeadofSchool() {
     [filteredDepartmentStats]
   );
 
-  const workloadTrendBySemester = useMemo(() => {
-    const startYear = currentYear - 5;
-    const endYear = currentYear + 5;
-    const currentMonth = new Date().getMonth();
-    const hasReachedS2 = currentMonth >= 6;
-    const rows: Array<Record<string, string | number | null>> = [];
-    for (let year = startYear; year <= endYear; year += 1) {
-      const offset = year - startYear;
-      rows.push({
-        semester: `${year} S1`,
-        "Computer Science & Software Engineering": 178 + offset * 8,
-        "Mathematics & Statistics": 128 + offset * 6,
-        Physics: 104 + offset * 5,
-      });
-      rows.push({
-        semester: `${year} S2`,
-        "Computer Science & Software Engineering":
-          year === currentYear && !hasReachedS2 ? null : 186 + offset * 9,
-        "Mathematics & Statistics": year === currentYear && !hasReachedS2 ? null : 136 + offset * 7,
-        Physics: year === currentYear && !hasReachedS2 ? null : 111 + offset * 6,
-      });
-    }
-    return rows;
-  }, [currentYear]);
+  const workloadTrendBySemester = useMemo(
+    () =>
+      (analyticsData?.totalWorkHoursTrend ?? []).map((item) => ({
+        semester: item.period,
+        "Total Work Hours": item.totalWorkHours,
+      })),
+    [analyticsData]
+  );
 
   const schoolSummary = useMemo(() => {
-    const totalAcademics = filteredDepartmentStats.reduce((sum, item) => sum + item.academics, 0);
-    const totalWorkHours = filteredDepartmentStats.reduce((sum, item) => sum + item.totalHours, 0);
-    const pendingRequests = filteredDepartmentStats.reduce((sum, item) => sum + item.pending, 0);
-    const approvedRequests = filteredDepartmentStats.reduce((sum, item) => sum + item.approved, 0);
-    const rejectedRequests = filteredDepartmentStats.reduce((sum, item) => sum + item.rejected, 0);
+    const summary = analyticsData?.summary;
+    const totalAcademics = summary?.totalAcademics ?? 0;
+    const totalWorkHours = summary?.totalWorkHours ?? 0;
+    const pendingRequests = summary?.pendingRequests ?? 0;
+    const approvedRequests = summary?.approvedRequests ?? 0;
+    const rejectedRequests = summary?.rejectedRequests ?? 0;
     return {
-      totalDepartments: filteredDepartmentStats.length,
+      totalDepartments: summary?.totalDepartments ?? filteredDepartmentStats.length,
       totalAcademics,
       totalWorkHours: Number(totalWorkHours.toFixed(1)),
       pendingRequests,
       approvedRequests,
       rejectedRequests,
     };
-  }, [filteredDepartmentStats]);
+  }, [analyticsData, filteredDepartmentStats.length]);
   const workloadPerAcademicByDepartment = useMemo(
     () =>
       filteredDepartmentStats.map((item) => ({
@@ -830,10 +670,10 @@ export default function HeadofSchool() {
     [filteredDepartmentStats]
   );
   const averageWorkloadPerAcademicOverall = useMemo(() => {
-    const totalHours = filteredDepartmentStats.reduce((sum, item) => sum + item.totalHours, 0);
-    const totalAcademics = filteredDepartmentStats.reduce((sum, item) => sum + item.academics, 0);
+    const totalHours = analyticsData?.summary.totalWorkHours ?? 0;
+    const totalAcademics = analyticsData?.summary.totalAcademics ?? 0;
     return Number((totalHours / Math.max(1, totalAcademics)).toFixed(1));
-  }, [filteredDepartmentStats]);
+  }, [analyticsData]);
   const filteredTrendData = useMemo(() => {
     const from = Number(visualFilters.fromYear);
     const to = Number(visualFilters.toYear);
@@ -849,14 +689,10 @@ export default function HeadofSchool() {
       return true;
     });
     const latestRows = rows.slice(-6);
-    if (visualFilters.department === "All Departments") return latestRows;
-    return latestRows.map((row) => {
-      const filteredRow: Record<string, string | number | null> = { semester: String(row.semester) };
-      filteredRow[visualFilters.department] = row[visualFilters.department] ?? null;
-      return filteredRow;
-    });
+    return latestRows;
   }, [workloadTrendBySemester, visualFilters, currentYear]);
   const reportingPeriodLabel = useMemo(() => {
+    if (analyticsData?.reportingPeriodLabel) return analyticsData.reportingPeriodLabel;
     const yearLabel =
       visualFilters.fromYear === visualFilters.toYear
         ? visualFilters.fromYear
@@ -865,10 +701,10 @@ export default function HeadofSchool() {
       return `${yearLabel} All Semesters`;
     }
     return `${yearLabel} ${visualFilters.semester}`;
-  }, [visualFilters]);
+  }, [analyticsData, visualFilters]);
   const scopeLabel = useMemo(
-    () => (visualFilters.department === "All Departments" ? "All Departments" : visualFilters.department),
-    [visualFilters.department]
+    () => analyticsData?.scopeLabel || (visualFilters.department === "All Departments" ? "All Departments" : visualFilters.department),
+    [analyticsData, visualFilters.department]
   );
   const departmentColorMap: Record<string, string> = {
     "Computer Science & Software Engineering": "#1f3b86",
@@ -911,7 +747,7 @@ export default function HeadofSchool() {
 
   useEffect(() => {
     setSelectedPermissions(rolePermissionMap[assignRole]);
-  }, [assignRole]);
+  }, [assignRole, rolePermissionMap]);
 
   const totalPages = Math.max(1, Math.ceil(itemsForFilter.length / pageSize));
   const pageItems = useMemo(() => {
@@ -919,7 +755,7 @@ export default function HeadofSchool() {
     return itemsForFilter.slice(start, start + pageSize);
   }, [itemsForFilter, page]);
 
-  function toggleSelected(id: number) {
+  function toggleSelected(id: string) {
     setSelectedIds((prev) => {
       const next = new Set(prev);
       if (next.has(id)) next.delete(id);
@@ -928,53 +764,33 @@ export default function HeadofSchool() {
     });
   }
 
-  const canSubmit =
-    statusFilter === "pending" && selectedIds.size > 0 && !submitting;
-
-  async function handleDecision(kind: "approve" | "reject") {
-    if (!canSubmit) return;
-    setSubmitting(true);
-
-    // Fake: update status locally
-    const nextStatus: MockRequest["status"] =
-      kind === "approve" ? "approved" : "rejected";
-    const count = selectedIds.size;
-    const next: MockRequest[] = pending.map((it) => {
-      if (!selectedIds.has(it.id)) return it;
-      return { ...it, status: nextStatus };
-    });
-
-    // Small delay to feel like a real request
-    await new Promise((r) => setTimeout(r, 300));
-    setPending(next);
-    setSelectedIds(new Set());
-    setSubmitting(false);
-
-    setPopup({
-      open: true,
-      title: kind === "approve" ? "Approved" : "Rejected",
-      message:
-        count === 1
-          ? `1 request has been marked as ${kind === "approve" ? "Approved" : "Rejected"}.`
-          : `${count} requests have been marked as ${
-              kind === "approve" ? "Approved" : "Rejected"
-            }.`,
-      status: kind === "approve" ? "approved" : "rejected",
-    });
+  async function handleExportWorkloads() {
+    const params: Record<string, string> = {};
+    if (exportYearFromInput.trim()) params.fromYear = exportYearFromInput.trim();
+    if (exportYearToInput.trim()) params.toYear = exportYearToInput.trim();
+    if (exportSemesterInput !== "All") params.semester = exportSemesterInput;
+    if (exportDepartmentInput !== "All Departments") params.department = exportDepartmentInput;
+    const blob = await exportHosWorkloads(params);
+    const url = URL.createObjectURL(blob);
+    const link = document.createElement("a");
+    link.href = url;
+    link.download = "HoS_Workloads.xlsx";
+    document.body.appendChild(link);
+    link.click();
+    document.body.removeChild(link);
+    URL.revokeObjectURL(url);
   }
 
-  async function handleDecisionForId(kind: "approve" | "reject", id: number, note: string) {
+  async function handleDecisionForId(kind: "approve" | "reject", id: string, note: string) {
     setSubmitting(true);
     try {
-      const nextStatus: MockRequest["status"] =
-        kind === "approve" ? "approved" : "rejected";
-      setPending((prev) =>
-        prev.map((it) =>
-          it.id === id
-            ? { ...it, status: nextStatus, supervisorNote: note.trim() }
-            : it
-        )
-      );
+      await decideHosWorkload(id, {
+        decision: kind,
+        note: note.trim(),
+        breakdown: detailsBreakdown ?? undefined,
+        ifVersion: detailsItem?.version,
+      });
+      await refreshWorkloads();
       // Clear selection if it contains the same row.
       setSelectedIds((prev) => {
         if (!prev.has(id)) return prev;
@@ -982,21 +798,27 @@ export default function HeadofSchool() {
         next.delete(id);
         return next;
       });
+      setPopup({
+        open: true,
+        title: kind === "approve" ? "Approved" : "Rejected",
+        message: `The request has been marked as ${
+          kind === "approve" ? "Approved" : "Rejected"
+        }.`,
+        status: kind === "approve" ? "approved" : "rejected",
+      });
+    } catch {
+      setPopup({
+        open: true,
+        title: "Request failed",
+        message: "The server could not update this workload request.",
+        status: "rejected",
+      });
     } finally {
       setSubmitting(false);
     }
-
-    setPopup({
-      open: true,
-      title: kind === "approve" ? "Approved" : "Rejected",
-      message: `The request has been marked as ${
-        kind === "approve" ? "Approved" : "Rejected"
-      }.`,
-      status: kind === "approve" ? "approved" : "rejected",
-    });
   }
 
-  function openNoteModal(kind: "approve" | "reject", id: number) {
+  function openNoteModal(kind: "approve" | "reject", id: string) {
     if (detailsBreakdown) {
       const hasEmptyRow = (Object.keys(detailsBreakdown) as BreakdownCategory[]).some((tab) =>
         detailsBreakdown[tab].some((row) => row.name.trim() === "")
@@ -1160,8 +982,6 @@ export default function HeadofSchool() {
       { header: "title", key: "title", width: 18 },
       { header: "department", key: "department", width: 40 },
       { header: "active_status", key: "active_status", width: 16 },
-      { header: "is_new_employee", key: "is_new_employee", width: 18 },
-      { header: "notes", key: "notes", width: 52 },
     ];
 
     const headerRow = worksheet.getRow(1);
@@ -1188,39 +1008,22 @@ export default function HeadofSchool() {
       title: "Lecturer",
       department: "Physics",
       active_status: "Active",
-      is_new_employee: "false",
-      notes: "",
     });
+    worksheet.spliceColumns(8, Math.max(0, worksheet.columnCount - 7));
 
-    // Apply data validation to a practical import range.
+    // Keep only format pick-lists; optional fields may be blank.
     for (let row = 2; row <= 1000; row += 1) {
       worksheet.getCell(`A${row}`).dataValidation = {
         type: "custom",
         allowBlank: false,
-        formulae: [`AND(ISNUMBER(A${row}),LEN(A${row}&\"\")=8)`],
+        formulae: [`LEN(TRIM(A${row}&""))=8`],
         showErrorMessage: true,
         errorTitle: "Invalid staff_id",
-        error: "staff_id must be exactly 8 digits.",
-      };
-      worksheet.getCell(`B${row}`).dataValidation = {
-        type: "custom",
-        allowBlank: false,
-        formulae: [`LEN(TRIM(B${row}))>0`],
-        showErrorMessage: true,
-        errorTitle: "Missing first_name",
-        error: "first_name is required.",
-      };
-      worksheet.getCell(`C${row}`).dataValidation = {
-        type: "custom",
-        allowBlank: false,
-        formulae: [`LEN(TRIM(C${row}))>0`],
-        showErrorMessage: true,
-        errorTitle: "Missing last_name",
-        error: "last_name is required.",
+        error: "staff_id must be exactly 8 characters.",
       };
       worksheet.getCell(`D${row}`).dataValidation = {
         type: "custom",
-        allowBlank: false,
+        allowBlank: true,
         formulae: [
           `AND(ISNUMBER(SEARCH("@",D${row})),ISNUMBER(SEARCH(".",D${row})),FIND("@",D${row})>1,FIND("@",D${row})<LEN(D${row}))`,
         ],
@@ -1230,7 +1033,7 @@ export default function HeadofSchool() {
       };
       worksheet.getCell(`F${row}`).dataValidation = {
         type: "list",
-        allowBlank: false,
+        allowBlank: true,
         formulae: ['"Physics,Mathematics & Statistics,Computer Science & Software Engineering,Senior School Coordinator"'],
         showErrorMessage: true,
         errorTitle: "Invalid department",
@@ -1239,19 +1042,11 @@ export default function HeadofSchool() {
       };
       worksheet.getCell(`G${row}`).dataValidation = {
         type: "list",
-        allowBlank: false,
+        allowBlank: true,
         formulae: ['"Active,Inactive"'],
         showErrorMessage: true,
         errorTitle: "Invalid Active Status",
         error: "Active Status must be Active or Inactive.",
-      };
-      worksheet.getCell(`H${row}`).dataValidation = {
-        type: "list",
-        allowBlank: true,
-        formulae: ['"true,false"'],
-        showErrorMessage: true,
-        errorTitle: "Invalid is_new_employee",
-        error: "Use true or false — leave blank for false.",
       };
     }
 
@@ -1262,7 +1057,7 @@ export default function HeadofSchool() {
     const url = URL.createObjectURL(blob);
     const link = document.createElement("a");
     link.href = url;
-    link.download = "Staff_Template.xlsx";
+    link.download = "HoS_Staff_Template.xlsx";
     document.body.appendChild(link);
     link.click();
     document.body.removeChild(link);
@@ -1273,109 +1068,31 @@ export default function HeadofSchool() {
     fileInputRef.current?.click();
   }
 
-  function parseActiveStatus(value: string) {
-    const normalized = value.trim().toLowerCase();
-    if (normalized === "active" || normalized === "yes" || normalized === "true") return true;
-    if (normalized === "inactive" || normalized === "no" || normalized === "false") return false;
-    return null;
-  }
-
-  function parseIsNewEmployee(value: unknown): boolean {
-    const raw = String(value ?? "").trim().toLowerCase();
-    if (!raw) return false;
-    if (raw === "false" || raw === "no" || raw === "n" || raw === "0") return false;
-    return raw === "true" || raw === "yes" || raw === "y" || raw === "1";
-  }
-
-  function handleImportTemplate(event: ChangeEvent<HTMLInputElement>) {
+  async function handleImportTemplate(event: ChangeEvent<HTMLInputElement>) {
     const file = event.target.files?.[0];
     if (!file) return;
-    const reader = new FileReader();
-    reader.onload = () => {
-      try {
-        const allowedDepartments = new Set([
-          "Physics",
-          "Mathematics & Statistics",
-          "Computer Science & Software Engineering",
-          "Senior School Coordinator",
-        ]);
-        const emailPattern = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
-        const binary = reader.result;
-        const workbook = XLSX.read(binary, { type: "array" });
-        const firstSheet = workbook.Sheets[workbook.SheetNames[0]];
-        const rows = XLSX.utils.sheet_to_json<Record<string, unknown>>(firstSheet, { defval: "" });
-
-        if (rows.length === 0) {
-          setImportMessage("Import failed: file is empty.");
-          return;
-        }
-
-        const parsed: AssignablePerson[] = [];
-        for (let i = 0; i < rows.length; i += 1) {
-          const row = rows[i];
-          const staffId = String(row.staff_id ?? "").trim();
-          const firstName = String(row.first_name ?? "").trim();
-          const lastName = String(row.last_name ?? "").trim();
-          const email = String(row.email ?? "").trim();
-          const title = String(row.title ?? "").trim();
-          const department = String(row.department ?? "").trim();
-          const isActiveRaw = String(row.active_status ?? row.is_active ?? "").trim();
-          const isActive = parseActiveStatus(isActiveRaw);
-          const isNewEmployee = parseIsNewEmployee(row.is_new_employee ?? row.new_employee);
-          const notes = String(row.notes ?? "").trim();
-          const rowNumber = i + 2;
-
-          if (!/^\d{8}$/.test(staffId)) {
-            setImportMessage(`Import failed: row ${rowNumber} staff_id must be exactly 8 digits.`);
-            return;
-          }
-          if (!firstName) {
-            setImportMessage(`Import failed: row ${rowNumber} first_name is required.`);
-            return;
-          }
-          if (!lastName) {
-            setImportMessage(`Import failed: row ${rowNumber} last_name is required.`);
-            return;
-          }
-          if (!emailPattern.test(email)) {
-            setImportMessage(`Import failed: row ${rowNumber} email format is invalid.`);
-            return;
-          }
-          if (!allowedDepartments.has(department)) {
-            setImportMessage(`Import failed: row ${rowNumber} department must be one of the 4 allowed schools.`);
-            return;
-          }
-          if (isActive === null) {
-            setImportMessage(`Import failed: row ${rowNumber} Active Status must be Active or Inactive.`);
-            return;
-          }
-
-          parsed.push({
-            id: i + 1,
-            staffId,
-            firstName,
-            lastName,
-            email,
-            title,
-            currentDepartment: department,
-            isActive,
-            isNewEmployee,
-            notes,
-          });
-        }
-
-        setAssignablePeople(parsed);
-        setSelectedPerson(null);
-        setImportMessage(`Imported ${parsed.length} staff records from Staff_Template.xlsx.`);
-      } catch {
-        setImportMessage("Import failed: please upload a valid .xlsx template file.");
+    try {
+      setImportMessage("Importing staff records...");
+      const result = await importHosStaffDirectory(file);
+      await refreshStaffAndAssignments();
+      setSelectedPerson(null);
+      if (result.failedCount > 0) {
+        const firstFailure = result.items.find((item) => !item.imported);
+        const detail = firstFailure?.messages?.join("; ") || "Some rows failed validation.";
+        setImportMessage(
+          `Imported ${result.importedCount} staff records; ${result.failedCount} failed. ${detail}`
+        );
+      } else {
+        setImportMessage(`Imported ${result.importedCount} staff records into the database.`);
       }
-    };
-    reader.readAsArrayBuffer(file);
-    event.target.value = "";
+    } catch {
+      setImportMessage("Import failed: please upload a valid .xlsx template file.");
+    } finally {
+      event.target.value = "";
+    }
   }
 
-  function handleAssignRole() {
+  async function handleAssignRole() {
     if (!selectedPerson) {
       setAssignMessage("Please select a person first.");
       return;
@@ -1384,23 +1101,18 @@ export default function HeadofSchool() {
       setAssignMessage("Please select at least one permission.");
       return;
     }
-    const now = new Date();
-    const assignedAt = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, "0")}-${String(
-      now.getDate()
-    ).padStart(2, "0")} ${String(now.getHours()).padStart(2, "0")}:${String(now.getMinutes()).padStart(2, "0")}`;
-    const next: RoleAssignment = {
-      id: Date.now(),
-      staffId: selectedPerson.staffId,
-      email: selectedPerson.email,
-      name: `${selectedPerson.firstName} ${selectedPerson.lastName}`,
-      role: assignRole,
-      department: assignDepartment,
-      permissions: selectedPermissions,
-      assignedAt,
-      status: "active",
-    };
-    setRoleAssignments((prev) => [next, ...prev]);
-    setAssignMessage(`Assigned ${assignRole} role to ${next.name} (${assignDepartment}).`);
+    try {
+      const next = await createHosRoleAssignment({
+        staffId: selectedPerson.staffId,
+        role: assignRole,
+        department: assignDepartment,
+        permissions: selectedPermissions,
+      });
+      await refreshStaffAndAssignments();
+      setAssignMessage(`Assigned ${assignRole} role to ${next.name} (${assignDepartment}).`);
+    } catch {
+      setAssignMessage("Role assignment failed on the server.");
+    }
   }
 
   function requestCancelPermission(assignmentId: number) {
@@ -1408,17 +1120,18 @@ export default function HeadofSchool() {
     setCancelConfirmOpen(true);
   }
 
-  function confirmCancelPermission() {
+  async function confirmCancelPermission() {
     if (cancelTargetId === null) return;
-    setRoleAssignments((prev) =>
-      prev.map((item) => {
-        if (item.id !== cancelTargetId) return item;
-        setAssignMessage(`Disabled ${item.role} permission for ${item.name}.`);
-        return { ...item, status: "disabled" };
-      })
-    );
-    setCancelConfirmOpen(false);
-    setCancelTargetId(null);
+    const assignment = roleAssignments.find((item) => item.id === cancelTargetId);
+    try {
+      await disableHosRoleAssignment(cancelTargetId);
+      await refreshStaffAndAssignments();
+      if (assignment) setAssignMessage(`Disabled ${assignment.role} permission for ${assignment.name}.`);
+      setCancelConfirmOpen(false);
+      setCancelTargetId(null);
+    } catch {
+      setAssignMessage("Could not disable this role assignment on the server.");
+    }
   }
 
   function closeCancelConfirm() {
@@ -1426,17 +1139,24 @@ export default function HeadofSchool() {
     setCancelTargetId(null);
   }
 
-  function openDetails(item: MockRequest) {
+  async function openDetails(item: MockRequest) {
     if (item.cancelled) {
       setSupersededNoticeOpen(true);
       return;
     }
     setDetailsItem(item);
-    setDetailsBreakdown(breakdownById(item.id));
+    setDetailsBreakdown(emptyBreakdown());
     setDetailsOpen(true);
     setDetailsEditMode(false);
     setDescriptionExpanded(false);
     setDetailsModalError("");
+    try {
+      const detail = await fetchHosWorkloadDetail(item.id);
+      setDetailsItem(mapWorkloadRow(detail));
+      setDetailsBreakdown(normalizeBreakdown(detail.breakdown));
+    } catch {
+      setDetailsModalError("Unable to load workload details from the server.");
+    }
   }
 
   function requestCloseDetails() {
@@ -1923,7 +1643,7 @@ export default function HeadofSchool() {
                                 <WorkHoursBadge hours={item.hours} />
                               </td>
                               <td className="px-3 py-3 text-right tabular-nums font-sans font-semibold text-slate-800">
-                                {submittedTimeById(item.id)}
+                                {formatSubmittedTime(item.submittedAt)}
                               </td>
                             </tr>
                           );
@@ -1998,7 +1718,7 @@ export default function HeadofSchool() {
                               Actual teaching ratio
                             </div>
                             {(() => {
-                              const source = detailsBreakdown ?? breakdownById(detailsItem.id);
+                              const source = detailsBreakdown ?? emptyBreakdown();
                               const teaching = source.Teaching.reduce((sum, row) => sum + row.hours, 0);
                               const total = (["Teaching", "Assigned Roles", "HDR", "Service", "Research (residual)"] as BreakdownCategory[]).reduce(
                                 (tabSum, tab) => tabSum + source[tab].reduce((sum, row) => sum + row.hours, 0),
@@ -2100,7 +1820,7 @@ export default function HeadofSchool() {
                                 </tr>
                               </thead>
                               <tbody className="divide-y divide-slate-200 bg-white text-sm text-slate-700">
-                                {(detailsBreakdown?.[detailsTab] ?? breakdownById(detailsItem.id)[detailsTab]).map((row, idx) => (
+                                {(detailsBreakdown?.[detailsTab] ?? emptyBreakdown()[detailsTab]).map((row, idx) => (
                                   <tr key={`${detailsItem.id}-${detailsTab}-${idx}`}>
                                     <td className="px-3 py-2">
                                       {detailsEditMode ? (
@@ -2158,7 +1878,7 @@ export default function HeadofSchool() {
                                 <tr className="bg-slate-50">
                                   <td className="px-3 py-2 font-semibold">Total</td>
                                   <td className="px-3 py-2 text-right font-semibold tabular-nums font-sans">
-                                    {(detailsBreakdown?.[detailsTab] ?? breakdownById(detailsItem.id)[detailsTab]).reduce(
+                                    {(detailsBreakdown?.[detailsTab] ?? emptyBreakdown()[detailsTab]).reduce(
                                       (sum, row) => sum + row.hours,
                                       0
                                     )}
@@ -2975,34 +2695,26 @@ export default function HeadofSchool() {
                           verticalAlign="top"
                           align="right"
                           wrapperStyle={legendStyle}
-                          formatter={(value: string) => {
-                            if (value === "Computer Science & Software Engineering") return "CS&SE";
-                            if (value === "Mathematics & Statistics") return "Math&Stats";
-                            return value;
+                        />
+                        <Line
+                          type="monotone"
+                          dataKey="Total Work Hours"
+                          stroke="#1f3b86"
+                          strokeWidth={2}
+                          dot={(props: any) => {
+                            const isCurrentSemester = props?.payload?.semester === currentSemesterLabel;
+                            return (
+                              <circle
+                                cx={props.cx}
+                                cy={props.cy}
+                                r={isCurrentSemester ? 6 : 3}
+                                fill="#1f3b86"
+                                stroke="#ffffff"
+                                strokeWidth={isCurrentSemester ? 2 : 1}
+                              />
+                            );
                           }}
                         />
-                        {filteredDepartmentStats.map((item) => (
-                          <Line
-                            key={item.department}
-                            type="monotone"
-                            dataKey={item.department}
-                            stroke={departmentColorMap[item.department] || "#1e3a8a"}
-                            strokeWidth={2}
-                            dot={(props: any) => {
-                              const isCurrentSemester = props?.payload?.semester === currentSemesterLabel;
-                              return (
-                                <circle
-                                  cx={props.cx}
-                                  cy={props.cy}
-                                  r={isCurrentSemester ? 6 : 3}
-                                  fill={departmentColorMap[item.department] || "#1e3a8a"}
-                                  stroke="#ffffff"
-                                  strokeWidth={isCurrentSemester ? 2 : 1}
-                                />
-                              );
-                            }}
-                          />
-                        ))}
                       </LineChart>
                     </ResponsiveContainer>
                   </div>
@@ -3074,6 +2786,7 @@ export default function HeadofSchool() {
                 <div className="flex items-end">
                   <button
                     type="button"
+                    onClick={handleExportWorkloads}
                     className="w-full rounded bg-[#2f4d9c] px-4 py-2 text-sm font-semibold text-white hover:bg-[#264183]"
                   >
                     Export Excel

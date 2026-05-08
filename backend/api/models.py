@@ -158,9 +158,37 @@ class Staff(models.Model):
             models.Index(fields=['staff_number']),         # Excel import: match row to staff record
             models.Index(fields=['is_active']),            # filter active staff
         ]
+        # Custom permissions exposed to Django auth. initialize_rbac assigns
+        # these to per-role Groups. Frontend reads codenames verbatim.
+        permissions = [
+            ("view_academic_page",      "Can view Academic page"),
+            ("view_hod_page",           "Can view HoD page"),
+            ("view_school_ops_page",    "Can view School Operations page"),
+            ("view_hos_page",           "Can view Head of School page"),
+            ("approve_workload_dept",   "Can approve workload at department level"),
+            ("approve_workload_school", "Can approve workload at school level"),
+            ("import_workload",         "Can import workload Excel"),
+            ("manage_staff",            "Can create or edit staff records"),
+        ]
 
     def __str__(self):
         return f"{self.staff_number} - {self.user.get_full_name()} ({self.role})"
+
+    def save(self, *args, **kwargs):
+        """Sync Django Group membership with Staff.role on every save."""
+        super().save(*args, **kwargs)
+        self._sync_group_membership()
+
+    def _sync_group_membership(self):
+        from django.contrib.auth.models import Group
+        target = Group.objects.filter(name=self.role).first()
+        if target is None:
+            return  # initialize_rbac not run yet; skip silently
+        role_names = {'ACADEMIC', 'HOD', 'SCHOOL_OPS', 'HOS'}
+        stale = self.user.groups.filter(name__in=role_names).exclude(pk=target.pk)
+        for g in stale:
+            self.user.groups.remove(g)
+        self.user.groups.add(target)
 
 
 class Message(models.Model):

@@ -1,5 +1,6 @@
 from django.urls import path
 from api.view.auth_views import login_view
+from api.view.me_views import auth_me_view
 from api.view.pageinfo_views import messages_view, profile_avatar, profile_me
 from api.view.otp_views import otp_request_view, otp_verify_view
 from api.view.import_views import import_workload_view
@@ -89,6 +90,7 @@ from api.view.ops_admin_views import (
 urlpatterns = [
     # Auth — password-based (legacy, kept for admin/superuser use)
     path('login/', login_view),
+    path('auth/me/', auth_me_view),
     path('profile/me/', profile_me),
     path('profile/avatar/', profile_avatar),
     path('messages/', messages_view),
