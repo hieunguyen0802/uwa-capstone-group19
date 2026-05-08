@@ -3626,24 +3626,25 @@ export default function SchoolofOperations() {
                     onClick={(e) => e.stopPropagation()}
                   >
                     <div className="rounded-sm border border-black">
-                      <div className="flex items-center justify-between gap-4 border-b border-black/30 bg-white px-5 py-3">
+                      <div className="flex items-center justify-between rounded-t-sm bg-[#2f4d9c] px-5 py-3 text-white">
                         <div className="flex items-center gap-3">
-                          <div className="rounded-sm bg-[#2f4d9c] px-4 py-2 text-sm font-bold text-white tabular-nums font-sans">
+                          <div className="rounded bg-white/15 px-3 py-1 text-xs font-semibold">
                             {workloadDetailReportingPeriodLabel(detailsItem)}
                           </div>
-                          <div className="rounded-sm bg-slate-100 px-3 py-1 text-xs font-semibold text-slate-700">
+                          <div className="rounded bg-white/15 px-3 py-1 text-xs font-semibold">
                             {detailsItem.department?.trim() || "Department N/A"}
                           </div>
+                          <div className="rounded bg-white/15 px-3 py-1 text-xs font-semibold">
+                            Academic
+                          </div>
                         </div>
-                        <div className="flex items-center gap-3 text-sm font-semibold text-slate-800">
-                          <button
-                            type="button"
-                            onClick={closeDetails}
-                            className="rounded bg-slate-200 px-3 py-1 text-xs font-bold text-slate-700 hover:bg-slate-300"
-                          >
-                            Close
-                          </button>
-                        </div>
+                        <button
+                          type="button"
+                          onClick={closeDetails}
+                          className="inline-flex h-9 w-9 items-center justify-center rounded-md bg-white/10 hover:bg-white/20"
+                        >
+                          <span className="text-xl leading-none">×</span>
+                        </button>
                       </div>
 
                       <div className="space-y-4 px-5 py-4">

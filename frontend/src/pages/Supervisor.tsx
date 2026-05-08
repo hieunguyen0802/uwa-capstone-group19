@@ -1444,21 +1444,29 @@ export default function Supervisor() {
                 >
                   <div className="rounded-sm border border-black">
                     {/* Header */}
-                    <div className="flex items-center justify-between gap-4 border-b border-black/30 bg-white px-5 py-3">
+                    <div className="flex items-center justify-between rounded-t-sm bg-[#2f4d9c] px-5 py-3 text-white">
                       <div className="flex items-center gap-3">
-                        <div className="rounded-sm bg-[#2f4d9c] px-4 py-2 text-sm font-bold text-white tabular-nums font-sans">
-                          2025-S1-Physics
+                        <div className="rounded bg-white/15 px-3 py-1 text-xs font-semibold">
+                          {(() => {
+                            const matched = detailsItem.periodLabel.match(/^(\d{4})-(1|2)$/);
+                            if (!matched) return detailsItem.semesterLabel;
+                            return `${matched[1]}-${matched[2] === "1" ? "S1" : "S2"}`;
+                          })()}
+                        </div>
+                        <div className="rounded bg-white/15 px-3 py-1 text-xs font-semibold">
+                          {detailsItem.department}
+                        </div>
+                        <div className="rounded bg-white/15 px-3 py-1 text-xs font-semibold">
+                          Academic
                         </div>
                       </div>
-                      <div className="flex items-center gap-3 text-sm font-semibold text-slate-800">
-                        <button
-                          type="button"
-                          onClick={requestCloseDetails}
-                          className="rounded bg-slate-200 px-3 py-1 text-xs font-bold text-slate-700 hover:bg-slate-300"
-                        >
-                          Close
-                        </button>
-                      </div>
+                      <button
+                        type="button"
+                        onClick={requestCloseDetails}
+                        className="inline-flex h-9 w-9 items-center justify-center rounded-md bg-white/10 hover:bg-white/20"
+                      >
+                        <span className="text-xl leading-none">×</span>
+                      </button>
                     </div>
 
                     {/* Form body */}

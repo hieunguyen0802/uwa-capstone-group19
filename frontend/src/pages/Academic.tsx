@@ -540,9 +540,14 @@ function AcademicDetailModal({
       <div className="w-full max-w-2xl rounded-md bg-white shadow-lg" onClick={(e) => e.stopPropagation()}>
         <div className="flex items-center justify-between rounded-t-md bg-[#2f4d9c] px-5 py-3 text-white">
           <div className="flex items-center gap-3">
-            <div className="text-lg font-bold">Academic Workload Detail</div>
+            <div className="rounded bg-white/15 px-3 py-1 text-xs font-semibold">
+              {`${yearSemesterById(item.id).year}-${yearSemesterById(item.id).semester}`}
+            </div>
             <div className="rounded bg-white/15 px-3 py-1 text-xs font-semibold">
               {item.department || "Department N/A"}
+            </div>
+            <div className="rounded bg-white/15 px-3 py-1 text-xs font-semibold">
+              Academic
             </div>
           </div>
           <button
