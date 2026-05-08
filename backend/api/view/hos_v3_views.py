@@ -138,7 +138,7 @@ def hos_workload_request_detail(request, id):
 def hos_workload_request_decision(request, id):
     """
     See hod_views.hod_workload_request_decision — contract is identical except
-    for the reviewing role. ifVersion accepted, not enforced (reserved for #47).
+    for the reviewing role. ifVersion is accepted but not enforced yet.
     """
     data = request.data or {}
     decision = str(_first(data, 'decision')).strip().lower()

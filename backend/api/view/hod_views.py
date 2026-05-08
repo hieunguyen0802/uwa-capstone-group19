@@ -168,7 +168,8 @@ def _serialize_row(report):
         'semesterLabel': _sem_label(report.semester),
         'periodLabel': _period_label(report.academic_year, report.semester),
         'isAnomaly': report.is_anomaly,
-        # Optimistic-lock placeholder — real `version` column lands with PR #47.
+        # Optimistic-lock token placeholder. Current contract uses updated_at ISO;
+        # strict ifVersion enforcement can be enabled later without renaming fields.
         'version': report.updated_at.isoformat() if report.updated_at else None,
     }
 
@@ -310,8 +311,8 @@ def hod_workload_request_decision(request, id):
     """
     Accepts { decision: approve|reject, note, breakdown?, ifVersion? }.
 
-    ifVersion is accepted but not enforced yet — PR #47 (auditlog + optimistic
-    lock) will flip the check on and start returning 409 on mismatch.
+    ifVersion is accepted but not enforced yet. Later strict validation can be
+    wired without changing the request shape.
     """
     data = request.data or {}
     decision = str(_first(data, 'decision')).strip().lower()
