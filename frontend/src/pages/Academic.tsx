@@ -539,16 +539,8 @@ function AcademicDetailModal({
     <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 p-4" onClick={onClose}>
       <div className="w-full max-w-2xl rounded-md bg-white shadow-lg" onClick={(e) => e.stopPropagation()}>
         <div className="flex items-center justify-between rounded-t-md bg-[#2f4d9c] px-5 py-3 text-white">
-          <div className="flex items-center gap-3">
-            <div className="rounded bg-white/15 px-3 py-1 text-xs font-semibold">
-              {`${yearSemesterById(item.id).year}-${yearSemesterById(item.id).semester}`}
-            </div>
-            <div className="rounded bg-white/15 px-3 py-1 text-xs font-semibold">
-              {item.department || "Department N/A"}
-            </div>
-            <div className="rounded bg-white/15 px-3 py-1 text-xs font-semibold">
-              Academic
-            </div>
+          <div className="text-lg font-bold">
+            {`${yearSemesterById(item.id).year}-${yearSemesterById(item.id).semester}-${item.department || "Department N/A"}-Academic`}
           </div>
           <button
             type="button"

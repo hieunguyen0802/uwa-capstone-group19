@@ -1445,20 +1445,12 @@ export default function Supervisor() {
                   <div className="rounded-sm border border-black">
                     {/* Header */}
                     <div className="flex items-center justify-between rounded-t-sm bg-[#2f4d9c] px-5 py-3 text-white">
-                      <div className="flex items-center gap-3">
-                        <div className="rounded bg-white/15 px-3 py-1 text-xs font-semibold">
-                          {(() => {
-                            const matched = detailsItem.periodLabel.match(/^(\d{4})-(1|2)$/);
-                            if (!matched) return detailsItem.semesterLabel;
-                            return `${matched[1]}-${matched[2] === "1" ? "S1" : "S2"}`;
-                          })()}
-                        </div>
-                        <div className="rounded bg-white/15 px-3 py-1 text-xs font-semibold">
-                          {detailsItem.department}
-                        </div>
-                        <div className="rounded bg-white/15 px-3 py-1 text-xs font-semibold">
-                          Academic
-                        </div>
+                      <div className="text-lg font-bold">
+                        {(() => {
+                          const matched = detailsItem.periodLabel.match(/^(\d{4})-(1|2)$/);
+                          const period = matched ? `${matched[1]}-${matched[2] === "1" ? "S1" : "S2"}` : detailsItem.semesterLabel;
+                          return `${period}-${detailsItem.department}-Academic`;
+                        })()}
                       </div>
                       <button
                         type="button"

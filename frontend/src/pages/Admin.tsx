@@ -3627,16 +3627,8 @@ export default function SchoolofOperations() {
                   >
                     <div className="rounded-sm border border-black">
                       <div className="flex items-center justify-between rounded-t-sm bg-[#2f4d9c] px-5 py-3 text-white">
-                        <div className="flex items-center gap-3">
-                          <div className="rounded bg-white/15 px-3 py-1 text-xs font-semibold">
-                            {workloadDetailReportingPeriodLabel(detailsItem)}
-                          </div>
-                          <div className="rounded bg-white/15 px-3 py-1 text-xs font-semibold">
-                            {detailsItem.department?.trim() || "Department N/A"}
-                          </div>
-                          <div className="rounded bg-white/15 px-3 py-1 text-xs font-semibold">
-                            Academic
-                          </div>
+                        <div className="text-lg font-bold">
+                          {`${workloadDetailReportingPeriodLabel(detailsItem)}-${detailsItem.department?.trim() || "Department N/A"}-Academic`}
                         </div>
                         <button
                           type="button"
