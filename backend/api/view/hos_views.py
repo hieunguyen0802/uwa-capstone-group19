@@ -16,6 +16,7 @@ from rest_framework.response import Response
 
 from api.decorators import require_role
 from api.models import AuditLog, Department, Staff, WorkloadReport
+from api.services.audit_service import compute_diffs, write_audit
 from api.services.workload_service import (
     _filter_reports_by_range,
     _parse_year_range,
@@ -277,6 +278,14 @@ def hos_staff_update(request, staff_id):
     if not department:
         department = Department.objects.create(name=department_name)
 
+    before_snapshot = {
+        'first_name': staff.user.first_name,
+        'last_name': staff.user.last_name,
+        'email': staff.user.email,
+        'department': staff.department.name if staff.department_id else '',
+        'is_active': staff.is_active,
+    }
+
     staff.user.first_name = first_name
     staff.user.last_name = last_name
     staff.user.email = email
@@ -285,6 +294,34 @@ def hos_staff_update(request, staff_id):
     staff.department = department
     staff.is_active = _active_status_to_bool(active_status)
     staff.save(update_fields=['department', 'is_active', 'updated_at'])
+
+    after_snapshot = {
+        'first_name': staff.user.first_name,
+        'last_name': staff.user.last_name,
+        'email': staff.user.email,
+        'department': staff.department.name if staff.department_id else '',
+        'is_active': staff.is_active,
+    }
+    diffs = compute_diffs(
+        before_snapshot,
+        after_snapshot,
+        field_labels={
+            'first_name': 'First name',
+            'last_name': 'Last name',
+            'email': 'Email',
+            'department': 'Department',
+            'is_active': 'Active',
+        },
+    )
+    if diffs:
+        write_audit(
+            action_type='PROFILE_EDIT',
+            action_by=request.staff,
+            report=None,
+            source='HOS_INLINE_EDIT',
+            diffs=diffs,
+            staff_number=staff.staff_number,
+        )
 
     return Response(
         {
