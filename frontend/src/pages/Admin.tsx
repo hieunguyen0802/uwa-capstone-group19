@@ -148,10 +148,16 @@ const OPS_ACADEMIC_DISTRIBUTED_KEY = "ops_academic_distributed_workloads_v1";
 const OPS_SEMESTER_REPORTS_KEY = "ops_semester_report_inbox_v1";
 const ACADEMIC_STATUS_SYNC_KEY = "academic_status_sync_v1";
 const ACADEMIC_NOTES_SYNC_KEY = "academic_notes_sync_v1";
-const SUPERVISOR_SYNC_EVENT = "supervisor-status-updated";
 const SEMESTER_EXPECTED_MIN_HOURS = 856;
 const SEMESTER_EXPECTED_MAX_HOURS = 864;
 const WORKLOAD_REPORT_SEMESTER_LABEL = "2025-S1";
+const LEGACY_SCHOOL_OPS_STORAGE_KEYS = [
+  OPS_ACADEMIC_NOTIFICATION_KEY,
+  OPS_ACADEMIC_DISTRIBUTED_KEY,
+  OPS_SEMESTER_REPORTS_KEY,
+  ACADEMIC_STATUS_SYNC_KEY,
+  ACADEMIC_NOTES_SYNC_KEY,
+] as const;
 /** Workload search filter: school departments (org chart). */
 const WORKLOAD_SEARCH_DEPARTMENT_OPTIONS = [
   "Physics",
@@ -160,19 +166,6 @@ const WORKLOAD_SEARCH_DEPARTMENT_OPTIONS = [
 ] as const;
 const BAND_THRESHOLDS_TOOLTIP =
   "Band thresholds: (Calculated T:R <= 0.20 is Research Focused); (Calculated T:R > 0.20 and <= 0.79 is Balanced Teaching & Research); (Calculated T:R > 0.79 and <= 1.00 is Teaching Focused)";
-
-type AcademicNotification = {
-  id: string;
-  recipientStaffId: string;
-  recipientName: string;
-  recipientEmail: string;
-  fromName: string;
-  fromEmail: string;
-  subject: string;
-  body: string;
-  sentAt: string;
-  readAt?: string;
-};
 
 type OpsSemesterReportItem = {
   id: string;
@@ -184,60 +177,11 @@ type OpsSemesterReportItem = {
   rows: Record<string, string | number>[];
 };
 
-function readOpsSemesterReports(): OpsSemesterReportItem[] {
-  if (typeof window === "undefined") return [];
-  try {
-    const raw = window.localStorage.getItem(OPS_SEMESTER_REPORTS_KEY);
-    if (!raw) return [];
-    const parsed = JSON.parse(raw);
-    if (!Array.isArray(parsed)) return [];
-    return parsed as OpsSemesterReportItem[];
-  } catch {
-    return [];
-  }
-}
-
-function writeOpsSemesterReports(items: OpsSemesterReportItem[]) {
+function clearLegacySchoolOpsMockStorage() {
   if (typeof window === "undefined") return;
-  window.localStorage.setItem(OPS_SEMESTER_REPORTS_KEY, JSON.stringify(items));
-}
-
-function readAcademicStatusSync(): Record<string, "pending" | "approved" | "rejected"> {
-  if (typeof window === "undefined") return {};
-  try {
-    const raw = window.localStorage.getItem(ACADEMIC_STATUS_SYNC_KEY);
-    if (!raw) return {};
-    const parsed = JSON.parse(raw);
-    if (!parsed || typeof parsed !== "object") return {};
-    return parsed as Record<string, "pending" | "approved" | "rejected">;
-  } catch {
-    return {};
-  }
-}
-
-function formatOpsDistributionDdl(semester: "S1" | "S2") {
-  if (semester === "S1") return "S1 (1 January - 30 June)";
-  return "S2 (1 July - 31 December)";
-}
-
-function createOpsDistributionMailBody(year: number, semester: "S1" | "S2") {
-  const ddlLabel = formatOpsDistributionDdl(semester);
-  return `Your workload for ${year} ${semester} has been distributed. Please complete confirmation by the DDL (${ddlLabel}).
-
-If there are work-hour issues or you cannot self-confirm, please submit to your leader for manual modification review, then complete confirmation.
-
-For other questions, please contact yaka.bronte@uwa.edu.au.`;
-}
-
-function appendAcademicNotifications(nextNotifications: AcademicNotification[]) {
-  if (typeof window === "undefined" || nextNotifications.length === 0) return;
-  try {
-    const raw = window.localStorage.getItem(OPS_ACADEMIC_NOTIFICATION_KEY);
-    const existing = raw ? (JSON.parse(raw) as AcademicNotification[]) : [];
-    window.localStorage.setItem(OPS_ACADEMIC_NOTIFICATION_KEY, JSON.stringify([...nextNotifications, ...existing]));
-  } catch {
-    window.localStorage.setItem(OPS_ACADEMIC_NOTIFICATION_KEY, JSON.stringify(nextNotifications));
-  }
+  LEGACY_SCHOOL_OPS_STORAGE_KEYS.forEach((key) => {
+    window.localStorage.removeItem(key);
+  });
 }
 
 function submittedTimeById(id: number) {
@@ -895,12 +839,7 @@ export default function SchoolofOperations() {
   const [avatarSrc, setAvatarSrc] = useState<string | null>(null);
   const [opsReportInboxOpen, setOpsReportInboxOpen] = useState(false);
   const [opsReportInboxPage, setOpsReportInboxPage] = useState(1);
-  const [opsSemesterReports, setOpsSemesterReports] = useState<OpsSemesterReportItem[]>(() =>
-    readOpsSemesterReports()
-  );
-  const [academicStatusSyncMap, setAcademicStatusSyncMap] = useState<
-    Record<string, "pending" | "approved" | "rejected">
-  >(() => readAcademicStatusSync());
+  const [opsSemesterReports] = useState<OpsSemesterReportItem[]>([]);
   const [activeSection, setActiveSection] = useState<
     "approval" | "admin" | "visualization" | "export"
   >("approval");
@@ -916,121 +855,13 @@ export default function SchoolofOperations() {
   const [pending, setPending] = useState<MockRequest[]>([]);
 
   useEffect(() => {
-    const now = new Date();
-    const existing = readOpsSemesterReports();
-    const existingKeys = new Set(existing.map((item) => `${item.year}-${item.semester}`));
-    const semesterKeys = new Set<string>();
-
-    pending.forEach((row) => {
-      if (row.cancelled) return;
-      const matched = row.periodLabel.match(/^(\d{4})-(1|2)$/);
-      if (!matched) return;
-      const year = Number(matched[1]);
-      const semester = matched[2] === "1" ? "S1" : "S2";
-      if (now <= semesterEndDate(year, semester)) return;
-      semesterKeys.add(`${year}-${semester}`);
-    });
-
-    const newReports: OpsSemesterReportItem[] = [];
-    semesterKeys.forEach((key) => {
-      if (existingKeys.has(key)) return;
-      const [yearText, semester] = key.split("-") as [string, "S1" | "S2"];
-      const year = Number(yearText);
-      const semesterRows = pending
-        .filter((row) => !row.cancelled && row.periodLabel === `${year}-${semester === "S1" ? "1" : "2"}`)
-        .map((row) => ({
-          "Staff ID": row.studentId,
-          Name: displayNameWithoutComma(row.name),
-          Status:
-            row.importedFromTemplate
-              ? "-"
-              : row.status === "approved"
-                ? "Approved"
-                : row.status === "rejected"
-                  ? "Rejected"
-                  : "Pending",
-          "Total Work Hours": roundToOneDecimal(row.hours),
-          Confirmation: !row.importedFromTemplate && row.status === "approved" ? "Confirmed" : "Unconfirmed",
-          "Distributed Time": submittedTimeById(row.id),
-          "Distributed By": row.operatedBy?.trim() || "—",
-          Department: row.department,
-          Title: row.title,
-          "Target Teaching Ratio": row.targetTeachingRatio != null ? `${roundToOneDecimal(row.targetTeachingRatio)}%` : "50.0%",
-          "Actual Teaching Ratio": row.detailSnapshot?.actualTeachingRatioDisplay ?? "-",
-          "Employment Type": row.detailSnapshot?.employmentType ?? (row.hours >= 800 ? "Full-time" : "Part-time"),
-          "New Staff": row.workloadNewStaff ? "Yes" : "No",
-          "HoD Review": row.hodReview === "yes" ? "Yes" : "No",
-          "School of Operations Notes": workloadModalNotes(row),
-        }));
-      if (!semesterRows.length) return;
-      newReports.push({
-        id: `ops-report-${year}-${semester}-${Date.now()}`,
-        year,
-        semester,
-        title: `${year} ${semester} distribution report generated`,
-        createdAt: new Date().toISOString(),
-        rows: semesterRows,
-      });
-    });
-
-    if (!newReports.length) return;
-    const next = [...newReports, ...existing].sort(
-      (a, b) => Date.parse(b.createdAt || "") - Date.parse(a.createdAt || "")
-    );
-    writeOpsSemesterReports(next);
-    setOpsSemesterReports(next);
-  }, [pending]);
-
-  useEffect(() => {
-    if (!opsReportInboxOpen) return;
-    setOpsSemesterReports((prev) => {
-      const now = new Date().toISOString();
-      const next = prev.map((item) => (item.readAt ? item : { ...item, readAt: now }));
-      writeOpsSemesterReports(next);
-      return next;
-    });
-  }, [opsReportInboxOpen]);
-
-  useEffect(() => {
-    // Test helper: keep at least 2 inbox rows for UI verification.
-    setOpsSemesterReports((prev) => {
-      if (prev.length !== 1) return prev;
-      if (prev.some((item) => item.id.includes("-demo-copy"))) return prev;
-      const base = prev[0];
-      const copied: OpsSemesterReportItem = {
-        ...base,
-        id: `${base.id}-demo-copy`,
-        title: `${base.year} ${base.semester} distribution report generated (copy)`,
-        createdAt: new Date(Date.parse(base.createdAt || "") - 60_000).toISOString(),
-        readAt: undefined,
-      };
-      const next = [base, copied].sort(
-        (a, b) => Date.parse(b.createdAt || "") - Date.parse(a.createdAt || "")
-      );
-      writeOpsSemesterReports(next);
-      return next;
-    });
+    clearLegacySchoolOpsMockStorage();
   }, []);
 
   useEffect(() => {
     const total = Math.max(1, Math.ceil(opsSemesterReports.length / 10));
     setOpsReportInboxPage((prev) => Math.min(Math.max(1, prev), total));
   }, [opsSemesterReports.length]);
-
-  useEffect(() => {
-    function syncFromSupervisor() {
-      setAcademicStatusSyncMap(readAcademicStatusSync());
-    }
-    function onStorage(e: StorageEvent) {
-      if (e.key === ACADEMIC_STATUS_SYNC_KEY) syncFromSupervisor();
-    }
-    window.addEventListener("storage", onStorage);
-    window.addEventListener(SUPERVISOR_SYNC_EVENT, syncFromSupervisor as EventListener);
-    return () => {
-      window.removeEventListener("storage", onStorage);
-      window.removeEventListener(SUPERVISOR_SYNC_EVENT, syncFromSupervisor as EventListener);
-    };
-  }, []);
   const [selectedIds, setSelectedIds] = useState<Set<number>>(new Set());
   const [page, setPage] = useState(1);
   const pageSize = 10; // Items per page
@@ -1320,10 +1151,6 @@ export default function SchoolofOperations() {
     const start = (opsReportInboxPage - 1) * opsReportsPerPage;
     return opsSemesterReports.slice(start, start + opsReportsPerPage);
   }, [opsSemesterReports, opsReportInboxPage]);
-
-  function semesterEndDate(year: number, semester: "S1" | "S2"): Date {
-    return semester === "S1" ? new Date(year, 5, 30, 23, 59, 59, 999) : new Date(year, 11, 31, 23, 59, 59, 999);
-  }
 
   function handleDownloadOpsSemesterReport(report: OpsSemesterReportItem) {
     if (!report.rows.length) return;
@@ -1672,11 +1499,7 @@ export default function SchoolofOperations() {
   function displayStatusForOpsRow(row: MockRequest): "pending" | "approved" | "rejected" | "-" {
     if (row.cancelled) return row.status;
     if (row.importedFromTemplate && row.status === "pending") return "-";
-    if (row.status !== "approved") return row.status;
-    const synced = academicStatusSyncMap[String(row.id)];
-    // Distributed to Academic but not submitted yet: keep initialization marker.
-    if (!synced) return "-";
-    return synced;
+    return row.status;
   }
 
   const pendingFilteredIds = useMemo(() => itemsForFilter.map((it) => it.id), [itemsForFilter]);
@@ -2270,56 +2093,8 @@ export default function SchoolofOperations() {
         }
         return it;
       });
-      if (typeof window !== "undefined") {
-        window.localStorage.setItem(OPS_ACADEMIC_DISTRIBUTED_KEY, JSON.stringify(next));
-        // New distribution should always start from "-" on Academic/OPS until Academic submits.
-        const statusRaw = window.localStorage.getItem(ACADEMIC_STATUS_SYNC_KEY);
-        const statusMap =
-          statusRaw && typeof statusRaw === "string"
-            ? (JSON.parse(statusRaw) as Record<string, "pending" | "approved" | "rejected">)
-            : {};
-        const notesRaw = window.localStorage.getItem(ACADEMIC_NOTES_SYNC_KEY);
-        const notesMap =
-          notesRaw && typeof notesRaw === "string"
-            ? (JSON.parse(notesRaw) as Record<string, string>)
-            : {};
-        selectedPendingRows.forEach((row) => {
-          if (!approvedSelectedIds.has(row.id)) return;
-          delete statusMap[String(row.id)];
-          if (row.studentId) delete statusMap[row.studentId.trim()];
-          delete notesMap[String(row.id)];
-          if (row.studentId) delete notesMap[row.studentId.trim()];
-        });
-        window.localStorage.setItem(ACADEMIC_STATUS_SYNC_KEY, JSON.stringify(statusMap));
-        window.localStorage.setItem(ACADEMIC_NOTES_SYNC_KEY, JSON.stringify(notesMap));
-        window.dispatchEvent(new Event(SUPERVISOR_SYNC_EVENT));
-      }
       return next;
     });
-
-    const mailBody = createOpsDistributionMailBody(parsedYear, distributeSemesterInput);
-    const mailedStaffIds = new Set<string>();
-    const notifications: AcademicNotification[] = selectedPendingRows
-      .filter((row) => approvedSelectedIds.has(row.id))
-      .map((row) => {
-        const sid = row.studentId.trim();
-        if (!sid || mailedStaffIds.has(sid)) return null;
-        mailedStaffIds.add(sid);
-        const matched = assignablePeople.find((p) => p.staffId.trim() === sid);
-        return {
-          id: `ops-dist-${Date.now()}-${sid}`,
-          recipientStaffId: sid,
-          recipientName: matched ? `${matched.firstName} ${matched.lastName}`.trim() : row.name,
-          recipientEmail: matched?.email ?? "",
-          fromName: `${user.firstName} ${user.surname}`.trim() || "School Operations",
-          fromEmail: user.email,
-          subject: `Workload distributed for ${parsedYear} ${distributeSemesterInput}`,
-          body: mailBody,
-          sentAt: new Date().toISOString(),
-        };
-      })
-      .filter((item): item is AcademicNotification => item !== null);
-    appendAcademicNotifications(notifications);
 
     setSelectedIds(new Set());
     setStatusFilter("distributed");
@@ -2327,7 +2102,9 @@ export default function SchoolofOperations() {
     setPopup({
       open: true,
       title: "Workload Distributed",
-      message: `Selected pending workloads were processed for ${parsedYear} ${distributeSemesterInput}. Email notifications were sent to ${notifications.length} academic(s).`,
+      message:
+        `Selected pending workloads were updated in the current page state for ${parsedYear} ${distributeSemesterInput}. ` +
+        "Legacy browser-side notifications, localStorage sync, and auto-generated semester reports are disabled on this branch so backend integration can take over.",
       status: "approved",
     });
   }
