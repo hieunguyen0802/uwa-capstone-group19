@@ -3,6 +3,7 @@
  * Replace the stub with `fetch` to `POST /api/workload/spreadsheet/import` (path TBD by your API).
  */
 
+import { apiClient } from "./client";
 import type { WorkloadImportParseResult } from "../workload/parseWorkloadWorkbook";
 import { TEACHING_HOURS_FACTOR } from "../workload/workloadSpreadsheetRules";
 
@@ -22,19 +23,6 @@ export type PostWorkloadSpreadsheetImportResponse = {
   message?: string;
 };
 
-const API_BASE = process.env.REACT_APP_API_BASE_URL ?? "";
-
-function readAccessToken(): string {
-  if (typeof window === "undefined") return "";
-  return (
-    window.localStorage.getItem("access") ||
-    window.sessionStorage.getItem("access") ||
-    window.localStorage.getItem("token") ||
-    window.sessionStorage.getItem("token") ||
-    ""
-  );
-}
-
 /**
  * POST full parsed workbook (all cells + derived teaching/role fields) to the backend.
  *
@@ -52,21 +40,6 @@ export async function postWorkloadSpreadsheetImport(
     importedAtIso: new Date().toISOString(),
   };
 
-  const token = readAccessToken();
-  const response = await fetch(`${API_BASE}/api/school-operations/workloads/import`, {
-    method: "POST",
-    headers: {
-      "Content-Type": "application/json",
-      ...(token ? { Authorization: `Bearer ${token}` } : {}),
-    },
-    credentials: "include",
-    body: JSON.stringify(payload),
-  });
-
-  if (!response.ok) {
-    const detail = await response.text();
-    throw new Error(detail || `School Operations import failed (${response.status})`);
-  }
-
-  return (await response.json()) as PostWorkloadSpreadsheetImportResponse;
+  const response = await apiClient.post("/school-operations/workloads/import", payload);
+  return response.data as PostWorkloadSpreadsheetImportResponse;
 }

@@ -11,7 +11,7 @@ import StatusPill from "../components/common/StatusPill";
 import VisualizationSummaryCards from "../components/common/VisualizationSummaryCards";
 import ThemedNoticeModal, { SUPERSEDED_RECORD_MESSAGE } from "../components/common/ThemedNoticeModal";
 import WorkHoursBadge from "../components/common/WorkHoursBadge";
-import { apiJson, clearLocalStorageKeys, downloadApiFile, isAbortError } from "../api/runtimeApi";
+import { apiJson, clearLocalStorageKeys, downloadApiFile, isAbortError } from "../api/client";
 
 type MockRequest = {
   id: number;
@@ -152,6 +152,16 @@ type HodVisualizationState = {
   };
   totalWorkHoursTrend: Array<{ period: string; totalWorkHours: number }>;
   averageWorkHoursBySemester: Array<{ period: string; averageWorkHours: number }>;
+};
+
+type HodTrendPoint = {
+  semester: string;
+  total_hours: number;
+};
+
+type HodAverageHoursPoint = {
+  semester: string;
+  average_hours: number;
 };
 
 function extractRequestReason(description: string) {
@@ -408,14 +418,16 @@ export default function Supervisor() {
           rejectedRequests: response.data?.summary?.rejected_requests ?? 0,
           workHoursPerAcademic: response.data?.summary?.work_hours_per_academic ?? 0,
         },
-        totalWorkHoursTrend: (response.data?.total_work_hours_trend ?? []).map((item) => ({
+        totalWorkHoursTrend: (response.data?.total_work_hours_trend ?? []).map((item: HodTrendPoint) => ({
           period: item.semester,
           totalWorkHours: item.total_hours,
         })),
-        averageWorkHoursBySemester: (response.data?.average_work_hours_by_semester ?? []).map((item) => ({
+        averageWorkHoursBySemester: (response.data?.average_work_hours_by_semester ?? []).map(
+          (item: HodAverageHoursPoint) => ({
           period: item.semester,
           averageWorkHours: item.average_hours,
-        })),
+          })
+        ),
       });
     } catch (error) {
       if (!isAbortError(error)) {

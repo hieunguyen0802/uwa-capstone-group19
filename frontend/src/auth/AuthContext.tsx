@@ -72,13 +72,17 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   }, [reload]);
 
   const value = useMemo<AuthContextValue>(
-    () => ({
-      ...state,
-      reload,
-      logout,
-      hasPermission: (codename: string) =>
-        state.profile?.permissions.includes(codename) ?? false,
-    }),
+    () => {
+      const profile = state.profile;
+      const rawPermissions = profile?.permissions;
+      const permissions = Array.isArray(rawPermissions) ? rawPermissions : [];
+      return {
+        ...state,
+        reload,
+        logout,
+        hasPermission: (codename: string) => permissions.includes(codename),
+      };
+    },
     [state, reload, logout]
   );
 

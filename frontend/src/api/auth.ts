@@ -34,6 +34,38 @@ export type OtpVerifyResponse = {
   email: string;
 };
 
+function normalizeMenu(raw: unknown): MenuItem[] {
+  if (!Array.isArray(raw)) return [];
+  return raw
+    .filter((item): item is Record<string, unknown> => Boolean(item) && typeof item === "object")
+    .map((item) => ({
+      key: typeof item.key === "string" ? item.key : "",
+      label: typeof item.label === "string" ? item.label : "",
+      route: typeof item.route === "string" ? item.route : "",
+      permission: typeof item.permission === "string" ? item.permission : "",
+    }))
+    .filter((item) => item.route && item.permission);
+}
+
+function normalizePermissions(raw: unknown): string[] {
+  if (!Array.isArray(raw)) return [];
+  return raw.filter((item): item is string => typeof item === "string" && item.length > 0);
+}
+
+function normalizeAuthProfile(raw: unknown): AuthProfile {
+  const data = (raw && typeof raw === "object" ? raw : {}) as Record<string, unknown>;
+  return {
+    staff_id: typeof data.staff_id === "string" ? data.staff_id : "",
+    staff_number: typeof data.staff_number === "string" ? data.staff_number : "",
+    email: typeof data.email === "string" ? data.email : "",
+    full_name: typeof data.full_name === "string" ? data.full_name : "",
+    role: (typeof data.role === "string" ? data.role : "ACADEMIC") as AuthProfile["role"],
+    department: typeof data.department === "string" ? data.department : null,
+    permissions: normalizePermissions(data.permissions),
+    menu: normalizeMenu(data.menu),
+  };
+}
+
 export async function requestOtp(email: string): Promise<{ sent: boolean }> {
   const res = await apiClient.post("/login/request-otp/", { email });
   return res.data;
@@ -46,5 +78,5 @@ export async function verifyOtp(email: string, code: string): Promise<OtpVerifyR
 
 export async function fetchMe(): Promise<AuthProfile> {
   const res = await apiClient.get("/auth/me/");
-  return res.data;
+  return normalizeAuthProfile(res.data);
 }

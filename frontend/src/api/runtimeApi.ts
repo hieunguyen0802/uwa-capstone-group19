@@ -1,4 +1,6 @@
-const API_BASE = process.env.REACT_APP_API_BASE_URL ?? "";
+import { ACCESS_TOKEN_KEY } from "./client";
+
+const API_BASE = process.env.REACT_APP_API_BASE_URL ?? "http://localhost:8000";
 
 function parseStoredJson(raw: string | null): Record<string, unknown> | null {
   if (!raw) return null;
@@ -14,6 +16,8 @@ export function readAccessToken(): string {
   if (typeof window === "undefined") return "";
 
   const directToken =
+    window.localStorage.getItem(ACCESS_TOKEN_KEY) ||
+    window.sessionStorage.getItem(ACCESS_TOKEN_KEY) ||
     window.localStorage.getItem("access") ||
     window.sessionStorage.getItem("access") ||
     window.localStorage.getItem("token") ||

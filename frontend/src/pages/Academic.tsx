@@ -22,7 +22,7 @@ import YearRangeSemesterActionRow from "../components/common/YearRangeSemesterAc
 import ThemedNoticeModal, { SUPERSEDED_RECORD_MESSAGE } from "../components/common/ThemedNoticeModal";
 import WorkHoursBadge from "../components/common/WorkHoursBadge";
 import type { ProfileModalUser } from "../components/common/ProfileModalFieldGrid";
-import { apiJson, clearLocalStorageKeys, downloadApiFile, isAbortError } from "../api/runtimeApi";
+import { apiJson, clearLocalStorageKeys, downloadApiFile, isAbortError } from "../api/client";
 
 type AcademicItem = {
   id: number;
