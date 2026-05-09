@@ -17,6 +17,8 @@ type Props = {
 
 export default function RequirePermission({ permission, children }: Props) {
   const { profile, loading } = useAuth();
+  const rawPermissions = profile?.permissions;
+  const permissions = Array.isArray(rawPermissions) ? rawPermissions : [];
 
   if (loading) {
     return (
@@ -30,7 +32,7 @@ export default function RequirePermission({ permission, children }: Props) {
     return <Navigate to="/login" replace />;
   }
 
-  if (!profile.permissions.includes(permission)) {
+  if (!permissions.includes(permission)) {
     return <Navigate to="/role" replace />;
   }
 
