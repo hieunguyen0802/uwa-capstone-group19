@@ -18,18 +18,18 @@ export default function DashboardHeader({
   avatarSrc,
 }: DashboardHeaderProps) {
   return (
-    <div className="flex items-center justify-between rounded-md bg-[#2f4d9c] px-6 py-3">
-      <div className="flex items-center gap-3">
-        <img src="/logo512.png" alt="UWA" className="h-10 w-10 rounded-full bg-white/90 object-contain" />
-        <div className="leading-tight text-white">
-          <div className="text-xs font-semibold tracking-wide opacity-95">THE UNIVERSITY OF</div>
-          <div className="text-xl font-bold leading-none">WESTERN AUSTRALIA</div>
-        </div>
+    <div className="grid grid-cols-1 gap-3 rounded-md bg-[#2f4d9c] px-4 py-3 text-white md:grid-cols-[minmax(230px,1fr)_auto_minmax(230px,1fr)] md:items-center md:px-6">
+      <div className="flex min-w-0 justify-center md:justify-start">
+        <img
+          src="/uwa-logo-reversed.svg"
+          alt="The University of Western Australia"
+          className="h-14 w-full max-w-[260px] object-contain object-left"
+        />
       </div>
 
-      <div className="text-center text-2xl font-semibold text-white">{title}</div>
+      <div className="min-w-0 text-center text-2xl font-semibold leading-tight text-white">{title}</div>
 
-      <div className="flex items-center gap-3 text-white">
+      <div className="flex min-w-0 items-center justify-center gap-3 text-white md:justify-end">
         {showMessageButton && (
           <button
             type="button"
