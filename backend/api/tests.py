@@ -1458,15 +1458,28 @@ class TestAdminOpsContract(BaseTestCase):
         self.assertEqual(disabled.status_code, 200)
         self.assertEqual(disabled.data['data']['status'], 'disabled')
 
+        active_listing = client.get('/api/admin/role-assignments/')
+        self.assertEqual(active_listing.status_code, 200)
+        active_ids = {row['id'] for row in active_listing.data['data']['items']}
+        self.assertNotIn(assignment_id, active_ids)
+
+        history_listing = client.get('/api/admin/role-assignments/?includeDisabled=true')
+        self.assertEqual(history_listing.status_code, 200)
+        history_ids = {row['id'] for row in history_listing.data['data']['items']}
+        self.assertIn(assignment_id, history_ids)
+
     def test_admin_role_assignment_replaces_previous_active_role(self):
         client = self._auth_client(self.ops)
         first = client.post('/api/admin/role-assignments/', {
             'staff_id': self.academic.staff_number,
             'role': 'HoD',
-            'department': self.dept_csse.name,
+            'department': self.dept_physics.name,
             'permissions': ['View Workload'],
         }, format='json')
         self.assertEqual(first.status_code, 201)
+        self.academic.refresh_from_db()
+        self.assertEqual(self.academic.role, 'HOD')
+        self.assertEqual(self.academic.department, self.dept_physics)
 
         second = client.post('/api/admin/role-assignments/', {
             'staff_id': self.academic.staff_number,
@@ -1487,6 +1500,40 @@ class TestAdminOpsContract(BaseTestCase):
         self.academic.refresh_from_db()
         self.assertEqual(self.academic.role, 'SCHOOL_OPS')
         self.assertTrue(self.academic.user.groups.filter(name='SCHOOL_OPS').exists())
+
+        listing = client.get('/api/admin/role-assignments/')
+        self.assertEqual(listing.status_code, 200)
+        rows = [row for row in listing.data['data']['items'] if row['staff_id'] == self.academic.staff_number]
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[0]['id'], second.data['data']['id'])
+
+    def test_admin_role_assignment_disable_unknown_latest_role_resyncs_group(self):
+        client = self._auth_client(self.ops)
+        self.academic.role = 'HOD'
+        self.academic.save(update_fields=['role', 'updated_at'])
+        self.academic.user.groups.clear()
+
+        StaffRoleAssignment.objects.create(
+            staff=self.academic,
+            role_code='Legacy',
+            department_scope=self.dept_csse.name,
+            permissions=[],
+            status='active',
+        )
+        current = StaffRoleAssignment.objects.create(
+            staff=self.academic,
+            role_code='Admin',
+            department_scope='Senior School Coordinator',
+            permissions=[],
+            status='active',
+        )
+
+        disabled = client.post(f'/api/admin/role-assignments/{current.assignment_id}/disable/', {}, format='json')
+        self.assertEqual(disabled.status_code, 200)
+
+        self.academic.refresh_from_db()
+        self.assertEqual(self.academic.role, 'HOD')
+        self.assertTrue(self.academic.user.groups.filter(name='HOD').exists())
 
     def test_admin_export_manifest_and_download_roundtrip(self):
         client = self._auth_client(self.ops)

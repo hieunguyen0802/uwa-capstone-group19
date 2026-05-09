@@ -252,6 +252,15 @@ def _serialize_assignment_row(obj: StaffRoleAssignment):    return {
     }
 
 
+def _dedupe_latest_assignment_by_staff(assignments):
+    latest_by_staff = {}
+    for assignment in assignments:
+        if assignment.staff_id in latest_by_staff:
+            continue
+        latest_by_staff[assignment.staff_id] = assignment
+    return list(latest_by_staff.values())
+
+
 def _build_visualization_payload(reports_queryset, year_from, year_to, semester_filter, dept_label_scope):
     """
     Shape aligns with frontend_api_contract_cn.md §9.11 HoS visualization for Admin reuse.
@@ -1331,8 +1340,18 @@ def admin_role_assignments(request):
     """GET list + POST create."""
     if request.method == 'GET':
         queryset = StaffRoleAssignment.objects.select_related('staff', 'resolved_department').order_by('-created_at')
+        include_disabled = (
+            str(request.GET.get('includeDisabled') or request.GET.get('include_disabled') or '')
+            .strip()
+            .lower()
+            in ('1', 'true', 'yes')
+        )
+        if include_disabled:
+            assignments = list(queryset[:500])
+        else:
+            assignments = _dedupe_latest_assignment_by_staff(list(queryset.filter(status='active')[:500]))
         return Response({'success': True, 'message': 'Assignments loaded', 'data': {
-            'items': [_serialize_assignment_row(obj) for obj in queryset[:500]],
+            'items': [_serialize_assignment_row(obj) for obj in assignments],
         }})
 
     body = request.data or {}
@@ -1350,7 +1369,12 @@ def admin_role_assignments(request):
     if not staff_row:
         return Response({'success': False, 'message': 'staff not found'}, status=http_status.HTTP_404_NOT_FOUND)
 
-    resolved = Department.objects.filter(name__iexact=dept_scope).first()
+    if role_front == 'Admin':
+        resolved = None
+    else:
+        resolved = Department.objects.filter(name__iexact=dept_scope).first()
+        if dept_scope and resolved is None:
+            resolved = Department.objects.create(name=dept_scope)
 
     StaffRoleAssignment.objects.filter(staff=staff_row, status='active').update(
         status='disabled',
@@ -1372,7 +1396,11 @@ def admin_role_assignments(request):
     canonical = _FRONT_TO_CANONICAL.get(role_front)
     if canonical:
         staff_row.role = canonical
-        staff_row.save(update_fields=['role', 'updated_at'])
+        if resolved is not None:
+            staff_row.department = resolved
+            staff_row.save(update_fields=['role', 'department', 'updated_at'])
+        else:
+            staff_row.save(update_fields=['role', 'updated_at'])
 
     return Response({
         'success': True,
@@ -1415,6 +1443,8 @@ def admin_role_assignment_disable(request, assignment_id):
                 assignment.staff.save(update_fields=['role', 'department', 'updated_at'])
             else:
                 assignment.staff.save(update_fields=['role', 'updated_at'])
+        else:
+            assignment.staff.save(update_fields=['role', 'updated_at'])
 
     return Response({'success': True, 'message': 'Role assignment disabled', 'data': {
         'id': assignment.assignment_id,
