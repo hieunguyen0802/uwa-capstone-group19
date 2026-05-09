@@ -21,7 +21,6 @@ import StatusPill from "../components/common/StatusPill";
 import YearRangeSemesterActionRow from "../components/common/YearRangeSemesterActionRow";
 import ThemedNoticeModal, { SUPERSEDED_RECORD_MESSAGE } from "../components/common/ThemedNoticeModal";
 import WorkHoursBadge from "../components/common/WorkHoursBadge";
-import type { ProfileModalUser } from "../components/common/ProfileModalFieldGrid";
 import { apiJson, clearLocalStorageKeys, downloadApiFile, isAbortError } from "../api/client";
 import { useAuth } from "../auth/AuthContext";
 import { profileFromAuth } from "../auth/profileFromAuth";
@@ -150,7 +149,6 @@ const LEGACY_ACADEMIC_STORAGE_KEYS = [
   OPS_ACADEMIC_NOTIFICATION_KEY,
   OPS_ACADEMIC_DISTRIBUTED_KEY,
 ] as const;
-
 type AcademicNotification = {
   id: string;
   recipientStaffId: string;

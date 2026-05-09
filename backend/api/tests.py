@@ -8,7 +8,16 @@ from django.utils import timezone
 from rest_framework.test import APITestCase, APIClient
 from rest_framework_simplejwt.tokens import RefreshToken
 
-from .models import AuditLog, Department, OTPToken, Staff, WorkloadItem, WorkloadReport, WorkloadDistributionJob
+from .models import (
+    AuditLog,
+    Department,
+    OTPToken,
+    Staff,
+    StaffRoleAssignment,
+    WorkloadItem,
+    WorkloadReport,
+    WorkloadDistributionJob,
+)
 
 # 1×1 transparent PNG (valid binary for Pillow / ImageField).
 _MINI_PNG = (
@@ -161,11 +170,23 @@ class TestRequireRole(BaseTestCase):
         res = self.client.get('/api/supervisor/requests/')
         self.assertEqual(res.status_code, 401)
 
-    def test_hod_cannot_access_academic_endpoint(self):
-        # HOD calling an ACADEMIC-only endpoint must get 403
+    def test_hod_can_access_own_academic_endpoint(self):
+        # HOD can act as Academic for their own workload, but must not see
+        # another academic's report through the personal workload endpoint.
+        hod_report = WorkloadReport.objects.create(
+            staff=self.hod_csse,
+            academic_year=2025,
+            semester='S1',
+            snapshot_fte=self.hod_csse.fte,
+            snapshot_department=self.hod_csse.department,
+            status='INITIAL',
+        )
         client = self._auth_client(self.hod_csse)
         res = client.get('/api/workloads/my/')
-        self.assertEqual(res.status_code, 403)
+        self.assertEqual(res.status_code, 200)
+        report_ids = [item['report_id'] for item in res.data]
+        self.assertIn(str(hod_report.report_id), report_ids)
+        self.assertNotIn(str(self.report.report_id), report_ids)
 
     def test_academic_can_access_own_workloads(self):
         client = self._auth_client(self.academic)
@@ -349,15 +370,31 @@ class TestAcademicWorkloadAndQuery(BaseTestCase):
         )
         self.assertEqual(res.status_code, 400)
 
-    def test_hod_cannot_submit_query(self):
-        # POST /api/queries/ is ACADEMIC-only
+    def test_hod_can_submit_query_for_own_academic_report(self):
+        hod_report = WorkloadReport.objects.create(
+            staff=self.hod_csse,
+            academic_year=2025,
+            semester='S1',
+            snapshot_fte=self.hod_csse.fte,
+            snapshot_department=self.hod_csse.department,
+            status='INITIAL',
+        )
         client = self._auth_client(self.hod_csse)
         res = client.post(
             '/api/queries/',
-            data={'workload_report_id': str(self.report.report_id), 'comment': 'test'},
+            data={'workload_report_id': str(hod_report.report_id), 'comment': 'test'},
             format='json'
         )
-        self.assertEqual(res.status_code, 403)
+        self.assertEqual(res.status_code, 201)
+
+    def test_hod_cannot_submit_query_for_other_academic_report(self):
+        client = self._auth_client(self.hod_csse)
+        res = client.post(
+            '/api/queries/',
+            data={'workload_report_id': str(self.report.report_id), 'comment': 'Not mine.'},
+            format='json'
+        )
+        self.assertEqual(res.status_code, 404)
 
     def test_academic_cannot_query_other_academic_report(self):
         # Academic2 tries to query Academic1's report — should get 404
@@ -459,12 +496,11 @@ class TestAcademicContractEndpoints(BaseTestCase):
         self.assertEqual(res.status_code, 400)
 
     def test_hod_can_access_academic_workloads_as_own_self(self):
-        # UserGuides §2.1: HOD can act as Academic and view their own workload page.
-        # The HOD must only see their own reports, not the rest of the department's.
+        # UserGuides section 2.1: HOD can act as Academic and view their own
+        # workload page, but not another academic's personal report.
         client = self._auth_client(self.hod_csse)
         res = client.get('/api/academic/workloads/')
         self.assertEqual(res.status_code, 200)
-        # self.report belongs to self.academic, not self.hod_csse — must not appear.
         returned_ids = [item['id'] for item in res.data.get('items', [])]
         self.assertNotIn(str(self.report.report_id), returned_ids)
 
@@ -559,7 +595,7 @@ class TestAcademicOwnership(BaseTestCase):
     via the new /api/academic/* endpoints.
 
     This is the RBAC boundary test for the academic role.
-    get_workload_queryset filters by staff=request.staff for ACADEMIC role,
+    The academic endpoints filter by staff=request.staff for Academic/HOD users,
     so any attempt to access another academic's report should return 404
     (not 403 — the record simply doesn't exist in their queryset).
     """
@@ -720,7 +756,7 @@ class TestAcademicVisualization(BaseTestCase):
         self.assertEqual(res.status_code, 200)
 
     def test_hod_can_access_visualization_as_own_self(self):
-        # UserGuides §2.1: HOD acting as Academic can view their own visualization.
+        # UserGuides section 2.1: HOD acting as Academic can view their own visualization.
         client = self._auth_client(self.hod_csse)
         res = client.get('/api/academic/visualization/')
         self.assertEqual(res.status_code, 200)
@@ -774,7 +810,7 @@ class TestAcademicExport(BaseTestCase):
         self.assertGreater(len(res.content), 0)
 
     def test_hod_can_export_own_academic_data(self):
-        # UserGuides §2.1: HOD acting as Academic can export their own workload.
+        # UserGuides section 2.1: HOD acting as Academic can export their own workload.
         client = self._auth_client(self.hod_csse)
         res = client.get('/api/academic/export/')
         self.assertEqual(res.status_code, 200)
@@ -1090,6 +1126,47 @@ class TestHoSContractEndpoints(BaseTestCase):
         self.assertEqual(disable_res.status_code, 200)
         self.academic.refresh_from_db()
         self.assertEqual(self.academic.role, 'ACADEMIC')
+
+    def test_hos_v3_role_assignment_replaces_previous_active_role(self):
+        client = self._auth_client(self.hos)
+        first = client.post(
+            '/api/hos/role-assignments',
+            data={
+                'staffId': self.academic.staff_number,
+                'role': 'HoD',
+                'department': 'Physics',
+                'permissions': ['View Workload'],
+            },
+            format='json',
+        )
+        self.assertEqual(first.status_code, 201)
+
+        second = client.post(
+            '/api/hos/role-assignments',
+            data={
+                'staffId': self.academic.staff_number,
+                'role': 'Admin',
+                'department': 'Senior School Coordinator',
+                'permissions': ['Distribute Workload to Departments'],
+            },
+            format='json',
+        )
+        self.assertEqual(second.status_code, 201)
+
+        first_assignment = StaffRoleAssignment.objects.get(assignment_id=first.data['id'])
+        self.assertEqual(first_assignment.status, 'disabled')
+
+        self.academic.refresh_from_db()
+        self.assertEqual(self.academic.role, 'SCHOOL_OPS')
+        self.assertEqual(self.academic.department.name, 'Physics')
+        self.assertFalse(Department.objects.filter(name='Senior School Coordinator').exists())
+
+        listing = client.get('/api/hos/role-assignments')
+        self.assertEqual(listing.status_code, 200)
+        rows = [row for row in listing.data['items'] if row['staffId'] == self.academic.staff_number]
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[0]['role'], 'Admin')
+        self.assertEqual(rows[0]['status'], 'active')
 
     def test_hos_visualization_contract_shape(self):
         client = self._auth_client(self.hos)

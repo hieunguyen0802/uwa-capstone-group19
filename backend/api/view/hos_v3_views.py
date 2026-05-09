@@ -15,6 +15,7 @@ from django.core.paginator import Paginator
 from django.db import transaction
 from django.db.models import Exists, OuterRef, Q
 from django.shortcuts import get_object_or_404
+from django.utils import timezone
 from rest_framework import status as http_status
 from rest_framework.decorators import api_view, permission_classes
 from rest_framework.permissions import IsAuthenticated
@@ -74,9 +75,10 @@ def _hos_visible_qs():
 
 ROLE_DEFAULT_PERMISSIONS = {
     'HoD': ['View Workload', 'Approve Workload', 'Update Workload'],
-    'Admin': ['View Workload', 'Import Staff', 'Assign Role'],
+    'Admin': ['Distribute Workload to Departments', 'Edit Employee Information'],
 }
 ROLE_TO_CANONICAL = {'HoD': 'HOD', 'Admin': 'SCHOOL_OPS'}
+SUPERSEDED_ROLE_REASON = 'Superseded by a newer role assignment.'
 
 
 def _serialize_staff_directory_row(staff):
@@ -108,6 +110,22 @@ def _serialize_assignment(assignment):
         'assignedAt': assignment.created_at.isoformat() if assignment.created_at else None,
         'status': assignment.status,
     }
+
+
+def _current_assignment_queryset(include_disabled=False):
+    queryset = StaffRoleAssignment.objects.select_related('staff__user').order_by('-created_at', '-assignment_id')
+    if include_disabled:
+        return queryset
+    return queryset.filter(status='active')
+
+
+def _dedupe_latest_by_staff(assignments):
+    latest_by_staff = {}
+    for assignment in assignments:
+        if assignment.staff_id in latest_by_staff:
+            continue
+        latest_by_staff[assignment.staff_id] = assignment
+    return list(latest_by_staff.values())
 
 
 def _row_value(row, *keys, default=''):
@@ -591,12 +609,12 @@ def hos_staff_directory_import(request):
 @transaction.atomic
 def hos_v3_role_assignments(request):
     if request.method == 'GET':
-        # Only surface active assignments; disabled ones are historical records
-        # and must not be treated as current permissions (UserGuides §2.1, §8.4).
-        queryset = StaffRoleAssignment.objects.select_related('staff__user').filter(
-            status='active'
-        ).order_by('-created_at')
-        return Response({'items': [_serialize_assignment(obj) for obj in queryset[:500]]})
+        include_disabled = str(request.GET.get('includeDisabled') or '').strip().lower() in ('1', 'true', 'yes')
+        queryset = _current_assignment_queryset(include_disabled=include_disabled)
+        assignments = list(queryset[:500])
+        if not include_disabled:
+            assignments = _dedupe_latest_by_staff(assignments)
+        return Response({'items': [_serialize_assignment(obj) for obj in assignments]})
 
     payload = request.data or {}
     staff_id = str(payload.get('staffId') or payload.get('staff_id') or '').strip()
@@ -616,16 +634,17 @@ def hos_v3_role_assignments(request):
         )
 
     staff = get_object_or_404(Staff.objects.select_related('user', 'department'), staff_number=staff_id)
-    resolved = Department.objects.filter(name__iexact=department_name).first()
-    if department_name and resolved is None:
-        resolved = Department.objects.create(name=department_name)
+    if role == 'Admin':
+        resolved = None
+    else:
+        resolved = Department.objects.filter(name__iexact=department_name).first()
+        if department_name and resolved is None:
+            resolved = Department.objects.create(name=department_name)
 
-    # Disable any existing active assignments for this staff member before creating
-    # the new one — a person can only hold one current management identity at a time
-    # (UserGuides §2.1: HoD and Ops roles are mutually exclusive as active assignments).
     StaffRoleAssignment.objects.filter(staff=staff, status='active').update(
         status='disabled',
-        disable_reason='Superseded by new role assignment',
+        disable_reason=SUPERSEDED_ROLE_REASON,
+        updated_at=timezone.now(),
     )
 
     assignment = StaffRoleAssignment.objects.create(
@@ -664,20 +683,23 @@ def hos_v3_role_assignment_status(request, assignment_id):
     assignment.disable_reason = str((request.data or {}).get('reason') or '')[:500]
     assignment.save(update_fields=['status', 'disable_reason', 'updated_at'])
 
-    remaining = StaffRoleAssignment.objects.filter(
-        staff=assignment.staff, status='active'
-    ).exclude(assignment_id=assignment.assignment_id).first()
-
-    if remaining:
-        # Sync staff.role to the surviving active assignment so Group membership
-        # stays consistent — prevents "active HoD assignment exists but user is
-        # still in SCHOOL_OPS group" inconsistency (UserGuides §8.4).
-        canonical = ROLE_TO_CANONICAL.get(remaining.role_code, 'ACADEMIC')
-        assignment.staff.role = canonical
-    else:
-        # No other active assignment → revert to base ACADEMIC role.
+    latest_active = (
+        StaffRoleAssignment.objects
+        .filter(staff=assignment.staff, status='active')
+        .exclude(assignment_id=assignment.assignment_id)
+        .order_by('-created_at', '-assignment_id')
+        .first()
+    )
+    if latest_active is None:
         assignment.staff.role = 'ACADEMIC'
-    assignment.staff.save(update_fields=['role', 'updated_at'])
+        assignment.staff.save(update_fields=['role', 'updated_at'])
+    else:
+        assignment.staff.role = ROLE_TO_CANONICAL[latest_active.role_code]
+        if latest_active.resolved_department_id is not None:
+            assignment.staff.department = latest_active.resolved_department
+            assignment.staff.save(update_fields=['role', 'department', 'updated_at'])
+        else:
+            assignment.staff.save(update_fields=['role', 'updated_at'])
 
     return Response({'id': assignment.assignment_id, 'status': assignment.status})
 

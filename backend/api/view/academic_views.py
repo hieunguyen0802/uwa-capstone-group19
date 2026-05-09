@@ -24,8 +24,8 @@ from api.services.workload_service import (
 
 
 def _own_reports_qs(staff):
-    # Academic page always shows only the requesting staff member's own reports,
-    # even when HOD calls these endpoints acting in their Academic role.
+    # Academic pages always show only the requesting staff member's own reports,
+    # even when a HOD is acting in their Academic identity.
     return WorkloadReport.objects.filter(
         is_current=True, staff=staff
     ).select_related('staff__user', 'staff__department', 'snapshot_department')
