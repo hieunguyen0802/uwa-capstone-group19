@@ -591,7 +591,11 @@ def hos_staff_directory_import(request):
 @transaction.atomic
 def hos_v3_role_assignments(request):
     if request.method == 'GET':
-        queryset = StaffRoleAssignment.objects.select_related('staff__user').order_by('-created_at')
+        # Only surface active assignments; disabled ones are historical records
+        # and must not be treated as current permissions (UserGuides §2.1, §8.4).
+        queryset = StaffRoleAssignment.objects.select_related('staff__user').filter(
+            status='active'
+        ).order_by('-created_at')
         return Response({'items': [_serialize_assignment(obj) for obj in queryset[:500]]})
 
     payload = request.data or {}
@@ -615,6 +619,14 @@ def hos_v3_role_assignments(request):
     resolved = Department.objects.filter(name__iexact=department_name).first()
     if department_name and resolved is None:
         resolved = Department.objects.create(name=department_name)
+
+    # Disable any existing active assignments for this staff member before creating
+    # the new one — a person can only hold one current management identity at a time
+    # (UserGuides §2.1: HoD and Ops roles are mutually exclusive as active assignments).
+    StaffRoleAssignment.objects.filter(staff=staff, status='active').update(
+        status='disabled',
+        disable_reason='Superseded by new role assignment',
+    )
 
     assignment = StaffRoleAssignment.objects.create(
         staff=staff,
@@ -652,11 +664,20 @@ def hos_v3_role_assignment_status(request, assignment_id):
     assignment.disable_reason = str((request.data or {}).get('reason') or '')[:500]
     assignment.save(update_fields=['status', 'disable_reason', 'updated_at'])
 
-    if not StaffRoleAssignment.objects.filter(staff=assignment.staff, status='active').exclude(
-        assignment_id=assignment.assignment_id
-    ).exists():
+    remaining = StaffRoleAssignment.objects.filter(
+        staff=assignment.staff, status='active'
+    ).exclude(assignment_id=assignment.assignment_id).first()
+
+    if remaining:
+        # Sync staff.role to the surviving active assignment so Group membership
+        # stays consistent — prevents "active HoD assignment exists but user is
+        # still in SCHOOL_OPS group" inconsistency (UserGuides §8.4).
+        canonical = ROLE_TO_CANONICAL.get(remaining.role_code, 'ACADEMIC')
+        assignment.staff.role = canonical
+    else:
+        # No other active assignment → revert to base ACADEMIC role.
         assignment.staff.role = 'ACADEMIC'
-        assignment.staff.save(update_fields=['role', 'updated_at'])
+    assignment.staff.save(update_fields=['role', 'updated_at'])
 
     return Response({'id': assignment.assignment_id, 'status': assignment.status})
 

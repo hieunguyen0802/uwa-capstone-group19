@@ -458,10 +458,15 @@ class TestAcademicContractEndpoints(BaseTestCase):
         )
         self.assertEqual(res.status_code, 400)
 
-    def test_hod_forbidden_on_academic_contract_endpoints(self):
+    def test_hod_can_access_academic_workloads_as_own_self(self):
+        # UserGuides §2.1: HOD can act as Academic and view their own workload page.
+        # The HOD must only see their own reports, not the rest of the department's.
         client = self._auth_client(self.hod_csse)
         res = client.get('/api/academic/workloads/')
-        self.assertEqual(res.status_code, 403)
+        self.assertEqual(res.status_code, 200)
+        # self.report belongs to self.academic, not self.hod_csse — must not appear.
+        returned_ids = [item['id'] for item in res.data.get('items', [])]
+        self.assertNotIn(str(self.report.report_id), returned_ids)
 
 
 # ─── Test: academic workload list filters ─────────────────────────────────────
@@ -714,10 +719,11 @@ class TestAcademicVisualization(BaseTestCase):
         res = client.get('/api/academic/visualization/?semester=S1')
         self.assertEqual(res.status_code, 200)
 
-    def test_hod_forbidden_on_visualization(self):
+    def test_hod_can_access_visualization_as_own_self(self):
+        # UserGuides §2.1: HOD acting as Academic can view their own visualization.
         client = self._auth_client(self.hod_csse)
         res = client.get('/api/academic/visualization/')
-        self.assertEqual(res.status_code, 403)
+        self.assertEqual(res.status_code, 200)
 
     def test_unauthenticated_gets_401_on_visualization(self):
         res = self.client.get('/api/academic/visualization/')
@@ -767,10 +773,11 @@ class TestAcademicExport(BaseTestCase):
         # File must still be a valid xlsx (non-empty bytes)
         self.assertGreater(len(res.content), 0)
 
-    def test_hod_forbidden_on_export(self):
+    def test_hod_can_export_own_academic_data(self):
+        # UserGuides §2.1: HOD acting as Academic can export their own workload.
         client = self._auth_client(self.hod_csse)
         res = client.get('/api/academic/export/')
-        self.assertEqual(res.status_code, 403)
+        self.assertEqual(res.status_code, 200)
 
     def test_unauthenticated_gets_401_on_export(self):
         res = self.client.get('/api/academic/export/')
