@@ -23,6 +23,8 @@ import ThemedNoticeModal, { SUPERSEDED_RECORD_MESSAGE } from "../components/comm
 import WorkHoursBadge from "../components/common/WorkHoursBadge";
 import type { ProfileModalUser } from "../components/common/ProfileModalFieldGrid";
 import { apiJson, clearLocalStorageKeys, downloadApiFile, isAbortError } from "../api/client";
+import { useAuth } from "../auth/AuthContext";
+import { profileFromAuth } from "../auth/profileFromAuth";
 
 type AcademicItem = {
   id: number;
@@ -148,14 +150,6 @@ const LEGACY_ACADEMIC_STORAGE_KEYS = [
   OPS_ACADEMIC_NOTIFICATION_KEY,
   OPS_ACADEMIC_DISTRIBUTED_KEY,
 ] as const;
-const ACADEMIC_DASHBOARD_USER: ProfileModalUser = {
-  surname: "Dias",
-  firstName: "John",
-  employeeId: "12345931",
-  title: "Lecturer",
-  department: "Physics",
-  email: "john.dias@uwa.edu.au",
-};
 
 type AcademicNotification = {
   id: string;
@@ -239,7 +233,7 @@ function mapAcademicRowToItem(row: AcademicWorkloadRowResponse): AcademicItem {
     id: Number.isFinite(numericId) ? numericId : Date.now(),
     name: row.name,
     employeeId: row.employeeId,
-    department: ACADEMIC_DASHBOARD_USER.department,
+    department: "",
     title: row.title ?? undefined,
     notes: row.notes ?? "",
     hours: Number(row.hours ?? 0),
@@ -610,7 +604,8 @@ function AcademicDetailModal({
 }
 
 export default function Academic() {
-  const user = ACADEMIC_DASHBOARD_USER;
+  const { profile: authProfile } = useAuth();
+  const user = profileFromAuth(authProfile);
 
   const [items, setItems] = useState<AcademicItem[]>([]);
   const [loadingItems, setLoadingItems] = useState(true);

@@ -51,6 +51,8 @@ import {
 import TemplateImportExportActions from "../components/common/TemplateImportExportActions";
 import ThemedNoticeModal, { SUPERSEDED_RECORD_MESSAGE } from "../components/common/ThemedNoticeModal";
 import WorkHoursBadge from "../components/common/WorkHoursBadge";
+import { useAuth } from "../auth/AuthContext";
+import { profileFromAuth } from "../auth/profileFromAuth";
 
 type MockRequest = {
   id: number;
@@ -826,14 +828,8 @@ export default function SchoolofOperations() {
     status: "active" | "disabled";
   };
 
-  const user = {
-    surname: "Bronte",
-    firstName: "Yaka",
-    employeeId: "2345678",
-    title: "Professor",
-    department: "Senior School",
-    email: "yaka.bronte@uwa.edu.au",
-  };
+  const { profile: authProfile } = useAuth();
+  const user = profileFromAuth(authProfile);
 
   const [profileOpen, setProfileOpen] = useState(false);
   const [avatarSrc, setAvatarSrc] = useState<string | null>(null);
