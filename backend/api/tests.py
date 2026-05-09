@@ -2,8 +2,9 @@ from datetime import timedelta
 from decimal import Decimal
 from io import BytesIO
 
-from django.contrib.auth.models import User
+from django.contrib.auth.models import Group, User
 from django.core.files.uploadedfile import SimpleUploadedFile
+from django.core.management import call_command
 from django.utils import timezone
 from rest_framework.test import APITestCase, APIClient
 from rest_framework_simplejwt.tokens import RefreshToken
@@ -37,6 +38,8 @@ class BaseTestCase(APITestCase):
     """
 
     def setUp(self):
+        call_command('initialize_rbac', verbosity=0)
+
         # Two departments — used to verify HOD cannot cross department boundaries
         self.dept_csse = Department.objects.create(name='CSSE')
         self.dept_physics = Department.objects.create(name='Physics')
@@ -99,6 +102,32 @@ class BaseTestCase(APITestCase):
         client = APIClient()
         client.credentials(HTTP_AUTHORIZATION=f'Bearer {token}')
         return client
+
+    def _item_ids(self, res):
+        """Extract report id list from a paginated workload list response."""
+        return [item['id'] for item in res.data['items']]
+
+    def _submit_report(self, report, staff=None):
+        """Academic submits a WORKLOAD_REQUEST so HOD can act on the report."""
+        actor = staff or self.academic
+        AuditLog.objects.create(
+            report=report,
+            action_by=actor,
+            action_type='COMMENT',
+            comment='Submitting for review.',
+            changes={'kind': 'WORKLOAD_REQUEST', 'status': 'pending'},
+        )
+        report.status = 'PENDING'
+        report.save(update_fields=['status', 'updated_at'])
+
+    def _confirm_report_via_api(self, report, staff=None):
+        """Confirm one report via the public API."""
+        actor = staff or self.academic
+        client = self._auth_client(actor)
+        return client.post(
+            f'/api/academic/workloads/{report.report_id}/confirm/',
+            format='json',
+        )
 
 
 class TestOTPTokenModel(APITestCase):
@@ -1168,6 +1197,45 @@ class TestHoSContractEndpoints(BaseTestCase):
         self.assertEqual(rows[0]['role'], 'Admin')
         self.assertEqual(rows[0]['status'], 'active')
 
+    def test_hos_v3_admin_assignment_grants_ops_group_and_permission(self):
+        hos_client = self._auth_client(self.hos)
+        create = hos_client.post(
+            '/api/hos/role-assignments',
+            data={
+                'staffId': self.academic.staff_number,
+                'role': 'Admin',
+                'department': 'Senior School Coordinator',
+                'permissions': ['Distribute Workload to Departments'],
+            },
+            format='json',
+        )
+        self.assertEqual(create.status_code, 201)
+
+        self.academic.refresh_from_db()
+        self.academic.user = User.objects.get(pk=self.academic.user_id)
+        self.assertEqual(self.academic.role, 'SCHOOL_OPS')
+        self.assertTrue(self.academic.user.groups.filter(name='SCHOOL_OPS').exists())
+        self.assertTrue(self.academic.user.has_perm('api.access_school_ops_api'))
+
+        assigned_client = self._auth_client(self.academic)
+        ops_res = assigned_client.get('/api/admin/workload-requests/')
+        self.assertEqual(ops_res.status_code, 200)
+
+        disable = hos_client.patch(
+            f"/api/hos/role-assignments/{create.data['id']}/status",
+            data={'status': 'disabled', 'reason': 'Permission no longer required'},
+            format='json',
+        )
+        self.assertEqual(disable.status_code, 200)
+
+        self.academic.refresh_from_db()
+        self.academic.user = User.objects.get(pk=self.academic.user_id)
+        self.assertEqual(self.academic.role, 'ACADEMIC')
+        self.assertFalse(self.academic.user.groups.filter(name='SCHOOL_OPS').exists())
+        self.assertFalse(self.academic.user.has_perm('api.access_school_ops_api'))
+        denied = assigned_client.get('/api/admin/workload-requests/')
+        self.assertEqual(denied.status_code, 403)
+
     def test_hos_visualization_contract_shape(self):
         client = self._auth_client(self.hos)
         res = client.get('/api/headofschool/visualization/?from_year=2024&to_year=2026&semester=All')
@@ -1347,6 +1415,14 @@ class TestAdminOpsContract(BaseTestCase):
 
     def test_academic_blocked_from_admin_scope(self):
         client = self._auth_client(self.academic)
+        res = client.get('/api/admin/workload-requests/')
+        self.assertEqual(res.status_code, 403)
+
+    def test_admin_scope_requires_django_permission(self):
+        group = Group.objects.get(name='SCHOOL_OPS')
+        group.permissions.remove(*group.permissions.filter(codename='access_school_ops_api'))
+
+        client = self._auth_client(self.ops)
         res = client.get('/api/admin/workload-requests/')
         self.assertEqual(res.status_code, 403)
 

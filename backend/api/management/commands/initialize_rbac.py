@@ -29,6 +29,7 @@ ROLE_PERMISSIONS: dict[str, list[str]] = {
     "view_hod_page":          ["HOD"],
     "view_school_ops_page":   ["SCHOOL_OPS"],
     "view_hos_page":          ["HOS"],
+    "access_school_ops_api":  ["SCHOOL_OPS", "HOS"],
     "approve_workload_dept":  ["HOD"],
     "approve_workload_school":["HOS"],
     "import_workload":        ["SCHOOL_OPS"],
@@ -41,6 +42,7 @@ class Command(BaseCommand):
 
     @transaction.atomic
     def handle(self, *args, **opts):
+        verbosity = int(opts.get("verbosity", 1))
         staff_ct = ContentType.objects.get_for_model(Staff)
 
         # Ensure every codename exists as a Django Permission.
@@ -63,8 +65,10 @@ class Command(BaseCommand):
                 if role in roles
             ]
             group.permissions.set(desired)
-            self.stdout.write(
-                f"  Group {role}: {len(desired)} permissions"
-            )
+            if verbosity:
+                self.stdout.write(
+                    f"  Group {role}: {len(desired)} permissions"
+                )
 
-        self.stdout.write(self.style.SUCCESS("initialize_rbac: OK"))
+        if verbosity:
+            self.stdout.write(self.style.SUCCESS("initialize_rbac: OK"))
