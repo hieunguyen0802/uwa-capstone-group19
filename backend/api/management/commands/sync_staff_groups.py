@@ -37,12 +37,13 @@ class Command(BaseCommand):
             # avoid touching any Staff or User fields — only auth_user_groups
             # join table is written.
             staff._sync_group_membership()
-            groups = list(staff.user.groups.values_list('name', flat=True))
-            if groups:
-                self.stdout.write(f"  {staff.staff_number} ({staff.role}) → {groups}")
+            # Check specifically for the role group, not just any group,
+            # so a user in an unrelated group is not counted as synced.
+            if staff.user.groups.filter(name=staff.role).exists():
+                self.stdout.write(f"  {staff.staff_number} ({staff.role}) → synced")
                 synced += 1
             else:
-                # Group not found — initialize_rbac probably hasn't been run yet.
+                # Role group missing — initialize_rbac probably hasn't been run yet.
                 self.stdout.write(
                     self.style.WARNING(
                         f"  {staff.staff_number} ({staff.role}) → no Group found "

@@ -227,13 +227,13 @@ function normalizeAcademicBreakdown(
   };
 }
 
-function mapAcademicRowToItem(row: AcademicWorkloadRowResponse): AcademicItem {
+function mapAcademicRowToItem(row: AcademicWorkloadRowResponse, userDepartment = ""): AcademicItem {
   const numericId = Number.parseInt(String(row.id), 10);
   return {
     id: Number.isFinite(numericId) ? numericId : Date.now(),
     name: row.name,
     employeeId: row.employeeId,
-    department: "",
+    department: userDepartment,
     title: row.title ?? undefined,
     notes: row.notes ?? "",
     hours: Number(row.hours ?? 0),
@@ -249,8 +249,8 @@ function mapAcademicRowToItem(row: AcademicWorkloadRowResponse): AcademicItem {
   };
 }
 
-function mapAcademicDetailToItem(detail: AcademicWorkloadDetailResponse): AcademicItem {
-  const base = mapAcademicRowToItem(detail);
+function mapAcademicDetailToItem(detail: AcademicWorkloadDetailResponse, userDepartment = ""): AcademicItem {
+  const base = mapAcademicRowToItem(detail, userDepartment);
   const normalizedBreakdown = normalizeAcademicBreakdown(detail.breakdown);
   const actualTeachingRatio = typeof detail.actualTeachingRatio === "number" ? detail.actualTeachingRatio : null;
   return {
@@ -702,7 +702,7 @@ export default function Academic() {
     setPageError("");
     try {
       const response = await apiJson<AcademicWorkloadListResponse>("/api/academic/workloads/");
-      setItems((response.items ?? []).map(mapAcademicRowToItem));
+      setItems((response.items ?? []).map((row) => mapAcademicRowToItem(row, user.department)));
     } catch (error) {
       if (!isAbortError(error)) {
         setItems([]);
@@ -745,7 +745,7 @@ export default function Academic() {
 
   async function loadAcademicWorkloadDetail(id: number) {
     const detail = await apiJson<AcademicWorkloadDetailResponse>(`/api/academic/workloads/${id}/`);
-    const mapped = mapAcademicDetailToItem(detail);
+    const mapped = mapAcademicDetailToItem(detail, user.department);
     setItems((prev) => prev.map((item) => (item.id === id ? { ...item, ...mapped } : item)));
     return mapped;
   }
