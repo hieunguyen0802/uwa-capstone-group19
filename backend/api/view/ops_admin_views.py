@@ -54,6 +54,7 @@ from api.view.supervisor_views import (
 )
 
 OPS_API_PERMISSION = 'api.access_school_ops_api'
+SUPERSEDED_ROLE_REASON = 'Superseded by a newer role assignment.'
 MAX_EXCEL_UPLOAD_BYTES = 5 * 1024 * 1024
 EXPORT_MEDIA_SUBDIR = 'exports'
 TEMPLATE_MEDIA_SUBDIR = 'templates'
@@ -1325,6 +1326,7 @@ def admin_staff_patch(request, staff_id):
 @api_view(['GET', 'POST'])
 @permission_classes([IsAuthenticated])
 @require_any_perm(OPS_API_PERMISSION)
+@transaction.atomic
 def admin_role_assignments(request):
     """GET list + POST create."""
     if request.method == 'GET':
@@ -1349,6 +1351,12 @@ def admin_role_assignments(request):
         return Response({'success': False, 'message': 'staff not found'}, status=http_status.HTTP_404_NOT_FOUND)
 
     resolved = Department.objects.filter(name__iexact=dept_scope).first()
+
+    StaffRoleAssignment.objects.filter(staff=staff_row, status='active').update(
+        status='disabled',
+        disable_reason=SUPERSEDED_ROLE_REASON,
+        updated_at=timezone.now(),
+    )
 
     assignment = StaffRoleAssignment.objects.create(
         staff=staff_row,

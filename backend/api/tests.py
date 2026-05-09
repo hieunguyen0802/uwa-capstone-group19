@@ -1458,6 +1458,36 @@ class TestAdminOpsContract(BaseTestCase):
         self.assertEqual(disabled.status_code, 200)
         self.assertEqual(disabled.data['data']['status'], 'disabled')
 
+    def test_admin_role_assignment_replaces_previous_active_role(self):
+        client = self._auth_client(self.ops)
+        first = client.post('/api/admin/role-assignments/', {
+            'staff_id': self.academic.staff_number,
+            'role': 'HoD',
+            'department': self.dept_csse.name,
+            'permissions': ['View Workload'],
+        }, format='json')
+        self.assertEqual(first.status_code, 201)
+
+        second = client.post('/api/admin/role-assignments/', {
+            'staff_id': self.academic.staff_number,
+            'role': 'Admin',
+            'department': 'Senior School Coordinator',
+            'permissions': ['Distribute Workload to Departments'],
+        }, format='json')
+        self.assertEqual(second.status_code, 201)
+
+        first_assignment = StaffRoleAssignment.objects.get(assignment_id=first.data['data']['id'])
+        self.assertEqual(first_assignment.status, 'disabled')
+        self.assertEqual(first_assignment.disable_reason, 'Superseded by a newer role assignment.')
+
+        active = StaffRoleAssignment.objects.filter(staff=self.academic, status='active')
+        self.assertEqual(active.count(), 1)
+        self.assertEqual(active.get().assignment_id, second.data['data']['id'])
+
+        self.academic.refresh_from_db()
+        self.assertEqual(self.academic.role, 'SCHOOL_OPS')
+        self.assertTrue(self.academic.user.groups.filter(name='SCHOOL_OPS').exists())
+
     def test_admin_export_manifest_and_download_roundtrip(self):
         client = self._auth_client(self.ops)
         manifest = client.get('/api/admin/export/')
