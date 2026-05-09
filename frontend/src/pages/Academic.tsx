@@ -21,8 +21,9 @@ import StatusPill from "../components/common/StatusPill";
 import YearRangeSemesterActionRow from "../components/common/YearRangeSemesterActionRow";
 import ThemedNoticeModal, { SUPERSEDED_RECORD_MESSAGE } from "../components/common/ThemedNoticeModal";
 import WorkHoursBadge from "../components/common/WorkHoursBadge";
-import type { ProfileModalUser } from "../components/common/ProfileModalFieldGrid";
 import { apiJson, clearLocalStorageKeys, downloadApiFile, isAbortError } from "../api/client";
+import { useAuth } from "../auth/AuthContext";
+import { profileFromAuth } from "../auth/profileFromAuth";
 
 type AcademicItem = {
   id: number;
@@ -148,15 +149,6 @@ const LEGACY_ACADEMIC_STORAGE_KEYS = [
   OPS_ACADEMIC_NOTIFICATION_KEY,
   OPS_ACADEMIC_DISTRIBUTED_KEY,
 ] as const;
-const ACADEMIC_DASHBOARD_USER: ProfileModalUser = {
-  surname: "Dias",
-  firstName: "John",
-  employeeId: "12345931",
-  title: "Lecturer",
-  department: "Physics",
-  email: "john.dias@uwa.edu.au",
-};
-
 type AcademicNotification = {
   id: string;
   recipientStaffId: string;
@@ -233,13 +225,13 @@ function normalizeAcademicBreakdown(
   };
 }
 
-function mapAcademicRowToItem(row: AcademicWorkloadRowResponse): AcademicItem {
+function mapAcademicRowToItem(row: AcademicWorkloadRowResponse, userDepartment = ""): AcademicItem {
   const numericId = Number.parseInt(String(row.id), 10);
   return {
     id: Number.isFinite(numericId) ? numericId : Date.now(),
     name: row.name,
     employeeId: row.employeeId,
-    department: ACADEMIC_DASHBOARD_USER.department,
+    department: userDepartment,
     title: row.title ?? undefined,
     notes: row.notes ?? "",
     hours: Number(row.hours ?? 0),
@@ -255,8 +247,8 @@ function mapAcademicRowToItem(row: AcademicWorkloadRowResponse): AcademicItem {
   };
 }
 
-function mapAcademicDetailToItem(detail: AcademicWorkloadDetailResponse): AcademicItem {
-  const base = mapAcademicRowToItem(detail);
+function mapAcademicDetailToItem(detail: AcademicWorkloadDetailResponse, userDepartment = ""): AcademicItem {
+  const base = mapAcademicRowToItem(detail, userDepartment);
   const normalizedBreakdown = normalizeAcademicBreakdown(detail.breakdown);
   const actualTeachingRatio = typeof detail.actualTeachingRatio === "number" ? detail.actualTeachingRatio : null;
   return {
@@ -610,7 +602,8 @@ function AcademicDetailModal({
 }
 
 export default function Academic() {
-  const user = ACADEMIC_DASHBOARD_USER;
+  const { profile: authProfile } = useAuth();
+  const user = profileFromAuth(authProfile);
 
   const [items, setItems] = useState<AcademicItem[]>([]);
   const [loadingItems, setLoadingItems] = useState(true);
@@ -707,7 +700,7 @@ export default function Academic() {
     setPageError("");
     try {
       const response = await apiJson<AcademicWorkloadListResponse>("/api/academic/workloads/");
-      setItems((response.items ?? []).map(mapAcademicRowToItem));
+      setItems((response.items ?? []).map((row) => mapAcademicRowToItem(row, user.department)));
     } catch (error) {
       if (!isAbortError(error)) {
         setItems([]);
@@ -750,7 +743,7 @@ export default function Academic() {
 
   async function loadAcademicWorkloadDetail(id: number) {
     const detail = await apiJson<AcademicWorkloadDetailResponse>(`/api/academic/workloads/${id}/`);
-    const mapped = mapAcademicDetailToItem(detail);
+    const mapped = mapAcademicDetailToItem(detail, user.department);
     setItems((prev) => prev.map((item) => (item.id === id ? { ...item, ...mapped } : item)));
     return mapped;
   }

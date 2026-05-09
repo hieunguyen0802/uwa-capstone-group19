@@ -24,7 +24,8 @@ from api.models import Staff
 # Permission codename → set of roles that should have it.
 # Keep codenames short and stable; frontend reads them verbatim.
 ROLE_PERMISSIONS: dict[str, list[str]] = {
-    "view_academic_page":     ["ACADEMIC", "HOD", "HOS"],
+    # HOS does not use the Academic page per UserGuides section 2.1.
+    "view_academic_page":     ["ACADEMIC", "HOD"],
     "view_hod_page":          ["HOD"],
     "view_school_ops_page":   ["SCHOOL_OPS"],
     "view_hos_page":          ["HOS"],
