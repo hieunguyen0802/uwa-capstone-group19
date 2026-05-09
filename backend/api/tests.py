@@ -1,7 +1,9 @@
 from datetime import timedelta
 from decimal import Decimal
+from io import BytesIO
 
 from django.contrib.auth.models import User
+from django.core.files.uploadedfile import SimpleUploadedFile
 from django.utils import timezone
 from rest_framework.test import APITestCase, APIClient
 from rest_framework_simplejwt.tokens import RefreshToken
@@ -1409,4 +1411,62 @@ class TestCodexAuditFixes(BaseTestCase):
         self.assertIn('APPROVE', action_types)
         self.assertIn('MODIFIED_BY_REIMPORT', action_types)
         self.assertIn('IMPORTED', action_types)
+
+
+class TestHoSStaffDirectoryImport(BaseTestCase):
+    def _staff_import_file(self, rows):
+        import openpyxl
+
+        workbook = openpyxl.Workbook()
+        worksheet = workbook.active
+        worksheet.append([
+            'staff_id',
+            'first_name',
+            'last_name',
+            'email',
+            'title',
+            'department',
+            'active_status',
+        ])
+        for row in rows:
+            worksheet.append(row)
+
+        stream = BytesIO()
+        workbook.save(stream)
+        return SimpleUploadedFile(
+            'staff.xlsx',
+            stream.getvalue(),
+            content_type='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+        )
+
+    def test_invalid_staff_import_rejects_whole_file_without_saving(self):
+        client = self._auth_client(self.hos)
+        upload = self._staff_import_file([
+            ['87654321', 'Jane', 'Doe', 'jane.doe@uwa.edu.au', 'Lecturer', 'Physics', 'Active'],
+            ['87654322', 'Bad', 'Email', 'bad-email', 'Lecturer', 'Physics', 'Active'],
+        ])
+
+        res = client.post('/api/hos/staff-directory/import', {'file': upload}, format='multipart')
+
+        self.assertEqual(res.status_code, 400)
+        self.assertFalse(res.data['success'])
+        self.assertEqual(res.data['importedCount'], 0)
+        self.assertEqual(res.data['failedCount'], 1)
+        self.assertFalse(Staff.objects.filter(staff_number='87654321').exists())
+        row_messages = res.data['items'][1]['messages']
+        self.assertIn('email must contain @', row_messages)
+
+    def test_staff_import_defaults_blank_active_status_to_active(self):
+        client = self._auth_client(self.hos)
+        upload = self._staff_import_file([
+            ['87654323', 'Active', 'Default', 'active.default@uwa.edu.au', 'Lecturer', 'Physics', ''],
+        ])
+
+        res = client.post('/api/hos/staff-directory/import', {'file': upload}, format='multipart')
+
+        self.assertEqual(res.status_code, 200)
+        self.assertTrue(res.data['success'])
+        staff = Staff.objects.get(staff_number='87654323')
+        self.assertTrue(staff.is_active)
+        self.assertEqual(staff.user.email, 'active.default@uwa.edu.au')
 

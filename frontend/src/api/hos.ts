@@ -78,6 +78,21 @@ export type HosAnalyticsPayload = {
   workloadHoursDistribution: Array<{ department: string; totalWorkHours: number }>;
 };
 
+export type HosStaffImportItem = {
+  rowNumber: number;
+  staffId: string;
+  messages: string[];
+  imported: boolean;
+};
+
+export type HosStaffImportResponse = {
+  success: boolean;
+  message?: string;
+  importedCount: number;
+  failedCount: number;
+  items: HosStaffImportItem[];
+};
+
 export async function fetchHosWorkloadRequests(params: Record<string, string>) {
   const res = await apiClient.get("/hos/workload-requests", { params });
   return res.data as { items: HosWorkloadRow[]; total: number };
@@ -116,12 +131,7 @@ export async function importHosStaffDirectory(file: File) {
   const formData = new FormData();
   formData.append("file", file);
   const res = await apiClient.post("/hos/staff-directory/import", formData);
-  return res.data as {
-    success: boolean;
-    importedCount: number;
-    failedCount: number;
-    items: Array<{ rowNumber: number; staffId: string; messages: string[]; imported: boolean }>;
-  };
+  return res.data as HosStaffImportResponse;
 }
 
 export async function fetchHosRoleAssignments() {

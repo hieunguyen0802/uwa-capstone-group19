@@ -122,6 +122,22 @@ def _row_value(row, *keys, default=''):
     return default
 
 
+def _parse_staff_active_status(value):
+    if value in (None, ''):
+        return True, None
+    if isinstance(value, bool):
+        return value, None
+
+    normalized = str(value).strip().lower()
+    if not normalized:
+        return True, None
+    if normalized in ('active', 'true', '1', 'yes', 'y'):
+        return True, None
+    if normalized in ('inactive', 'false', '0', 'no', 'n'):
+        return False, None
+    return True, 'active_status must be Active or Inactive'
+
+
 def _normalize_staff_import_row(row, row_number):
     staff_id = str(_row_value(row, 'staffId', 'staff_id', 'Staff ID', 'Staff Number')).strip()
     first_name = str(_row_value(row, 'firstName', 'first_name', 'First Name')).strip()
@@ -130,12 +146,7 @@ def _normalize_staff_import_row(row, row_number):
     title = str(_row_value(row, 'title', 'Title')).strip()
     department = str(_row_value(row, 'department', 'Department')).strip() or 'Computer Science & Software Engineering'
     active_raw = _row_value(row, 'isActive', 'active_status', 'Active Status', default='Active')
-    is_active = active_raw if isinstance(active_raw, bool) else str(active_raw).strip().lower() in (
-        'true',
-        '1',
-        'yes',
-        'active',
-    )
+    is_active, active_message = _parse_staff_active_status(active_raw)
     is_new_raw = _row_value(row, 'isNewEmployee', 'is_new_employee', 'new_employee', 'New Employee', default='')
     is_new_employee = (
         is_new_raw if isinstance(is_new_raw, bool)
@@ -144,12 +155,22 @@ def _normalize_staff_import_row(row, row_number):
     notes = str(_row_value(row, 'notes', 'Notes')).strip()
 
     messages = []
-    if not _is_valid_staff_number(staff_id):
-        messages.append('staffId must be 8 characters')
-    if email and '@' not in email:
-        messages.append('email format is invalid')
+    if not staff_id:
+        messages.append('staff_id is required')
+    elif not _is_valid_staff_number(staff_id):
+        messages.append('staff_id must be exactly 8 characters')
+    if not first_name:
+        messages.append('first_name is required')
+    if not last_name:
+        messages.append('last_name is required')
+    if not email:
+        messages.append('email is required')
+    elif '@' not in email:
+        messages.append('email must contain @')
     if department not in ALLOWED_STAFF_DEPARTMENTS:
         messages.append('department is not in allowed values')
+    if active_message:
+        messages.append(active_message)
 
     return {
         'rowNumber': row_number,
@@ -466,12 +487,36 @@ def hos_staff_directory_import(request):
         return Response({'success': False, 'message': error}, status=http_status.HTTP_400_BAD_REQUEST)
 
     parsed_rows = [_normalize_staff_import_row(row, idx) for idx, row in enumerate(rows, start=2)]
+    if not parsed_rows:
+        return Response(
+            {
+                'success': False,
+                'message': 'No staff rows found in the uploaded file.',
+                'importedCount': 0,
+                'failedCount': 0,
+                'items': [],
+            },
+            status=http_status.HTTP_400_BAD_REQUEST,
+        )
+
+    invalid_rows = [row for row in parsed_rows if not row['valid']]
+    if invalid_rows:
+        for parsed in parsed_rows:
+            parsed['imported'] = False
+        return Response(
+            {
+                'success': False,
+                'message': 'Staff import validation failed. No records were saved.',
+                'importedCount': 0,
+                'failedCount': len(invalid_rows),
+                'items': parsed_rows,
+            },
+            status=http_status.HTTP_400_BAD_REQUEST,
+        )
+
     imported_count = 0
 
     for parsed in parsed_rows:
-        if not parsed['valid']:
-            continue
-
         department, _ = Department.objects.get_or_create(name=parsed['department'])
         existing_staff = Staff.objects.select_related('user').filter(staff_number=parsed['staffId']).first()
         user = existing_staff.user if existing_staff else None
