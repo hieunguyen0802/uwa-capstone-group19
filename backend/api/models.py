@@ -70,7 +70,6 @@ class Staff(models.Model):
     Usage:
         staff = Staff.objects.get(user=request.user)  # get staff from logged-in user
         staff.role          # 'ACADEMIC'
-        staff.fte           # Decimal('1.00')
         staff.department.name  # 'Computer Science'
     """
 
@@ -105,27 +104,6 @@ class Staff(models.Model):
         related_name='staff_members'  # reverse: dept.staff_members.all()
     )
 
-    # Full-Time Equivalent. 1.0 = full-time, 0.5 = half-time.
-    # Business rule: FTE × 100 = total annual workload points for this staff member.
-    # e.g. FTE=0.5 → 50 pts = 862.5 hours/year.
-    fte = models.DecimalField(
-        max_digits=4,
-        decimal_places=2,
-        default=Decimal('1.00'),
-        validators=[MinValueValidator(Decimal('0.00'))]  # FTE cannot be negative
-    )
-
-    # Used to identify Casual staff for separate reporting (pending Daniela Q5 confirmation).
-    EMPLOYMENT_CHOICES = [
-        ('FULL_TIME', 'Full-time'),
-        ('PART_TIME', 'Part-time'),
-        ('CASUAL', 'Casual'),
-    ]
-    employment_type = models.CharField(max_length=20, choices=EMPLOYMENT_CHOICES, default='FULL_TIME')
-
-    # Optional display title (e.g. "Professor") for shared profile API (contract §11.2).
-    academic_title = models.CharField(max_length=120, blank=True, default='')
-
     # Profile photo; validated extensions only (see FileExtensionValidator).
     avatar = models.ImageField(
         upload_to=staff_avatar_upload_to,
@@ -141,12 +119,6 @@ class Staff(models.Model):
 
     # Academic title (e.g. "Lecturer", "Associate Professor") — display only, not used for RBAC.
     title = models.CharField(max_length=100, blank=True, default='')
-
-    # True for staff in their first year; affects workload band calculation.
-    is_new_employee = models.BooleanField(default=False)
-
-    # Free-text notes visible to School Ops only.
-    notes = models.TextField(blank=True, default='')
 
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)  # auto-updated on every save()
@@ -347,7 +319,7 @@ class WorkloadItem(models.Model):
 
     Note: there is NO 'RESEARCH' category.
     Research is a remainder, calculated on the fly — never stored:
-        research_pts = staff.fte * 100 - teaching_pts - hdr_pts - role_pts - service_pts
+        research_pts = report.snapshot_fte * 100 - teaching_pts - hdr_pts - role_pts - service_pts
     """
 
     item_id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)

@@ -89,8 +89,8 @@ def _serialize_staff_directory_row(staff):
         'title': staff.title or '',
         'currentDepartment': staff.department.name,
         'isActive': bool(staff.is_active),
-        'isNewEmployee': bool(staff.is_new_employee),
-        'notes': staff.notes or '',
+        'isNewEmployee': False,
+        'notes': '',
     }
 
 
@@ -136,13 +136,6 @@ def _normalize_staff_import_row(row, row_number):
         'yes',
         'active',
     )
-    is_new_raw = _row_value(row, 'isNewEmployee', 'is_new_employee', 'new_employee', 'New Employee', default='')
-    is_new_employee = (
-        is_new_raw if isinstance(is_new_raw, bool)
-        else str(is_new_raw).strip().lower() in ('true', '1', 'yes', 'y')
-    )
-    notes = str(_row_value(row, 'notes', 'Notes')).strip()
-
     messages = []
     if not _is_valid_staff_number(staff_id):
         messages.append('staffId must be 8 characters')
@@ -160,8 +153,8 @@ def _normalize_staff_import_row(row, row_number):
         'title': title,
         'department': department,
         'isActive': bool(is_active),
-        'isNewEmployee': bool(is_new_employee),
-        'notes': notes,
+        'isNewEmployee': False,
+        'notes': '',
         'messages': messages,
         'valid': not messages,
     }
@@ -412,7 +405,12 @@ def hos_semester_distribution_report_download(request, report_id):
 @permission_classes([IsAuthenticated])
 @require_role('HOS', 'SCHOOL_OPS')
 def hos_staff_directory(request):
-    qs = Staff.objects.select_related('user', 'department').order_by('staff_number')
+    qs = (
+        Staff.objects.select_related('user', 'department')
+        .exclude(pk=request.staff.pk)
+        .exclude(role='HOS')
+        .order_by('staff_number')
+    )
 
     first_name = (request.GET.get('firstName') or request.GET.get('first_name') or '').strip()
     if first_name:
@@ -502,8 +500,6 @@ def hos_staff_directory_import(request):
                 department=department,
                 is_active=parsed['isActive'],
                 title=parsed['title'],
-                is_new_employee=parsed['isNewEmployee'],
-                notes=parsed['notes'],
             )
         else:
             staff = existing_staff
@@ -511,15 +507,11 @@ def hos_staff_directory_import(request):
             staff.department = department
             staff.is_active = parsed['isActive']
             staff.title = parsed['title']
-            staff.is_new_employee = parsed['isNewEmployee']
-            staff.notes = parsed['notes']
             staff.save(update_fields=[
                 'user',
                 'department',
                 'is_active',
                 'title',
-                'is_new_employee',
-                'notes',
                 'updated_at',
             ])
         parsed['imported'] = True

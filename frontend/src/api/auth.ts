@@ -22,6 +22,7 @@ export type AuthProfile = {
   full_name: string;
   role: "ACADEMIC" | "HOD" | "SCHOOL_OPS" | "HOS";
   department: string | null;
+  title: string;
   permissions: string[];
   menu: MenuItem[];
 };
@@ -61,6 +62,7 @@ function normalizeAuthProfile(raw: unknown): AuthProfile {
     full_name: typeof data.full_name === "string" ? data.full_name : "",
     role: (typeof data.role === "string" ? data.role : "ACADEMIC") as AuthProfile["role"],
     department: typeof data.department === "string" ? data.department : null,
+    title: typeof data.title === "string" ? data.title : "",
     permissions: normalizePermissions(data.permissions),
     menu: normalizeMenu(data.menu),
   };

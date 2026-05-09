@@ -233,6 +233,13 @@ export default function HeadofSchool() {
 
   const { profile: authProfile } = useAuth();
   const user = profileFromAuth(authProfile);
+  const profileUser = useMemo(
+    () => ({
+      ...user,
+      department: "Head of School",
+    }),
+    [user]
+  );
 
   const [hosReportInboxOpen, setHosReportInboxOpen] = useState(false);
   const [profileOpen, setProfileOpen] = useState(false);
@@ -1000,15 +1007,6 @@ export default function HeadofSchool() {
       };
     });
 
-    worksheet.addRow({
-      staff_id: "50199999",
-      first_name: "Jane",
-      last_name: "Doe",
-      email: "jane.doe@uwa.edu.au",
-      title: "Lecturer",
-      department: "Physics",
-      active_status: "Active",
-    });
     worksheet.spliceColumns(8, Math.max(0, worksheet.columnCount - 7));
 
     // Keep only format pick-lists; optional fields may be blank.
@@ -1329,7 +1327,7 @@ export default function HeadofSchool() {
           onClose={() => setProfileOpen(false)}
           avatarSrc={avatarSrc}
           onAvatarUpload={handleAvatarUpload}
-          user={user}
+          user={profileUser}
         />
 
         <div className="mt-6 rounded-md bg-white p-4 shadow-sm">

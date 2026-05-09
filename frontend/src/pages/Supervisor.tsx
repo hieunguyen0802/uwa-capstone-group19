@@ -12,6 +12,8 @@ import VisualizationSummaryCards from "../components/common/VisualizationSummary
 import ThemedNoticeModal, { SUPERSEDED_RECORD_MESSAGE } from "../components/common/ThemedNoticeModal";
 import WorkHoursBadge from "../components/common/WorkHoursBadge";
 import { apiJson, clearLocalStorageKeys, downloadApiFile, isAbortError } from "../api/client";
+import { useAuth } from "../auth/AuthContext";
+import { profileFromAuth } from "../auth/profileFromAuth";
 
 type MockRequest = {
   id: number;
@@ -268,14 +270,8 @@ function submittedAtDisplay(item: Pick<MockRequest, "submittedAt">): string {
 }
 
 export default function Supervisor() {
-  const user = {
-    surname: "Rachel",
-    firstName: "Rachel",
-    employeeId: "12345931",
-    title: "Lecturer",
-    department: "Physics",
-    email: "rachel.rachel@uwa.edu.au",
-  };
+  const { profile: authProfile } = useAuth();
+  const user = profileFromAuth(authProfile);
 
   const [profileOpen, setProfileOpen] = useState(false);
   const [avatarSrc, setAvatarSrc] = useState<string | null>(null);

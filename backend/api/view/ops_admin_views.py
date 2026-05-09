@@ -15,6 +15,7 @@ from decimal import Decimal
 from pathlib import Path
 
 from django.conf import settings
+from django.contrib.auth.models import User
 from django.core.cache import cache
 from django.core.paginator import Paginator
 from django.db import models, transaction
@@ -54,6 +55,11 @@ from api.view.supervisor_views import (
 )
 
 ADMIN_ROLES = ('SCHOOL_OPS', 'HOS')
+ACADEMIC_IMPORT_DEPARTMENTS = (
+    'Physics',
+    'Mathematics & Statistics',
+    'Computer Science & Software Engineering',
+)
 MAX_EXCEL_UPLOAD_BYTES = 5 * 1024 * 1024
 EXPORT_MEDIA_SUBDIR = 'exports'
 TEMPLATE_MEDIA_SUBDIR = 'templates'
@@ -120,12 +126,27 @@ def _serialize_staff_row(staff_row: Staff):
         'lastName': user_obj.last_name or '',
         'email': user_obj.email or '',
         'title': staff_row.title or '',
-        'currentDepartment': staff_row.department.name,
+        'currentDepartment': staff_row.department.name if staff_row.department_id else '',
         'isActive': staff_row.is_active,
-        'isNewEmployee': staff_row.is_new_employee,
-        'notes': staff_row.notes or '',
+        'isNewEmployee': False,
+        'notes': '',
         'updatedAt': staff_row.updated_at.strftime('%Y-%m-%d %H:%M'),
     }
+
+
+def _coerce_import_bool(value, default=None):
+    if value is None:
+        return default
+    if isinstance(value, bool):
+        return value
+    normalized = str(value).strip().lower()
+    if not normalized:
+        return default
+    if normalized in {'active', 'yes', 'true', '1', 'y'}:
+        return True
+    if normalized in {'inactive', 'no', 'false', '0', 'n'}:
+        return False
+    return default
 
 
 def _get_distributed_time(report):
@@ -175,7 +196,7 @@ def _serialize_workload_row(report, items):
         'cancelled': False,
         'importedFromTemplate': report.import_batch_id is not None,
         'targetBand': None,
-        'workloadNewStaff': report.staff.is_new_employee,
+        'workloadNewStaff': False,
         'hodReview': 'no',
         'distributedTime': _get_distributed_time(report),
     }
@@ -228,7 +249,7 @@ def _serialize_workload_detail(report, items):
         'targetBand': None,
         'calculatedBand': calculated_band,
         'fte': float(report.snapshot_fte),
-        'workloadNewStaff': report.staff.is_new_employee,
+        'workloadNewStaff': False,
         'hodReview': 'no',
         'cancelled': False,
         'notes': _get_request_reason(report),
@@ -875,7 +896,7 @@ def admin_workload_import(request):
                 staff=staff_row,
                 academic_year=year_int,
                 semester=semester,
-                snapshot_fte=staff_row.fte,
+                snapshot_fte=Decimal('1.00'),
                 snapshot_department=staff_row.department,
                 status='INITIAL',
                 import_batch_id=batch_id,
@@ -980,8 +1001,8 @@ def admin_staff_import(request):
     """POST /api/school-operations/staff/import  (also /api/admin/staff/import/)
 
     Accepts JSON body: { "rows": [ { staffId, firstName, lastName, email, title,
-    department, isActive, isNewEmployee, notes } ] }
-    Updates existing Staff only — never creates phantom users.
+    department, isActive } ] }
+    Creates or updates ACADEMIC staff rows for Ops academic imports.
     """
     body = request.data or {}
     rows = body.get('rows')
@@ -994,103 +1015,94 @@ def admin_staff_import(request):
     created_count = 0
     updated_count = 0
     failures = []
+    allowed_department_map = {name.lower(): name for name in ACADEMIC_IMPORT_DEPARTMENTS}
 
     for idx, row in enumerate(rows):
-        staff_number = str(row.get('staffId', '')).strip()
-        if not staff_number:
-            failures.append({'index': idx, 'message': 'staffId is required'})
+        staff_number = str(row.get('staffId') or row.get('staff_id') or '').strip()
+        if not re.fullmatch(r'\d{8}', staff_number):
+            failures.append({'index': idx, 'staffId': staff_number, 'message': 'staffId must be exactly 8 digits'})
             continue
+
+        first_name = str(row.get('firstName') or row.get('first_name') or '').strip()[:150]
+        last_name = str(row.get('lastName') or row.get('last_name') or '').strip()[:150]
+        email_clean = str(row.get('email') or '').strip().lower()
+        title = str(row.get('title') or '').strip()[:100]
+        dept_raw = str(row.get('department') or '').strip()
+        is_active = _coerce_import_bool(
+            row.get('isActive') if 'isActive' in row else row.get('active_status'),
+            default=True,
+        )
+
+        if not first_name:
+            failures.append({'index': idx, 'staffId': staff_number, 'message': 'firstName is required'})
+            continue
+        if not last_name:
+            failures.append({'index': idx, 'staffId': staff_number, 'message': 'lastName is required'})
+            continue
+        if not email_clean:
+            failures.append({'index': idx, 'staffId': staff_number, 'message': 'email is required'})
+            continue
+        if not re.match(r'^[^@\s]+@[^@\s]+\.[^@\s]+$', email_clean):
+            failures.append({'index': idx, 'staffId': staff_number, 'message': 'invalid email'})
+            continue
+        if not dept_raw:
+            failures.append({'index': idx, 'staffId': staff_number, 'message': 'department is required'})
+            continue
+
+        dept = Department.objects.filter(name__iexact=dept_raw).first()
+        if not dept:
+            canonical_department = allowed_department_map.get(dept_raw.lower())
+            if not canonical_department:
+                failures.append({'index': idx, 'staffId': staff_number, 'message': 'department not found'})
+                continue
+            dept = Department.objects.create(name=canonical_department)
 
         staff_row = Staff.objects.select_related('user', 'department').filter(staff_number=staff_number).first()
-        if not staff_row:
-            failures.append({'index': idx, 'staffId': staff_number, 'message': 'Staff not found'})
-            continue
+        created_this_row = staff_row is None
+        user_obj = staff_row.user if staff_row else None
+        if user_obj is None:
+            user_obj = User.objects.filter(username=staff_number).first()
 
-        user_obj = staff_row.user
-        # Snapshot BEFORE any field write so the diff reflects the caller's intent.
         before_snapshot = {
-            'first_name': user_obj.first_name,
-            'last_name': user_obj.last_name,
-            'email': user_obj.email,
-            'department': staff_row.department.name if staff_row.department_id else '',
-            'title': staff_row.title,
-            'is_active': staff_row.is_active,
-            'is_new_employee': staff_row.is_new_employee,
-            'notes': staff_row.notes,
+            'first_name': user_obj.first_name if user_obj else '',
+            'last_name': user_obj.last_name if user_obj else '',
+            'email': user_obj.email if user_obj else '',
+            'department': staff_row.department.name if staff_row and staff_row.department_id else '',
+            'title': staff_row.title if staff_row else '',
+            'is_active': staff_row.is_active if staff_row else True,
         }
 
-        # Validate every field BEFORE any DB write. A row that fails halfway
-        # through must not leave the user/staff tables partially updated —
-        # and must not drop its audit breadcrumb.
-        row_error = None
-        pending_user_fields = {}
-        pending_staff_fields = {}
-        pending_department = None
-
-        first_name = row.get('firstName')
-        if first_name is not None:
-            pending_user_fields['first_name'] = str(first_name).strip()[:150]
-
-        last_name = row.get('lastName')
-        if last_name is not None:
-            pending_user_fields['last_name'] = str(last_name).strip()[:150]
-
-        email = row.get('email')
-        if email is not None:
-            email_clean = str(email).strip().lower()
-            if email_clean and not re.match(r'^[^@\s]+@[^@\s]+\.[^@\s]+$', email_clean):
-                row_error = 'invalid email'
-            else:
-                pending_user_fields['email'] = email_clean
-
-        if row_error is None:
-            dept_name = row.get('department')
-            if dept_name:
-                dept = Department.objects.filter(name__iexact=str(dept_name).strip()).first()
-                if not dept:
-                    row_error = 'department not found'
-                else:
-                    pending_department = dept
-
-        if row_error is None:
-            title = row.get('title')
-            if title is not None:
-                pending_staff_fields['title'] = str(title).strip()[:100]
-
-            is_active = row.get('isActive')
-            if is_active is not None:
-                pending_staff_fields['is_active'] = bool(is_active)
-
-            is_new = row.get('isNewEmployee')
-            if is_new is not None:
-                pending_staff_fields['is_new_employee'] = bool(is_new)
-
-            notes = row.get('notes')
-            if notes is not None:
-                pending_staff_fields['notes'] = str(notes)
-
-        if row_error is not None:
-            failures.append({'index': idx, 'staffId': staff_number, 'message': row_error})
-            continue
-
-        # All validation passed — apply writes inside a savepoint so a mid-row
-        # exception still rolls back cleanly.
         with transaction.atomic():
-            for field, value in pending_user_fields.items():
-                setattr(user_obj, field, value)
-            if pending_user_fields:
-                user_obj.save(update_fields=list(pending_user_fields.keys()))
+            if user_obj is None:
+                user_obj = User(username=staff_number)
+                user_obj.set_unusable_password()
 
-            staff_update_fields = []
-            if pending_department is not None:
-                staff_row.department = pending_department
-                staff_update_fields.append('department')
-            for field, value in pending_staff_fields.items():
-                setattr(staff_row, field, value)
-                staff_update_fields.append(field)
-            if staff_update_fields:
-                staff_update_fields.append('updated_at')
-                staff_row.save(update_fields=staff_update_fields)
+            user_obj.username = staff_number
+            user_obj.first_name = first_name
+            user_obj.last_name = last_name
+            user_obj.email = email_clean
+            user_obj.is_active = bool(is_active)
+            if user_obj.pk:
+                user_obj.save(update_fields=['username', 'first_name', 'last_name', 'email', 'is_active'])
+            else:
+                user_obj.save()
+
+            if staff_row is None:
+                staff_row = Staff.objects.create(
+                    user=user_obj,
+                    staff_number=staff_number,
+                    department=dept,
+                    role='ACADEMIC',
+                    title=title,
+                    is_active=bool(is_active),
+                )
+            else:
+                staff_row.department = dept
+                staff_row.title = title
+                staff_row.is_active = bool(is_active)
+                if not staff_row.role:
+                    staff_row.role = 'ACADEMIC'
+                staff_row.save()
 
         after_snapshot = {
             'first_name': user_obj.first_name,
@@ -1099,8 +1111,6 @@ def admin_staff_import(request):
             'department': staff_row.department.name if staff_row.department_id else '',
             'title': staff_row.title,
             'is_active': staff_row.is_active,
-            'is_new_employee': staff_row.is_new_employee,
-            'notes': staff_row.notes,
         }
         diffs = compute_diffs(
             before_snapshot,
@@ -1112,8 +1122,6 @@ def admin_staff_import(request):
                 'department': 'Department',
                 'title': 'Title',
                 'is_active': 'Active',
-                'is_new_employee': 'New employee',
-                'notes': 'Notes',
             },
         )
         if diffs:
@@ -1132,7 +1140,10 @@ def admin_staff_import(request):
                 staff_number=staff_row.staff_number,
             )
 
-        updated_count += 1
+        if created_this_row:
+            created_count += 1
+        else:
+            updated_count += 1
 
     return Response({
         'ok': True,
@@ -1147,7 +1158,7 @@ def admin_staff_import(request):
 @require_role(*ADMIN_ROLES)
 def admin_staff_list(request):
     """GET /api/school-operations/staff  (also /api/admin/staff/)"""
-    queryset = Staff.objects.select_related('user', 'department').order_by('staff_number')
+    queryset = Staff.objects.select_related('user', 'department').filter(role='ACADEMIC').order_by('staff_number')
 
     # New contract query params
     staff_id = request.GET.get('staff_id', '').strip()
@@ -1221,9 +1232,6 @@ def admin_staff_patch(request, staff_id):
     is_active = payload.get('isActive') if 'isActive' in payload else (
         None if 'active_status' not in payload else (payload.get('active_status', '').lower() != 'inactive')
     )
-    is_new_employee = payload.get('isNewEmployee')
-    notes = payload.get('notes')
-
     user_obj = staff_row.user
     # Snapshot before any mutation so the diff reflects the user's intent, not post-save state.
     before_snapshot = {
@@ -1233,8 +1241,6 @@ def admin_staff_patch(request, staff_id):
         'department': staff_row.department.name if staff_row.department_id else '',
         'title': staff_row.title,
         'is_active': staff_row.is_active,
-        'is_new_employee': staff_row.is_new_employee,
-        'notes': staff_row.notes,
     }
     user_fields = []
 
@@ -1270,14 +1276,6 @@ def admin_staff_patch(request, staff_id):
         staff_row.is_active = bool(is_active)
         staff_fields.append('is_active')
 
-    if is_new_employee is not None:
-        staff_row.is_new_employee = bool(is_new_employee)
-        staff_fields.append('is_new_employee')
-
-    if notes is not None:
-        staff_row.notes = str(notes)
-        staff_fields.append('notes')
-
     if staff_fields:
         staff_fields.append('updated_at')
         staff_row.save(update_fields=staff_fields)
@@ -1289,8 +1287,6 @@ def admin_staff_patch(request, staff_id):
         'department': staff_row.department.name if staff_row.department_id else '',
         'title': staff_row.title,
         'is_active': staff_row.is_active,
-        'is_new_employee': staff_row.is_new_employee,
-        'notes': staff_row.notes,
     }
     diffs = compute_diffs(
         before_snapshot,
@@ -1302,8 +1298,6 @@ def admin_staff_patch(request, staff_id):
             'department': 'Department',
             'title': 'Title',
             'is_active': 'Active',
-            'is_new_employee': 'New employee',
-            'notes': 'Notes',
         },
     )
     if diffs:

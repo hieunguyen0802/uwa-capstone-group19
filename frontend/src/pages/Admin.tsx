@@ -51,6 +51,9 @@ import {
 import TemplateImportExportActions from "../components/common/TemplateImportExportActions";
 import ThemedNoticeModal, { SUPERSEDED_RECORD_MESSAGE } from "../components/common/ThemedNoticeModal";
 import WorkHoursBadge from "../components/common/WorkHoursBadge";
+import { apiJson } from "../api/client";
+import { useAuth } from "../auth/AuthContext";
+import { profileFromAuth } from "../auth/profileFromAuth";
 
 type MockRequest = {
   id: number;
@@ -148,6 +151,12 @@ const OPS_ACADEMIC_DISTRIBUTED_KEY = "ops_academic_distributed_workloads_v1";
 const OPS_SEMESTER_REPORTS_KEY = "ops_semester_report_inbox_v1";
 const ACADEMIC_STATUS_SYNC_KEY = "academic_status_sync_v1";
 const ACADEMIC_NOTES_SYNC_KEY = "academic_notes_sync_v1";
+const ACADEMICS_TEMPLATE_FILENAME = "Academics_template.xlsx";
+const ACADEMIC_IMPORT_DEPARTMENTS = [
+  "Physics",
+  "Mathematics & Statistics",
+  "Computer Science & Software Engineering",
+] as const;
 const SEMESTER_EXPECTED_MIN_HOURS = 856;
 const SEMESTER_EXPECTED_MAX_HOURS = 864;
 const WORKLOAD_REPORT_SEMESTER_LABEL = "2025-S1";
@@ -188,12 +197,6 @@ function submittedTimeById(id: number) {
   const day = ((id - 1) % 28) + 1;
   const hour = 8 + (id % 9);
   return `2026-03-${String(day).padStart(2, "0")} ${String(hour).padStart(2, "0")}:00`;
-}
-
-function modifiedTimeById(id: number) {
-  const day = ((id + 1) % 28) + 1;
-  const hour = 9 + (id % 8);
-  return `2026-03-${String(day).padStart(2, "0")} ${String(hour).padStart(2, "0")}:30`;
 }
 
 function breakdownById(id: number, totalHours: number): BreakdownData {
@@ -814,6 +817,43 @@ export default function SchoolofOperations() {
     isActive: boolean;
     isNewEmployee: boolean;
     notes: string;
+    updatedAt: string;
+  };
+  type StaffDirectoryApiRow = {
+    id: string;
+    staffId: string;
+    firstName: string;
+    lastName: string;
+    email: string;
+    title: string;
+    currentDepartment: string;
+    isActive: boolean;
+    isNewEmployee: boolean;
+    notes: string;
+    updatedAt: string;
+  };
+  type StaffDirectoryResponse = {
+    success: boolean;
+    message: string;
+    data?: {
+      items: StaffDirectoryApiRow[];
+      pagination?: {
+        page: number;
+        pageSize: number;
+        totalItems: number;
+        totalPages: number;
+      };
+    };
+  };
+  type StaffImportResponse = {
+    ok: boolean;
+    created: number;
+    updated: number;
+    errors: { index: number; staffId?: string; message: string }[];
+  };
+  type StaffPatchResponse = {
+    ok: boolean;
+    staff: StaffDirectoryApiRow;
   };
   type RoleAssignment = {
     id: number;
@@ -826,14 +866,8 @@ export default function SchoolofOperations() {
     status: "active" | "disabled";
   };
 
-  const user = {
-    surname: "Bronte",
-    firstName: "Yaka",
-    employeeId: "2345678",
-    title: "Professor",
-    department: "Senior School",
-    email: "yaka.bronte@uwa.edu.au",
-  };
+  const { profile: authProfile } = useAuth();
+  const user = profileFromAuth(authProfile);
 
   const [profileOpen, setProfileOpen] = useState(false);
   const [avatarSrc, setAvatarSrc] = useState<string | null>(null);
@@ -856,6 +890,59 @@ export default function SchoolofOperations() {
 
   useEffect(() => {
     clearLegacySchoolOpsMockStorage();
+  }, []);
+
+  function mapStaffRowToAssignablePerson(row: StaffDirectoryApiRow, index: number): AssignablePerson {
+    return {
+      id: index + 1,
+      staffId: row.staffId,
+      firstName: row.firstName,
+      lastName: row.lastName,
+      email: row.email,
+      title: row.title,
+      currentDepartment: row.currentDepartment,
+      isActive: row.isActive,
+      isNewEmployee: row.isNewEmployee,
+      notes: row.notes,
+      updatedAt: row.updatedAt,
+    };
+  }
+
+  async function loadStaffDirectory() {
+    const response = await apiJson<StaffDirectoryResponse>("/api/school-operations/staff?page=1&page_size=200");
+    const items = (response.data?.items ?? []).map(mapStaffRowToAssignablePerson);
+    setAssignablePeople(items);
+    setImportMessage((prev) =>
+      prev.startsWith("Load failed") || prev.startsWith("Import failed") ? "" : prev
+    );
+    setSelectedPerson((prev) => {
+      if (!prev) return prev;
+      return items.find((item) => item.staffId === prev.staffId) ?? null;
+    });
+    setStaffDraft((prev) => {
+      if (!prev) return prev;
+      const matched = items.find((item) => item.staffId === prev.staffId);
+      if (!matched) return prev;
+      return {
+        id: matched.id,
+        staffId: matched.staffId,
+        firstName: matched.firstName,
+        lastName: matched.lastName,
+        email: matched.email,
+        title: matched.title,
+        department: matched.currentDepartment,
+        isActive: matched.isActive ? "Active" : "Inactive",
+        isNewEmployee: matched.isNewEmployee,
+        notes: matched.notes,
+      };
+    });
+  }
+
+  useEffect(() => {
+    void loadStaffDirectory().catch((error) => {
+      const message = error instanceof Error ? error.message : "Could not load academic staff directory.";
+      setImportMessage(`Load failed: ${message}`);
+    });
   }, []);
 
   useEffect(() => {
@@ -1011,58 +1098,9 @@ export default function SchoolofOperations() {
     "Computer Science & Software Engineering",
     "Senior School Coordinator",
   ];
+  const academicImportDepartments = [...ACADEMIC_IMPORT_DEPARTMENTS];
   const availablePermissions = rolePermissionMap[assignRole];
-  const initialAssignablePeople: AssignablePerson[] = [
-    {
-      id: 1,
-      staffId: "12345678",
-      firstName: "John",
-      lastName: "Doe",
-      email: "john.doe@uwa.edu.au",
-      title: "Lecturer",
-      currentDepartment: "Computer Science & Software Engineering",
-      isActive: true,
-      isNewEmployee: false,
-      notes: "",
-    },
-    {
-      id: 2,
-      staffId: "12345745",
-      firstName: "Marcelina",
-      lastName: "Amina",
-      email: "marcelina.amina@uwa.edu.au",
-      title: "Senior Lecturer",
-      currentDepartment: "Computer Science & Software Engineering",
-      isActive: false,
-      isNewEmployee: false,
-      notes: "",
-    },
-    {
-      id: 4,
-      staffId: "12345931",
-      firstName: "John",
-      lastName: "Dias",
-      email: "john.dias@uwa.edu.au",
-      title: "Lecturer",
-      currentDepartment: "Physics",
-      isActive: true,
-      isNewEmployee: false,
-      notes: "",
-    },
-    {
-      id: 5,
-      staffId: "12346060",
-      firstName: "Lina",
-      lastName: "Patel",
-      email: "lina.patel@uwa.edu.au",
-      title: "Lecturer",
-      currentDepartment: "Computer Science & Software Engineering",
-      isActive: true,
-      isNewEmployee: false,
-      notes: "",
-    },
-  ];
-  const [assignablePeople, setAssignablePeople] = useState<AssignablePerson[]>(initialAssignablePeople);
+  const [assignablePeople, setAssignablePeople] = useState<AssignablePerson[]>([]);
   const [importMessage, setImportMessage] = useState("");
   const [staffModalOpen, setStaffModalOpen] = useState(false);
   const [staffDraft, setStaffDraft] = useState<StaffProfileDraft | null>(null);
@@ -2160,13 +2198,12 @@ export default function SchoolofOperations() {
     setStaffModalError("");
   }
 
-  function handleUpdateStaffDraft() {
+  async function handleUpdateStaffDraft() {
     if (!staffDraft) return;
-    const allowedDepartments = new Set([
+    const allowedDepartments = new Set<string>([
       "Physics",
       "Mathematics & Statistics",
       "Computer Science & Software Engineering",
-      "Senior School Coordinator",
     ]);
     const emailPattern = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
     if (!/^\d{8}$/.test(staffDraft.staffId.trim())) {
@@ -2201,21 +2238,35 @@ export default function SchoolofOperations() {
       isActive: staffDraft.isActive === "Active",
       isNewEmployee: staffDraft.isNewEmployee,
       notes: staffDraft.notes.trim(),
+      updatedAt: "",
     };
 
-    setAssignablePeople((prev) => prev.map((person) => (person.id === updatedPerson.id ? updatedPerson : person)));
-    if (selectedPerson?.id === updatedPerson.id) {
-      setSelectedPerson(updatedPerson);
-      if (availableDepartments.includes(updatedPerson.currentDepartment as AssignDepartment)) {
-        setAssignDepartment(updatedPerson.currentDepartment as AssignDepartment);
-      }
+    try {
+      const response = await apiJson<StaffPatchResponse>(`/api/school-operations/staff/${updatedPerson.staffId}`, {
+        method: "PATCH",
+        body: JSON.stringify({
+          staffId: updatedPerson.staffId,
+          firstName: updatedPerson.firstName,
+          lastName: updatedPerson.lastName,
+          email: updatedPerson.email,
+          title: updatedPerson.title,
+          department: updatedPerson.currentDepartment,
+          isActive: updatedPerson.isActive,
+          isNewEmployee: updatedPerson.isNewEmployee,
+          notes: updatedPerson.notes,
+        }),
+      });
+      setImportMessage(`Updated academic profile for ${response.staff.firstName} ${response.staff.lastName}.`);
+      await loadStaffDirectory();
+      closeStaffModal();
+    } catch (error) {
+      setStaffModalError(error instanceof Error ? error.message : "Could not update this academic profile.");
     }
-    closeStaffModal();
   }
 
   async function handleDownloadTemplate() {
     const workbook = new ExcelJS.Workbook();
-    const worksheet = workbook.addWorksheet("staff_import_template");
+    const worksheet = workbook.addWorksheet("academics_template");
 
     worksheet.columns = [
       { header: "staff_id", key: "staff_id", width: 14 },
@@ -2241,16 +2292,6 @@ export default function SchoolofOperations() {
         right: { style: "thin" },
         bottom: { style: "thin" },
       };
-    });
-
-    worksheet.addRow({
-      staff_id: "50199999",
-      first_name: "Jane",
-      last_name: "Doe",
-      email: "jane.doe@uwa.edu.au",
-      title: "Lecturer",
-      department: "Physics",
-      active_status: "Active",
     });
 
     // Apply data validation to a practical import range.
@@ -2292,19 +2333,19 @@ export default function SchoolofOperations() {
       worksheet.getCell(`F${row}`).dataValidation = {
         type: "list",
         allowBlank: false,
-        formulae: ['"Physics,Mathematics & Statistics,Computer Science & Software Engineering,Senior School Coordinator"'],
+        formulae: [`"${academicImportDepartments.join(",")}"`],
         showErrorMessage: true,
         errorTitle: "Invalid department",
         error:
-          "Department must be one of: Physics, Mathematics & Statistics, Computer Science & Software Engineering, Senior School Coordinator.",
+          "Department must be one of: Physics, Mathematics & Statistics, Computer Science & Software Engineering.",
       };
       worksheet.getCell(`G${row}`).dataValidation = {
         type: "list",
-        allowBlank: false,
+        allowBlank: true,
         formulae: ['"Active,Inactive"'],
         showErrorMessage: true,
         errorTitle: "Invalid Active Status",
-        error: "Active Status must be Active or Inactive.",
+        error: "Active Status must be Active or Inactive. Leave blank to default to Active.",
       };
     }
 
@@ -2315,7 +2356,7 @@ export default function SchoolofOperations() {
     const url = URL.createObjectURL(blob);
     const link = document.createElement("a");
     link.href = url;
-    link.download = "Staff_Template.xlsx";
+    link.download = ACADEMICS_TEMPLATE_FILENAME;
     document.body.appendChild(link);
     link.click();
     document.body.removeChild(link);
@@ -2652,6 +2693,7 @@ export default function SchoolofOperations() {
 
   function parseActiveStatus(value: string) {
     const normalized = value.trim().toLowerCase();
+    if (!normalized) return true;
     if (normalized === "active" || normalized === "yes" || normalized === "true") return true;
     if (normalized === "inactive" || normalized === "no" || normalized === "false") return false;
     return null;
@@ -2664,92 +2706,110 @@ export default function SchoolofOperations() {
     return raw === "true" || raw === "yes" || raw === "y" || raw === "1";
   }
 
-  function handleImportTemplate(event: ChangeEvent<HTMLInputElement>) {
+  async function handleImportTemplate(event: ChangeEvent<HTMLInputElement>) {
     const file = event.target.files?.[0];
+    event.target.value = "";
     if (!file) return;
-    const reader = new FileReader();
-    reader.onload = () => {
-      try {
-        const allowedDepartments = new Set([
-          "Physics",
-          "Mathematics & Statistics",
-          "Computer Science & Software Engineering",
-          "Senior School Coordinator",
-        ]);
-        const emailPattern = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
-        const binary = reader.result;
-        const workbook = XLSX.read(binary, { type: "array" });
-        const firstSheet = workbook.Sheets[workbook.SheetNames[0]];
-        const rows = XLSX.utils.sheet_to_json<Record<string, unknown>>(firstSheet, { defval: "" });
+    try {
+      const allowedDepartments = new Set<string>(academicImportDepartments);
+      const emailPattern = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+      const binary = await file.arrayBuffer();
+      const workbook = XLSX.read(binary, { type: "array" });
+      const firstSheet = workbook.Sheets[workbook.SheetNames[0]];
+      const rows = XLSX.utils.sheet_to_json<Record<string, unknown>>(firstSheet, { defval: "" });
 
-        if (rows.length === 0) {
-          setImportMessage("Import failed: file is empty.");
+      if (rows.length === 0) {
+        setImportMessage("Import failed: file is empty.");
+        return;
+      }
+
+      const payloadRows: Array<{
+        staffId: string;
+        firstName: string;
+        lastName: string;
+        email: string;
+        title: string;
+        department: string;
+        isActive: boolean;
+        isNewEmployee: boolean;
+        notes: string;
+      }> = [];
+
+      for (let i = 0; i < rows.length; i += 1) {
+        const row = rows[i];
+        const staffId = String(row.staff_id ?? "").trim();
+        const firstName = String(row.first_name ?? "").trim();
+        const lastName = String(row.last_name ?? "").trim();
+        const email = String(row.email ?? "").trim();
+        const title = String(row.title ?? "").trim();
+        const department = String(row.department ?? "").trim();
+        const isActiveRaw = String(row.active_status ?? row.is_active ?? "").trim();
+        const isActive = parseActiveStatus(isActiveRaw);
+        const isNewEmployee = parseIsNewEmployee(row.is_new_employee ?? row.new_employee);
+        const notes = String(row.notes ?? "").trim();
+        const rowNumber = i + 2;
+
+        if (!/^\d{8}$/.test(staffId)) {
+          setImportMessage(`Import failed: row ${rowNumber} staff_id must be exactly 8 digits.`);
+          return;
+        }
+        if (!firstName) {
+          setImportMessage(`Import failed: row ${rowNumber} first_name is required.`);
+          return;
+        }
+        if (!lastName) {
+          setImportMessage(`Import failed: row ${rowNumber} last_name is required.`);
+          return;
+        }
+        if (!emailPattern.test(email)) {
+          setImportMessage(`Import failed: row ${rowNumber} email format is invalid.`);
+          return;
+        }
+        if (!allowedDepartments.has(department)) {
+          setImportMessage(
+            `Import failed: row ${rowNumber} department must be Physics, Mathematics & Statistics, or Computer Science & Software Engineering.`
+          );
+          return;
+        }
+        if (isActive === null) {
+          setImportMessage(`Import failed: row ${rowNumber} Active Status must be Active or Inactive.`);
           return;
         }
 
-        const parsed: AssignablePerson[] = [];
-        for (let i = 0; i < rows.length; i += 1) {
-          const row = rows[i];
-          const staffId = String(row.staff_id ?? "").trim();
-          const firstName = String(row.first_name ?? "").trim();
-          const lastName = String(row.last_name ?? "").trim();
-          const email = String(row.email ?? "").trim();
-          const title = String(row.title ?? "").trim();
-          const department = String(row.department ?? "").trim();
-          const isActiveRaw = String(row.active_status ?? row.is_active ?? "").trim();
-          const isActive = parseActiveStatus(isActiveRaw);
-          const isNewEmployee = parseIsNewEmployee(row.is_new_employee ?? row.new_employee);
-          const notes = String(row.notes ?? "").trim();
-          const rowNumber = i + 2;
-
-          if (!/^\d{8}$/.test(staffId)) {
-            setImportMessage(`Import failed: row ${rowNumber} staff_id must be exactly 8 digits.`);
-            return;
-          }
-          if (!firstName) {
-            setImportMessage(`Import failed: row ${rowNumber} first_name is required.`);
-            return;
-          }
-          if (!lastName) {
-            setImportMessage(`Import failed: row ${rowNumber} last_name is required.`);
-            return;
-          }
-          if (!emailPattern.test(email)) {
-            setImportMessage(`Import failed: row ${rowNumber} email format is invalid.`);
-            return;
-          }
-          if (!allowedDepartments.has(department)) {
-            setImportMessage(`Import failed: row ${rowNumber} department must be one of the 4 allowed schools.`);
-            return;
-          }
-          if (isActive === null) {
-            setImportMessage(`Import failed: row ${rowNumber} Active Status must be Active or Inactive.`);
-            return;
-          }
-
-          parsed.push({
-            id: i + 1,
-            staffId,
-            firstName,
-            lastName,
-            email,
-            title,
-            currentDepartment: department,
-            isActive,
-            isNewEmployee,
-            notes,
-          });
-        }
-
-        setAssignablePeople(parsed);
-        setSelectedPerson(null);
-        setImportMessage("");
-      } catch {
-        setImportMessage("Import failed: please upload a valid .xlsx template file.");
+        payloadRows.push({
+          staffId,
+          firstName,
+          lastName,
+          email,
+          title,
+          department,
+          isActive,
+          isNewEmployee,
+          notes,
+        });
       }
-    };
-    reader.readAsArrayBuffer(file);
-    event.target.value = "";
+
+      const response = await apiJson<StaffImportResponse>("/api/school-operations/staff/import", {
+        method: "POST",
+        body: JSON.stringify({ rows: payloadRows }),
+      });
+      await loadStaffDirectory();
+      setSelectedPerson(null);
+      if (response.errors.length > 0) {
+        const firstError = response.errors[0];
+        setImportMessage(
+          `Import completed: ${response.created} created, ${response.updated} updated, ${response.errors.length} failed. First error: row ${firstError.index + 2} ${firstError.message}.`
+        );
+      } else {
+        setImportMessage(`Import completed: ${response.created} created, ${response.updated} updated.`);
+      }
+    } catch (error) {
+      setImportMessage(
+        error instanceof Error
+          ? `Import failed: ${error.message}`
+          : "Import failed: please upload a valid .xlsx template file."
+      );
+    }
   }
 
   function handleAssignRole() {
@@ -3863,8 +3923,14 @@ export default function SchoolofOperations() {
                   />
                 }
               />
-              {importMessage.startsWith("Import failed") ? (
-                <div className="mt-3 rounded border border-red-200 bg-red-50 px-3 py-2 text-sm font-semibold text-red-800">
+              {importMessage ? (
+                <div
+                  className={`mt-3 rounded px-3 py-2 text-sm font-semibold ${
+                    importMessage.startsWith("Import failed") || importMessage.startsWith("Load failed")
+                      ? "border border-red-200 bg-red-50 text-red-800"
+                      : "border border-emerald-200 bg-emerald-50 text-emerald-800"
+                  }`}
+                >
                   {importMessage}
                 </div>
               ) : null}
@@ -3949,7 +4015,7 @@ export default function SchoolofOperations() {
                     <tbody>
                       {adminPageItems.map((person) => (
                         <tr
-                          key={person.id}
+                          key={person.staffId}
                           className={`border-t border-slate-100 ${
                             person.isActive ? "cursor-pointer hover:bg-slate-50" : "bg-slate-100/70 text-slate-400"
                           }`}
@@ -3962,7 +4028,7 @@ export default function SchoolofOperations() {
                           <td className="px-3 py-2">{person.title || "-"}</td>
                           <td className="px-3 py-2">{person.currentDepartment || "-"}</td>
                           <td className="px-3 py-2 text-right tabular-nums font-sans text-slate-700">
-                            {modifiedTimeById(person.id)}
+                            {person.updatedAt || "-"}
                           </td>
                         </tr>
                       ))}
@@ -3988,7 +4054,7 @@ export default function SchoolofOperations() {
               <StaffProfileModal
                 open={staffModalOpen}
                 draft={staffDraft}
-                departments={availableDepartments}
+                departments={academicImportDepartments}
                 error={staffModalError}
                 onClose={closeStaffModal}
                 onFieldChange={(field, value) => {

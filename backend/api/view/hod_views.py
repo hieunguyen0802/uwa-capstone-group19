@@ -270,7 +270,7 @@ def _serialize_detail(report):
         else None
     )
 
-    employment_map = {'FULL_TIME': 'Full-time', 'PART_TIME': 'Part-time', 'CASUAL': 'Casual'}
+    employment_type = 'Part-time' if report.snapshot_fte < Decimal('1.00') else 'Full-time'
 
     return {
         'id': str(report.report_id),
@@ -282,12 +282,12 @@ def _serialize_detail(report):
         'targetTeachingRatio': target_tr,
         'actualTeachingRatio': actual_tr,
         'totalWorkHours': _to_hours(total_hours),
-        'employmentType': employment_map.get(staff.employment_type, staff.employment_type),
-        'isNewStaff': bool(staff.is_new_employee),
+        'employmentType': employment_type,
+        'isNewStaff': False,
         # hodReviewRequired / schoolOperationsNotes are not modelled yet; exposed as defaults
         # so the frontend contract stays stable. Backed by real data once models catch up.
         'hodReviewRequired': False,
-        'schoolOperationsNotes': staff.notes or '',
+        'schoolOperationsNotes': '',
         'applicationReason': _get_request_reason(report),
         'status': report.status.lower(),
         'breakdown': _serialize_breakdown(items, report),

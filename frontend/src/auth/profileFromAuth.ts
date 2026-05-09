@@ -17,7 +17,7 @@ export function profileFromAuth(profile: AuthProfile | null): ProfileModalUser {
     firstName,
     surname,
     department: profile.department ?? "",
-    title: "",
+    title: profile.title ?? "",
     email: profile.email,
   };
 }
