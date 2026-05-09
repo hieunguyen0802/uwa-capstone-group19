@@ -27,7 +27,7 @@ from rest_framework.permissions import IsAuthenticated
 from rest_framework.response import Response
 from rest_framework.throttling import UserRateThrottle
 
-from api.decorators import require_role
+from api.decorators import require_any_perm
 from api.models import (
     AuditLog,
     Department,
@@ -53,7 +53,8 @@ from api.view.supervisor_views import (
     _to_decimal_hours,
 )
 
-ADMIN_ROLES = ('SCHOOL_OPS', 'HOS')
+OPS_API_PERMISSION = 'api.access_school_ops_api'
+SUPERSEDED_ROLE_REASON = 'Superseded by a newer role assignment.'
 MAX_EXCEL_UPLOAD_BYTES = 5 * 1024 * 1024
 EXPORT_MEDIA_SUBDIR = 'exports'
 TEMPLATE_MEDIA_SUBDIR = 'templates'
@@ -251,6 +252,15 @@ def _serialize_assignment_row(obj: StaffRoleAssignment):    return {
     }
 
 
+def _dedupe_latest_assignment_by_staff(assignments):
+    latest_by_staff = {}
+    for assignment in assignments:
+        if assignment.staff_id in latest_by_staff:
+            continue
+        latest_by_staff[assignment.staff_id] = assignment
+    return list(latest_by_staff.values())
+
+
 def _build_visualization_payload(reports_queryset, year_from, year_to, semester_filter, dept_label_scope):
     """
     Shape aligns with frontend_api_contract_cn.md §9.11 HoS visualization for Admin reuse.
@@ -352,7 +362,7 @@ def _staff_from_body_or_path(request, lookup_id: str):
 
 @api_view(['GET'])
 @permission_classes([IsAuthenticated])
-@require_role(*ADMIN_ROLES)
+@require_any_perm(OPS_API_PERMISSION)
 def admin_workload_requests(request):
     """GET /api/school-operations/workloads  (also /api/admin/workload-requests/)"""
     base_qs = _admin_reports_qs(request.staff).prefetch_related('items').select_related(
@@ -442,7 +452,7 @@ def admin_workload_requests(request):
 
 @api_view(['GET'])
 @permission_classes([IsAuthenticated])
-@require_role(*ADMIN_ROLES)
+@require_any_perm(OPS_API_PERMISSION)
 def admin_workload_request_detail(request, id):
     """GET /api/school-operations/workloads/{id}  (also /api/admin/workload-requests/{id}/)"""
     qs = (
@@ -462,7 +472,7 @@ def admin_workload_request_detail(request, id):
 
 @api_view(['POST'])
 @permission_classes([IsAuthenticated])
-@require_role(*ADMIN_ROLES)
+@require_any_perm(OPS_API_PERMISSION)
 @transaction.atomic
 def admin_batch_decision(request):
     """POST /api/admin/workload-requests/batch-decision/"""
@@ -534,7 +544,7 @@ def admin_batch_decision(request):
 
 @api_view(['POST'])
 @permission_classes([IsAuthenticated])
-@require_role(*ADMIN_ROLES)
+@require_any_perm(OPS_API_PERMISSION)
 @transaction.atomic
 def admin_single_decision(request, id):
     """POST /api/admin/workload-requests/{id}/decision/"""
@@ -616,7 +626,7 @@ def admin_single_decision(request, id):
 
 @api_view(['POST'])
 @permission_classes([IsAuthenticated])
-@require_role(*ADMIN_ROLES)
+@require_any_perm(OPS_API_PERMISSION)
 @transaction.atomic
 def admin_distribute_workloads(request):
     """POST /api/school-operations/workloads/distribute  (also /api/admin/workloads/distribute/)"""
@@ -762,7 +772,7 @@ def _dispatch_template_download(request, filename: str):
 
 @api_view(['GET'])
 @permission_classes([IsAuthenticated])
-@require_role(*ADMIN_ROLES)
+@require_any_perm(OPS_API_PERMISSION)
 def admin_workload_import_template(request):
     headers = ['employee_id', 'name', 'description', 'total_work_hours', 'status']
     return _admin_template_urls(request, 'workloads/import-template', 'Workload_Template.xlsx', headers, [])
@@ -770,14 +780,14 @@ def admin_workload_import_template(request):
 
 @api_view(['GET'])
 @permission_classes([IsAuthenticated])
-@require_role(*ADMIN_ROLES)
+@require_any_perm(OPS_API_PERMISSION)
 def admin_workload_import_template_download(request):
     return _dispatch_template_download(request, 'Workload_Template.xlsx')
 
 
 @api_view(['GET'])
 @permission_classes([IsAuthenticated])
-@require_role(*ADMIN_ROLES)
+@require_any_perm(OPS_API_PERMISSION)
 def admin_staff_import_template(request):
     headers = ['employee_id', 'first_name', 'last_name', 'email', 'department', 'active_status']
     return _admin_template_urls(request, 'staff/import-template', 'Staff_Template.xlsx', headers, [])
@@ -785,14 +795,14 @@ def admin_staff_import_template(request):
 
 @api_view(['GET'])
 @permission_classes([IsAuthenticated])
-@require_role(*ADMIN_ROLES)
+@require_any_perm(OPS_API_PERMISSION)
 def admin_staff_import_template_download(request):
     return _dispatch_template_download(request, 'Staff_Template.xlsx')
 
 
 @api_view(['POST'])
 @permission_classes([IsAuthenticated])
-@require_role(*ADMIN_ROLES)
+@require_any_perm(OPS_API_PERMISSION)
 @throttle_classes([AdminImportThrottle])
 @transaction.atomic
 def admin_workload_import(request):
@@ -973,7 +983,7 @@ def admin_workload_import(request):
 
 @api_view(['POST'])
 @permission_classes([IsAuthenticated])
-@require_role(*ADMIN_ROLES)
+@require_any_perm(OPS_API_PERMISSION)
 @throttle_classes([AdminImportThrottle])
 @transaction.atomic
 def admin_staff_import(request):
@@ -1144,7 +1154,7 @@ def admin_staff_import(request):
 
 @api_view(['GET'])
 @permission_classes([IsAuthenticated])
-@require_role(*ADMIN_ROLES)
+@require_any_perm(OPS_API_PERMISSION)
 def admin_staff_list(request):
     """GET /api/school-operations/staff  (also /api/admin/staff/)"""
     queryset = Staff.objects.select_related('user', 'department').order_by('staff_number')
@@ -1197,7 +1207,7 @@ def admin_staff_list(request):
 
 @api_view(['GET', 'PATCH'])
 @permission_classes([IsAuthenticated])
-@require_role(*ADMIN_ROLES)
+@require_any_perm(OPS_API_PERMISSION)
 @transaction.atomic
 def admin_staff_patch(request, staff_id):
     """GET /api/school-operations/staff/{staffId}  or  PATCH /api/school-operations/staff/{staffId}"""
@@ -1324,13 +1334,24 @@ def admin_staff_patch(request, staff_id):
 
 @api_view(['GET', 'POST'])
 @permission_classes([IsAuthenticated])
-@require_role(*ADMIN_ROLES)
+@require_any_perm(OPS_API_PERMISSION)
+@transaction.atomic
 def admin_role_assignments(request):
     """GET list + POST create."""
     if request.method == 'GET':
         queryset = StaffRoleAssignment.objects.select_related('staff', 'resolved_department').order_by('-created_at')
+        include_disabled = (
+            str(request.GET.get('includeDisabled') or request.GET.get('include_disabled') or '')
+            .strip()
+            .lower()
+            in ('1', 'true', 'yes')
+        )
+        if include_disabled:
+            assignments = list(queryset[:500])
+        else:
+            assignments = _dedupe_latest_assignment_by_staff(list(queryset.filter(status='active')[:500]))
         return Response({'success': True, 'message': 'Assignments loaded', 'data': {
-            'items': [_serialize_assignment_row(obj) for obj in queryset[:500]],
+            'items': [_serialize_assignment_row(obj) for obj in assignments],
         }})
 
     body = request.data or {}
@@ -1348,7 +1369,18 @@ def admin_role_assignments(request):
     if not staff_row:
         return Response({'success': False, 'message': 'staff not found'}, status=http_status.HTTP_404_NOT_FOUND)
 
-    resolved = Department.objects.filter(name__iexact=dept_scope).first()
+    if role_front == 'Admin':
+        resolved = None
+    else:
+        resolved = Department.objects.filter(name__iexact=dept_scope).first()
+        if dept_scope and resolved is None:
+            resolved = Department.objects.create(name=dept_scope)
+
+    StaffRoleAssignment.objects.filter(staff=staff_row, status='active').update(
+        status='disabled',
+        disable_reason=SUPERSEDED_ROLE_REASON,
+        updated_at=timezone.now(),
+    )
 
     assignment = StaffRoleAssignment.objects.create(
         staff=staff_row,
@@ -1359,12 +1391,16 @@ def admin_role_assignments(request):
         status='active',
     )
 
-    # Sync Staff.role so require_role() checks take effect immediately.
+    # Keep Staff.role double-written while Django Groups/Permissions drive access.
     _FRONT_TO_CANONICAL = {'HoD': 'HOD', 'Admin': 'SCHOOL_OPS'}
     canonical = _FRONT_TO_CANONICAL.get(role_front)
     if canonical:
         staff_row.role = canonical
-        staff_row.save(update_fields=['role', 'updated_at'])
+        if resolved is not None:
+            staff_row.department = resolved
+            staff_row.save(update_fields=['role', 'department', 'updated_at'])
+        else:
+            staff_row.save(update_fields=['role', 'updated_at'])
 
     return Response({
         'success': True,
@@ -1377,7 +1413,7 @@ def admin_role_assignments(request):
 
 @api_view(['POST'])
 @permission_classes([IsAuthenticated])
-@require_role(*ADMIN_ROLES)
+@require_any_perm(OPS_API_PERMISSION)
 @transaction.atomic
 def admin_role_assignment_disable(request, assignment_id):
     payload = request.data or {}
@@ -1388,6 +1424,28 @@ def admin_role_assignment_disable(request, assignment_id):
     assignment.disable_reason = reason[:500]
     assignment.save(update_fields=['status', 'disable_reason', 'updated_at'])
 
+    latest_active = (
+        StaffRoleAssignment.objects
+        .filter(staff=assignment.staff, status='active')
+        .exclude(assignment_id=assignment.assignment_id)
+        .order_by('-created_at', '-assignment_id')
+        .first()
+    )
+    if latest_active is None:
+        assignment.staff.role = 'ACADEMIC'
+        assignment.staff.save(update_fields=['role', 'updated_at'])
+    else:
+        canonical = {'HoD': 'HOD', 'Admin': 'SCHOOL_OPS'}.get(latest_active.role_code)
+        if canonical:
+            assignment.staff.role = canonical
+            if latest_active.resolved_department_id is not None:
+                assignment.staff.department = latest_active.resolved_department
+                assignment.staff.save(update_fields=['role', 'department', 'updated_at'])
+            else:
+                assignment.staff.save(update_fields=['role', 'updated_at'])
+        else:
+            assignment.staff.save(update_fields=['role', 'updated_at'])
+
     return Response({'success': True, 'message': 'Role assignment disabled', 'data': {
         'id': assignment.assignment_id,
         'status': assignment.status,
@@ -1396,7 +1454,7 @@ def admin_role_assignment_disable(request, assignment_id):
 
 @api_view(['GET'])
 @permission_classes([IsAuthenticated])
-@require_role(*ADMIN_ROLES)
+@require_any_perm(OPS_API_PERMISSION)
 def admin_visualization(request):
     semester_filter = _parse_semester_filter(request)
     year_from, year_to = _parse_year_range(request)
@@ -1501,7 +1559,7 @@ def _persist_export_workbook(request):
 
 @api_view(['GET'])
 @permission_classes([IsAuthenticated])
-@require_role(*ADMIN_ROLES)
+@require_any_perm(OPS_API_PERMISSION)
 @throttle_classes([AdminExportThrottle])
 def admin_export_manifest(request):
     """
@@ -1522,7 +1580,7 @@ def admin_export_manifest(request):
 
 @api_view(['GET'])
 @permission_classes([IsAuthenticated])
-@require_role(*ADMIN_ROLES)
+@require_any_perm(OPS_API_PERMISSION)
 @throttle_classes([AdminExportThrottle])
 def admin_export_download(request):
     """Binary companion for `/admin/export/` JSON contracts."""
@@ -1585,7 +1643,7 @@ def _build_workload_export_workbook(qs):
 
 @api_view(['GET'])
 @permission_classes([IsAuthenticated])
-@require_role(*ADMIN_ROLES)
+@require_any_perm(OPS_API_PERMISSION)
 @throttle_classes([AdminExportThrottle])
 def admin_workload_export(request):
     """GET /api/school-operations/workloads/export — direct file stream filtered by status/staff/dept/year/semester."""
@@ -1638,7 +1696,7 @@ def admin_workload_export(request):
 
 @api_view(['GET'])
 @permission_classes([IsAuthenticated])
-@require_role(*ADMIN_ROLES)
+@require_any_perm(OPS_API_PERMISSION)
 @throttle_classes([AdminExportThrottle])
 def admin_school_export(request):
     """GET /api/school-operations/export — school-level history Excel, direct file stream."""
@@ -1667,7 +1725,7 @@ def admin_school_export(request):
 
 @api_view(['POST'])
 @permission_classes([IsAuthenticated])
-@require_role(*ADMIN_ROLES)
+@require_any_perm(OPS_API_PERMISSION)
 def admin_contact_staff(request):
     """POST /api/school-operations/contact-staff — stub; stores message as AuditLog comment."""
     body = request.data or {}
@@ -1731,7 +1789,7 @@ _AUDIT_ACTION_HUMAN = {
 
 @api_view(['GET'])
 @permission_classes([IsAuthenticated])
-@require_role(*ADMIN_ROLES)
+@require_any_perm(OPS_API_PERMISSION)
 @throttle_classes([AdminExportThrottle])
 def admin_audit_log_export(request):
     """GET /api/school-operations/audit-log/export

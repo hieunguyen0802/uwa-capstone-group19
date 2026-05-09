@@ -50,3 +50,34 @@ def require_role(*roles):
             return view_func(request, *args, **kwargs)
         return wrapper
     return decorator
+
+
+def require_any_perm(*permissions):
+    """
+    Permission-based access control backed by Django auth.
+
+    Checks request.user.has_perm() for at least one fully qualified permission
+    codename, and still injects request.staff for endpoint business logic.
+    """
+    required = set(permissions)
+
+    def decorator(view_func):
+        @wraps(view_func)
+        def wrapper(request, *args, **kwargs):
+            staff = get_object_or_404(Staff, user=request.user)
+            if not staff.is_active:
+                return Response(
+                    {"code": "ACCOUNT_INACTIVE", "message": "Account is inactive."},
+                    status=403,
+                )
+
+            if not any(request.user.has_perm(permission) for permission in required):
+                return Response(
+                    {"code": "FORBIDDEN", "message": "You do not have permission to access this resource."},
+                    status=403,
+                )
+
+            request.staff = staff
+            return view_func(request, *args, **kwargs)
+        return wrapper
+    return decorator
