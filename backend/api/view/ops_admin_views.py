@@ -413,6 +413,7 @@ def _serialize_workload_row(report, items):
         'targetBand': report.target_band,
         'workloadNewStaff': report.new_staff,
         'hodReview': _effective_hod_review(report, calculated_band),
+        'staffRole': report.staff.role,
         'fte': float(report.snapshot_fte),
         'distributedTime': _get_distributed_time(report),
         'createdAt': report.created_at.isoformat(),
@@ -480,6 +481,7 @@ def _serialize_workload_detail(report, items):
         'fte': fte,
         'workloadNewStaff': report.new_staff,
         'hodReview': _effective_hod_review(report, calculated_band),
+        'staffRole': report.staff.role,
         'cancelled': False,
         'notes': _get_request_reason(report),
         'validation': {

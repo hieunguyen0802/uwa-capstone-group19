@@ -184,7 +184,7 @@ def _serialize_workload_row(report, confirmation, anomaly_result=None, report_it
         'hodReviewRequired': _hod_review_required(report, calculated_band),
         'assignedBy': _get_assigned_by(report),
         'pushedAt': _get_pushed_at(report),
-        'cancelled': report.status == 'REJECTED',
+        'cancelled': not report.is_current,
         'isAbnormal': anomaly_result['is_anomaly'],
         'anomalyReasons': anomaly_result['reasons'],
     }
@@ -310,7 +310,7 @@ def academic_workload_detail(request, id):
         'supervisorNote': _get_supervisor_note(report),
         'assignedBy': _get_assigned_by(report),
         'pushedAt': _get_pushed_at(report),
-        'cancelled': report.status == 'REJECTED',
+        'cancelled': not report.is_current,
         'validation': {
             'isAbnormal': bool(validation.get('failedReasons') or validation.get('teachingRatioOutOfRange') or validation.get('bandMismatch') or validation.get('hoursOutOfRange')),
             'reason': ', '.join(validation.get('failedReasons') or []),
@@ -466,13 +466,14 @@ def academic_submit_workload_requests(request):
 
     result_items = []
     for report in reports:
+        kind = 'HOD_SELF_WORKLOAD_REQUEST' if request.staff.role == 'HOD' else 'WORKLOAD_REQUEST'
         log = AuditLog.objects.create(
             report=report,
             action_by=request.staff,
             action_type='COMMENT',
             comment=reason,
             changes={
-                'kind': 'WORKLOAD_REQUEST',
+                'kind': kind,
                 'status': 'pending',
                 'source_workload_id': str(report.report_id),
             },

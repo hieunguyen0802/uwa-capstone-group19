@@ -109,6 +109,8 @@ type MockRequest = {
   workloadNewStaff?: boolean;
   /** Workload template column F — HoD Review (yes/no). */
   hodReview?: "yes" | "no";
+  /** Staff role from backend — 'HOD' | 'ACADEMIC' | 'SCHOOL_OPS' | 'HOS'. */
+  staffRole?: string;
   /** ISO timestamp set at the moment of workload import (local machine time). */
   importedAt?: string;
   /** Local-timezone timestamp when this workload was distributed (APPROVED). */
@@ -981,7 +983,7 @@ export default function SchoolofOperations() {
             operatedBy?: string; operatedByStaffId?: string; assignedBy?: string; assignedByStaffId?: string;
             targetTeachingRatio?: number | null; targetBand?: string | null;
             cancelled?: boolean; importedFromTemplate?: boolean; workloadNewStaff?: boolean;
-            hodReview?: string; createdAt?: string; distributedTime?: string; fte?: number;
+            hodReview?: string; staffRole?: string; createdAt?: string; distributedTime?: string; fte?: number;
           }>;
           currentPeriod?: {
             year: number;
@@ -1027,6 +1029,7 @@ export default function SchoolofOperations() {
         importedFromTemplate: Boolean(row.importedFromTemplate),
         workloadNewStaff: Boolean(row.workloadNewStaff),
         hodReview: row.hodReview === "yes" ? "yes" : "no",
+        staffRole: row.staffRole ?? undefined,
         importedAt: row.createdAt ?? undefined,
         distributedTime: row.distributedTime ?? undefined,
       }));
@@ -1631,7 +1634,7 @@ export default function SchoolofOperations() {
   }, [detailsExpectedHoursRange]);
 
   const totalHoursDisplay = useMemo(
-    () => `${detailsComputedTotalHours} ${totalHoursWorkingDaysSuffix}`,
+    () => `${formatOneDecimal(detailsComputedTotalHours)} ${totalHoursWorkingDaysSuffix}`,
     [detailsComputedTotalHours, totalHoursWorkingDaysSuffix]
   );
 
@@ -3998,7 +4001,7 @@ export default function SchoolofOperations() {
                     inputClassName: "text-slate-800",
                   },
                   {
-                    label: "HoD Review",
+                    label: detailsItem.staffRole === "HOD" ? "HoS Review" : "HoD Review",
                     value: showActualTeachingRatioBandWarning
                       ? "Yes"
                       : templateHodReviewDisplay(detailsItem.hodReview),
@@ -4008,9 +4011,13 @@ export default function SchoolofOperations() {
                         ? "border-yellow-500 ring-1 ring-yellow-300 bg-yellow-50/60 text-amber-900"
                         : "text-slate-800",
                     tooltipText: showActualTeachingRatioBandWarning
-                      ? "T:R band mismatch detected. HoD Review is required; workload can still be distributed, but Academic must submit to HoD for approval."
+                      ? detailsItem.staffRole === "HOD"
+                        ? "T:R band mismatch detected. HoS Review is required; workload can still be distributed, but HoD must submit to HoS for approval."
+                        : "T:R band mismatch detected. HoD Review is required; workload can still be distributed, but Academic must submit to HoD for approval."
                       : detailsItem.hodReview === "yes"
-                        ? "HoD Review is flagged for this staff member. Please ensure the workload is submitted to HoD for review."
+                        ? detailsItem.staffRole === "HOD"
+                          ? "HoS Review is flagged for this staff member. Please ensure the workload is submitted to HoS for review."
+                          : "HoD Review is flagged for this staff member. Please ensure the workload is submitted to HoD for review."
                         : undefined,
                     tooltipClassName: "border-yellow-300 bg-yellow-50 text-amber-900",
                   },

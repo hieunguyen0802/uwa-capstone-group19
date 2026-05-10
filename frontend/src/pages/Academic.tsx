@@ -109,19 +109,6 @@ function actualTeachingRatioPercent(breakdown: BreakdownData): number {
   return Math.round((teachingH / totalH) * 1000) / 10;
 }
 
-function isDetailHoursAbnormal(item: AcademicItem, breakdown: BreakdownData): boolean {
-  const actualRatioPct = actualTeachingRatioPercent(breakdown);
-  const targetRatio = item.targetTeachingRatio;
-  if (targetRatio != null) {
-    if (actualRatioPct + 0.05 < targetRatio) return true;
-  }
-  const teachingTarget = item.teachingTargetHours;
-  if (teachingTarget != null) {
-    const teachingActual = teachingHoursFromBreakdown(breakdown);
-    if (teachingActual + 0.001 < teachingTarget) return true;
-  }
-  return false;
-}
 
 const SUPERVISOR_DRAFT_KEY = "academic_to_supervisor_requests_v1";
 const ACADEMIC_STATUS_SYNC_KEY = "academic_status_sync_v1";
@@ -272,12 +259,13 @@ function mapAcademicDetailToItem(detail: AcademicWorkloadDetailResponse, userDep
       actualRatioHoverText: v?.reason || "",
       totalHoursDisplay: (() => {
         const hrs = detail.hours ?? base.hours;
+        const hrsDisplay = (Math.round(hrs * 10) / 10).toFixed(1);
         if (v?.expectedMinHours != null && v?.expectedMaxHours != null) {
           const minDays = Math.ceil(v.expectedMinHours / 8);
           const maxDays = Math.ceil(v.expectedMaxHours / 8);
-          return `${hrs} (>${minDays} & <=${maxDays} working days)`;
+          return `${hrsDisplay} (>${minDays} & <=${maxDays} working days)`;
         }
-        return String(hrs);
+        return hrsDisplay;
       })(),
       adminModalHoursAbnormal: hoursOutOfRange,
       totalHoursTooltipText: hoursOutOfRange ? hoursHint : "",
@@ -336,54 +324,6 @@ function computeYAxisDomain(values: Array<number | null>) {
   return [Math.max(0, min - pad), max + pad] as [number, number];
 }
 
-function breakdownById(id: number, totalHours: number): BreakdownData {
-  const safeTotal = Math.max(0, Math.round(totalHours));
-  const teaching1 = Math.max(0, Math.floor(safeTotal * 0.3));
-  const teaching2 = Math.max(0, Math.floor(safeTotal * 0.15));
-  const role1 = Math.max(0, Math.floor(safeTotal * 0.2));
-  const role2 = Math.max(0, Math.floor(safeTotal * 0.1));
-  const hdr1 = Math.max(0, Math.floor(safeTotal * 0.1));
-  const hdr2 = Math.max(0, Math.floor(safeTotal * 0.05));
-  const used = teaching1 + teaching2 + role1 + role2 + hdr1 + hdr2;
-  const service = Math.max(0, safeTotal - used);
-
-  const teachingUnits = [
-    ["CITS2401", "CITS2200"],
-    ["CITS3002", "CITS1401"],
-    ["CITS1001", "CITS2005"],
-  ] as const;
-  const hdrStudents = [
-    ["Student A", "Student B"],
-    ["Student C", "Student D"],
-    ["Student E", "Student F"],
-  ] as const;
-  const [unitA, unitB] = teachingUnits[id % teachingUnits.length];
-  const [studentA, studentB] = hdrStudents[id % hdrStudents.length];
-
-  return {
-    Teaching: [
-      { name: unitA, hours: teaching1 },
-      { name: unitB, hours: teaching2 },
-    ],
-    "Assigned Roles": [
-      { name: "Program Chair", hours: role1 },
-      { name: "Outreach Chair", hours: role2 },
-    ],
-    HDR: [
-      { name: studentA, hours: hdr1 },
-      { name: studentB, hours: hdr2 },
-    ],
-    Service: [{ name: "Committee support", hours: service }],
-    "Research (residual)": [{ name: "Research (residual)", hours: 0 }],
-  };
-}
-
-function statusLabel(status: AcademicItem["status"]) {
-  if (status === "approved") return "Approved";
-  if (status === "rejected") return "Rejected";
-  if (status === "") return "";
-  return "Pending";
-}
 
 function confirmationPillClass(confirmation: AcademicItem["confirmation"]) {
   if (confirmation === "confirmed") return "text-[#15803d]";
@@ -433,7 +373,7 @@ function AcademicDetailModal({
   const displayActualTeachingRatio =
     item.detailSnapshot?.actualTeachingRatioDisplay ?? `${actualTeachingRatioPercent(breakdown)}%`;
 
-  const canonicalHoursText = String(item.hours);
+  const canonicalHoursText = (Math.round(item.hours * 10) / 10).toFixed(1);
   const snapshotDisplay = item.detailSnapshot?.totalHoursDisplay?.trim() ?? "";
   const snapshotMatch = snapshotDisplay.match(/^([0-9]+(?:\.[0-9]+)?)\s*(.*)$/);
   const snapshotLeadingHours = snapshotMatch?.[1] ?? "";
@@ -525,11 +465,11 @@ function AcademicDetailModal({
           <button
             type="button"
             onClick={onConfirm}
-            disabled={item.status === "pending" || hodReviewBlocksConfirm}
+            disabled={item.status === "pending" || item.status === "rejected" || hodReviewBlocksConfirm}
             className={`rounded-md px-6 py-2 text-sm font-semibold ${
               item.confirmation === "confirmed"
                 ? "bg-[#16a34a] text-white"
-                : item.status === "pending" || hodReviewBlocksConfirm
+                : item.status === "pending" || item.status === "rejected" || hodReviewBlocksConfirm
                   ? "cursor-not-allowed bg-slate-400 text-white"
                   : "bg-[#2f4d9c] text-white hover:bg-[#29458c]"
             }`}
@@ -549,11 +489,12 @@ export default function Academic() {
   const [items, setItems] = useState<AcademicItem[]>([]);
   const [loadingItems, setLoadingItems] = useState(true);
   const [pageError, setPageError] = useState("");
-  const [selectedIds, setSelectedIds] = useState<Set<number>>(new Set());
+  const [selectedIds, setSelectedIds] = useState<Set<string>>(new Set());
   const [page, setPage] = useState(1);
   const pageSize = 10;
   const [filter, setFilter] = useState<"all" | "pending" | "approved" | "rejected">("all");
   const [detailId, setDetailId] = useState<number | null>(null);
+  const [confirmWorkloadOpen, setConfirmWorkloadOpen] = useState(false);
   const [supersededNoticeOpen, setSupersededNoticeOpen] = useState(false);
   const [requestModalOpen, setRequestModalOpen] = useState(false);
   const [requestReason, setRequestReason] = useState("");
@@ -601,7 +542,7 @@ export default function Academic() {
   const [visualSemesterInput, setVisualSemesterInput] = useState<"All" | "S1" | "S2">("All");
   const [visualError, setVisualError] = useState("");
   const [visualizationLoading, setVisualizationLoading] = useState(false);
-  const [appliedVisualFilters, setAppliedVisualFilters] = useState({
+  const [_appliedVisualFilters, setAppliedVisualFilters] = useState({
     yearFrom: "",
     yearTo: "",
     semester: "All" as "All" | "S1" | "S2",
@@ -625,12 +566,7 @@ export default function Academic() {
     () => notifications.find((n) => n.id === activeNotificationId) ?? null,
     [notifications, activeNotificationId]
   );
-  const notificationRecipientLabel = useMemo(() => {
-    const first = notifications[0];
-    if (!first) return `${user.firstName} ${user.surname}`;
-    return `${first.recipientName}${first.recipientEmail ? ` (${first.recipientEmail})` : ""}`;
-  }, [notifications, user.firstName, user.surname]);
-  const selectedYear = Number(searchYearInput) || currentYear;
+const selectedYear = Number(searchYearInput) || currentYear;
   const yearOptions = useMemo(
     () => Array.from({ length: 11 }, (_, i) => String(selectedYear - 5 + i)),
     [selectedYear]
@@ -798,16 +734,19 @@ export default function Academic() {
     return `Workload Report ${y}-${sem}`;
   }, [items]);
 
-  function toggleRow(id: number) {
+  function toggleRow(backendId: string) {
     setSelectedIds((prev) => {
-      if (prev.has(id)) return new Set();
-      return new Set([id]);
+      if (prev.has(backendId)) return new Set();
+      return new Set([backendId]);
     });
   }
 
   async function submitRequestToSupervisor(reason: string) {
-    const backendIds = items.filter((x) => selectedIds.has(x.id)).map((x) => x.backendId);
-    if (!backendIds.length) return;
+    const backendIds = items.filter((x) => selectedIds.has(x.backendId)).map((x) => x.backendId);
+    if (!backendIds.length) {
+      setRequestInfo("No matching workload found. Please re-select and try again.");
+      return;
+    }
     try {
       await apiJson<{ submittedCount?: number }>("/api/academic/workload-requests/", {
         method: "POST",
@@ -1170,7 +1109,7 @@ export default function Academic() {
                 </thead>
                 <tbody className="divide-y divide-slate-200 bg-[#eef3fb]">
                   {pageItems.map((item, idx) => {
-                    const selected = selectedIds.has(item.id);
+                    const selected = selectedIds.has(item.backendId);
                     const rowCancelled = Boolean(item.cancelled);
                     const confirmationTimeCell = academicConfirmationTimeCell(item);
                     return (
@@ -1197,7 +1136,7 @@ export default function Academic() {
                           <input
                             type="checkbox"
                             checked={selected}
-                            onChange={() => toggleRow(item.id)}
+                            onChange={() => toggleRow(item.backendId)}
                             className={`h-4 w-4 accent-[#2f4d9c] ${rowCancelled ? "opacity-50" : ""}`}
                           />
                         </td>
@@ -1487,11 +1426,48 @@ export default function Academic() {
         <AcademicDetailModal
           item={detailItem}
           onClose={() => setDetailId(null)}
-          onConfirm={async () => {
-            await handleConfirmFromDetail(detailItem.id, detailItem.backendId);
-            setDetailId(null);
-          }}
+          onConfirm={() => { if (detailItem.confirmation !== "confirmed") setConfirmWorkloadOpen(true); }}
         />
+      )}
+
+      {confirmWorkloadOpen && detailItem && (
+        <div className="fixed inset-0 z-[60] flex items-center justify-center bg-black/40 p-4">
+          <div className="w-full max-w-sm rounded-md bg-white shadow-lg">
+            <div className="flex items-center justify-between rounded-t-md bg-[#2f4d9c] px-5 py-3 text-white">
+              <div className="text-base font-bold">Confirm Workload</div>
+              <button
+                type="button"
+                className="inline-flex h-8 w-8 items-center justify-center rounded bg-white/10 text-lg hover:bg-white/20"
+                onClick={() => setConfirmWorkloadOpen(false)}
+              >
+                ×
+              </button>
+            </div>
+            <div className="px-5 py-5 text-sm text-slate-700">
+              Are you sure you want to confirm this workload? This action cannot be undone.
+            </div>
+            <div className="flex justify-end gap-3 border-t border-slate-200 px-5 py-3">
+              <button
+                type="button"
+                className="rounded-md border border-slate-300 px-4 py-2 text-sm text-slate-600 hover:bg-slate-50"
+                onClick={() => setConfirmWorkloadOpen(false)}
+              >
+                No
+              </button>
+              <button
+                type="button"
+                className="rounded-md bg-[#2f4d9c] px-4 py-2 text-sm font-semibold text-white hover:bg-[#29458c]"
+                onClick={async () => {
+                  setConfirmWorkloadOpen(false);
+                  await handleConfirmFromDetail(detailItem.id, detailItem.backendId);
+                  setDetailId(null);
+                }}
+              >
+                Yes, Confirm
+              </button>
+            </div>
+          </div>
+        </div>
       )}
       {requestModalOpen && (
         <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 p-4">

@@ -11,7 +11,7 @@ import StatusPill from "../components/common/StatusPill";
 import VisualizationSummaryCards from "../components/common/VisualizationSummaryCards";
 import ThemedNoticeModal, { SUPERSEDED_RECORD_MESSAGE } from "../components/common/ThemedNoticeModal";
 import WorkHoursBadge from "../components/common/WorkHoursBadge";
-import WorkloadDetailModal, { type WorkloadBreakdownCategory } from "../components/common/WorkloadDetailModal";
+import WorkloadApprovalModal from "../components/common/WorkloadApprovalModal";
 import { apiJson, clearLocalStorageKeys, downloadApiFile, isAbortError } from "../api/client";
 import { useAuth } from "../auth/AuthContext";
 import { profileFromAuth } from "../auth/profileFromAuth";
@@ -277,251 +277,6 @@ function mapHodDetailToRequest(detail: HodWorkloadDetailPayload): MockRequest {
   };
 }
 
-const HOD_BREAKDOWN_TABS: WorkloadBreakdownCategory[] = [
-  "Teaching",
-  "Assigned Roles",
-  "HDR",
-  "Service",
-  "Research (residual)",
-];
-
-function HodDetailModal({
-  item,
-  onClose,
-  onDecisionComplete,
-}: {
-  item: MockRequest;
-  onClose: () => void;
-  onDecisionComplete: () => Promise<void>;
-}) {
-  const [breakdown, setBreakdown] = useState<BreakdownData>(
-    item.detailSnapshot?.breakdown ?? normalizeHodBreakdown()
-  );
-  const [editMode, setEditMode] = useState(false);
-  const [modalError, setModalError] = useState("");
-  const [noteOpen, setNoteOpen] = useState(false);
-  const [noteKind, setNoteKind] = useState<"approve" | "reject">("approve");
-  const [noteDraft, setNoteDraft] = useState("");
-  const [noteError, setNoteError] = useState("");
-  const [submitting, setSubmitting] = useState(false);
-
-  const actualTeachingRatio = useMemo(() => {
-    const source = breakdown;
-    const teaching = source.Teaching.reduce((s, r) => s + r.hours, 0);
-    const total = HOD_BREAKDOWN_TABS.reduce(
-      (s, tab) => s + source[tab].reduce((ts, r) => ts + r.hours, 0),
-      0
-    );
-    if (typeof item.actualTeachingRatio === "number" && !editMode) {
-      return `${item.actualTeachingRatio.toFixed(1)}%`;
-    }
-    return total <= 0 ? "0.0%" : `${((teaching / total) * 100).toFixed(1)}%`;
-  }, [breakdown, editMode, item.actualTeachingRatio]);
-
-  const totalHoursDisplay = useMemo(() => {
-    const hrs = editMode
-      ? HOD_BREAKDOWN_TABS.reduce(
-          (s, tab) => s + breakdown[tab].reduce((ts, r) => ts + r.hours, 0),
-          0
-        )
-      : item.hours;
-    if (!editMode && item.expectedMinHours != null && item.expectedMaxHours != null) {
-      const minDays = Math.ceil(item.expectedMinHours / 8);
-      const maxDays = Math.ceil(item.expectedMaxHours / 8);
-      return `${hrs} (>${minDays} & <=${maxDays} working days)`;
-    }
-    return String(hrs);
-  }, [breakdown, editMode, item.hours, item.expectedMinHours, item.expectedMaxHours]);
-
-  const periodTitle = useMemo(() => {
-    const matched = item.periodLabel.match(/^(\d{4})-(1|2)$/);
-    const period = matched
-      ? `${matched[1]}-${matched[2] === "1" ? "S1" : "S2"}`
-      : item.semesterLabel;
-    return `${period}-${item.department}-Academic`;
-  }, [item.periodLabel, item.semesterLabel, item.department]);
-
-  const fields = [
-    { label: "Name", value: item.name },
-    { label: "Staff ID", value: item.studentId },
-    {
-      label: "Target teaching ratio",
-      value: typeof item.targetTeachingRatio === "number"
-        ? `${item.targetTeachingRatio.toFixed(1)}%`
-        : "—",
-    },
-    { label: "Actual teaching ratio", value: actualTeachingRatio, className: "tabular-nums font-sans" },
-    { label: "Total work hours", value: totalHoursDisplay, className: "tabular-nums font-sans" },
-    { label: "Employment type", value: item.employmentType || "—" },
-    { label: "New Staff", value: item.newStaff || "—" },
-    {
-      label: "HoD Review",
-      value: typeof item.hodReviewRequired === "boolean"
-        ? (item.hodReviewRequired ? "Yes" : "No")
-        : "—",
-    },
-  ];
-
-  const notesSections = [
-    {
-      label: "School of Operations notes",
-      value: item.notes?.trim() || "",
-      rows: 4 as const,
-      collapsible: true,
-      defaultExpanded: true,
-    },
-    {
-      label: "Application Reason",
-      value: item.requestReason?.trim() || "— no reason provided —",
-      rows: 3 as const,
-      collapsible: false,
-    },
-  ];
-
-  function updateRow(tab: WorkloadBreakdownCategory, idx: number, field: "name" | "hours", value: string) {
-    setBreakdown((prev) => {
-      const rows = [...(prev[tab] ?? [])];
-      rows[idx] = {
-        ...rows[idx],
-        [field]: field === "hours" ? (parseFloat(value) || 0) : value,
-      };
-      return { ...prev, [tab]: rows };
-    });
-  }
-
-  function addRow(tab: WorkloadBreakdownCategory) {
-    setBreakdown((prev) => ({
-      ...prev,
-      [tab]: [...(prev[tab] ?? []), { name: "", hours: 0 }],
-    }));
-  }
-
-  function removeRow(tab: WorkloadBreakdownCategory, idx: number) {
-    setBreakdown((prev) => {
-      const rows = (prev[tab] ?? []).filter((_, i) => i !== idx);
-      return { ...prev, [tab]: rows };
-    });
-  }
-
-  function toggleEdit() {
-    if (editMode) {
-      const hasEmpty = (Object.keys(breakdown) as WorkloadBreakdownCategory[]).some((tab) =>
-        breakdown[tab].some((r) => r.name.trim() === "")
-      );
-      if (hasEmpty) { setModalError("All breakdown rows must have a name."); return; }
-    }
-    setModalError("");
-    setEditMode((v) => !v);
-  }
-
-  async function handleDecision(note: string) {
-    setSubmitting(true);
-    try {
-      await apiJson(`/api/hod/workload-requests/${item.backendId ?? item.id}/decision/`, {
-        method: "POST",
-        body: JSON.stringify({ decision: noteKind, note: note.trim(), breakdown }),
-      });
-      setNoteOpen(false);
-      await onDecisionComplete();
-    } catch (err) {
-      setNoteError(err instanceof Error ? err.message : "Failed to submit decision.");
-    } finally {
-      setSubmitting(false);
-    }
-  }
-
-  return (
-    <>
-      <WorkloadDetailModal
-        title={periodTitle}
-        fields={fields}
-        breakdown={breakdown}
-        tabs={HOD_BREAKDOWN_TABS}
-        rowKeyPrefix={item.id}
-        onClose={onClose}
-        notesSections={notesSections}
-        onEditModeToggle={item.status === "pending" ? toggleEdit : undefined}
-        breakdownEditMode={editMode}
-        onBreakdownRowChange={updateRow}
-        onBreakdownRowAdd={addRow}
-        onBreakdownRowRemove={removeRow}
-        readonlyBreakdownTabs={["Research (residual)"]}
-        footer={
-          <div className="flex flex-col items-center gap-2 pt-1">
-            {modalError && <p className="text-sm font-semibold text-[#dc2626]">{modalError}</p>}
-            {item.status === "pending" && (
-              <div className="flex items-center justify-center gap-24">
-                <button
-                  type="button"
-                  disabled={submitting}
-                  onClick={() => { setNoteKind("approve"); setNoteDraft(""); setNoteError(""); setNoteOpen(true); }}
-                  className="w-56 rounded-sm bg-[#4a9a3d] py-3 text-center text-lg font-semibold text-white shadow-sm disabled:opacity-60"
-                >
-                  Approve
-                </button>
-                <button
-                  type="button"
-                  disabled={submitting}
-                  onClick={() => { setNoteKind("reject"); setNoteDraft(""); setNoteError(""); setNoteOpen(true); }}
-                  className="w-56 rounded-sm bg-[#e53935] py-3 text-center text-lg font-semibold text-white shadow-sm disabled:opacity-60"
-                >
-                  Decline
-                </button>
-              </div>
-            )}
-          </div>
-        }
-      />
-      {noteOpen && (
-        <div className="fixed inset-0 z-[80] flex items-center justify-center bg-black/40 p-4">
-          <div className="w-full max-w-lg rounded-md bg-white shadow-lg">
-            <div className="flex items-center justify-between rounded-t-md bg-[#2f4d9c] px-5 py-3 text-white">
-              <div className="text-base font-bold">
-                {noteKind === "approve" ? "Approved Notes" : "Rejected Notes"}
-              </div>
-              <button
-                type="button"
-                className="inline-flex h-8 w-8 items-center justify-center rounded bg-white/10 text-lg hover:bg-white/20"
-                onClick={() => { setNoteOpen(false); setNoteError(""); }}
-              >
-                ×
-              </button>
-            </div>
-            <div className="space-y-3 p-5">
-              <div className="text-sm font-semibold text-slate-700">Notes for Academic</div>
-              <textarea
-                value={noteDraft}
-                onChange={(e) => { setNoteDraft(e.target.value); if (noteError) setNoteError(""); }}
-                maxLength={240}
-                placeholder="Write your feedback..."
-                className="h-32 w-full resize-none rounded border border-slate-300 px-3 py-2 text-sm text-slate-800 outline-none focus:border-[#2f4d9c]"
-              />
-              <div className="flex items-center justify-between text-xs text-slate-500">
-                <span>{noteError ? <span className="text-[#dc2626]">{noteError}</span> : " "}</span>
-                <span>{noteDraft.length}/240</span>
-              </div>
-              <div className="flex justify-center">
-                <button
-                  type="button"
-                  disabled={submitting}
-                  onClick={async () => {
-                    const trimmed = noteDraft.trim();
-                    if (!trimmed) { setNoteError("Note is required."); return; }
-                    if (trimmed.length > 240) { setNoteError("Note must be ≤240 characters."); return; }
-                    await handleDecision(trimmed);
-                  }}
-                  className="rounded bg-[#2f4d9c] px-6 py-2 text-sm font-semibold text-white hover:bg-[#264183] disabled:opacity-60"
-                >
-                  Finished
-                </button>
-              </div>
-            </div>
-          </div>
-        </div>
-      )}
-    </>
-  );
-}
 
 function formatIsoDateTime(iso: string): string {
   const d = new Date(iso);
@@ -1405,8 +1160,31 @@ export default function Supervisor() {
             />
 
             {detailsOpen && detailsItem && (
-              <HodDetailModal
-                item={detailsItem}
+              <WorkloadApprovalModal
+                item={{
+                  periodLabel: detailsItem.periodLabel,
+                  semesterLabel: detailsItem.semesterLabel,
+                  department: detailsItem.department,
+                  name: detailsItem.name,
+                  studentId: detailsItem.studentId,
+                  targetTeachingRatio: detailsItem.targetTeachingRatio,
+                  actualTeachingRatio: detailsItem.actualTeachingRatio,
+                  hours: detailsItem.hours,
+                  expectedMinHours: detailsItem.expectedMinHours,
+                  expectedMaxHours: detailsItem.expectedMaxHours,
+                  employmentType: detailsItem.employmentType,
+                  newStaff: detailsItem.newStaff,
+                  reviewRequired: detailsItem.hodReviewRequired,
+                  notes: detailsItem.notes,
+                  requestReason: detailsItem.requestReason,
+                  status: detailsItem.status,
+                  version: detailsItem.version,
+                  detailSnapshot: detailsItem.detailSnapshot,
+                }}
+                itemId={String(detailsItem.backendId ?? detailsItem.id)}
+                decisionApiPath="/api/hod/workload-requests/:id/decision/"
+                reviewLabel="HoD Review"
+                noteRecipientLabel="Academic"
                 onClose={closeDetails}
                 onDecisionComplete={async () => {
                   closeDetails();

@@ -25,6 +25,13 @@ export type HosWorkloadDetail = HosWorkloadRow & {
   breakdown: HosBreakdown;
   canEditBreakdown?: boolean;
   cancelled?: boolean;
+  targetTeachingRatio?: number | null;
+  actualTeachingRatio?: number;
+  expectedMinHours?: number | null;
+  expectedMaxHours?: number | null;
+  employmentType?: string;
+  isNewStaff?: boolean;
+  hodReviewRequired?: boolean;
 };
 
 export type HosSemesterReport = {
