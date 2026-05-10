@@ -209,6 +209,11 @@ type AcademicWorkloadDetailResponse = AcademicWorkloadRowResponse & {
   validation?: {
     isAbnormal?: boolean;
     reason?: string;
+    teachingRatioOutOfRange?: boolean;
+    bandMismatch?: boolean;
+    hoursOutOfRange?: boolean;
+    expectedMinHours?: number;
+    expectedMaxHours?: number;
   };
 };
 
@@ -261,21 +266,31 @@ function mapAcademicDetailToItem(detail: AcademicWorkloadDetailResponse): Academ
   const base = mapAcademicRowToItem(detail);
   const normalizedBreakdown = normalizeAcademicBreakdown(detail.breakdown);
   const actualTeachingRatio = typeof detail.actualTeachingRatio === "number" ? detail.actualTeachingRatio : null;
+  const v = detail.validation;
+  const teachingRatioOutOfRange = v?.teachingRatioOutOfRange ?? Boolean(v?.isAbnormal);
+  const hoursOutOfRange = v?.hoursOutOfRange ?? false;
+  const bandMismatch = v?.bandMismatch ?? false;
+  const hoursHint =
+    v?.expectedMinHours != null && v?.expectedMaxHours != null
+      ? `Expected ${v.expectedMinHours}–${v.expectedMaxHours} h`
+      : v?.reason || "";
   return {
     ...base,
+    department: detail.department ?? base.department,
     notes: detail.schoolOperationsNotes ?? detail.notes ?? "",
     newStaff: typeof detail.isNewStaff === "boolean" ? (detail.isNewStaff ? "Yes" : "No") : "—",
     hodReview: typeof detail.hodReviewRequired === "boolean" ? (detail.hodReviewRequired ? "Yes" : "No") : "—",
+    employmentType: detail.employmentType ?? undefined,
     detailSnapshot: {
       breakdown: normalizedBreakdown,
       actualTeachingRatioDisplay:
         actualTeachingRatio == null ? "—" : `${(Math.round(actualTeachingRatio * 10) / 10).toFixed(1)}%`,
-      actualTeachingRatioOutOfRange: Boolean(detail.validation?.isAbnormal),
-      showActualTeachingRatioBandWarning: false,
-      actualRatioHoverText: detail.validation?.reason || "",
+      actualTeachingRatioOutOfRange: teachingRatioOutOfRange || bandMismatch,
+      showActualTeachingRatioBandWarning: bandMismatch && !teachingRatioOutOfRange,
+      actualRatioHoverText: v?.reason || "",
       totalHoursDisplay: String(detail.hours ?? base.hours),
-      adminModalHoursAbnormal: Boolean(detail.validation?.isAbnormal),
-      totalHoursTooltipText: detail.validation?.reason || "",
+      adminModalHoursAbnormal: hoursOutOfRange,
+      totalHoursTooltipText: hoursOutOfRange ? hoursHint : "",
       employmentType: detail.employmentType ?? "—",
     },
   };
@@ -308,6 +323,9 @@ function parseDateTime(value: string) {
 }
 
 function yearSemesterByItem(item: AcademicItem) {
+  if (item.academicYear && item.semester) {
+    return { year: item.academicYear, semester: item.semester as "S1" | "S2" | "" };
+  }
   const pushedAt = academicPushedAt(item);
   const dt = pushedAt ? parseDateTime(pushedAt) : new Date("");
   if (Number.isNaN(dt.getTime())) return { year: NaN, semester: "" as "" | "S1" | "S2" };

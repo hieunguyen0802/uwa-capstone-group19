@@ -98,10 +98,13 @@ def _get_assigned_by(report):
 
 
 def _get_pushed_at(report) -> str:
-    """Return local-timezone formatted APPROVED timestamp; falls back to created_at."""
+    """Return local-timezone formatted distribution timestamp; falls back to created_at."""
+    if report.distributed_at:
+        return timezone.localtime(report.distributed_at).strftime('%Y-%m-%d %H:%M')
+    # Fallback for records distributed before the distributed_at field existed
     log = AuditLog.objects.filter(
         report=report,
-        action_type__in=['APPROVE', 'APPROVED'],
+        action_type__in=['DISTRIBUTE', 'DISTRIBUTED', 'APPROVE', 'APPROVED'],
     ).order_by('-created_at').first()
     dt = log.created_at if log else report.created_at
     if not dt:
@@ -116,14 +119,6 @@ def _calc_target_teaching_hours(report) -> float:
     annual_hrs = float(report.snapshot_fte) * 100 * 17.25
     return round(annual_hrs * float(report.target_teaching_pct) / 100, 2)
 
-
-def _calc_actual_teaching_ratio(report_items) -> float:
-    """Actual teaching hours / total hours, as a percentage."""
-    total = sum(i.allocated_hours for i in report_items)
-    if not total:
-        return 0.0
-    teaching = sum(i.allocated_hours for i in report_items if i.category == 'TEACHING')
-    return round(float(teaching / total) * 100, 1)
 
 
 def _serialize_workload_row(report, confirmation, anomaly_result=None, report_items=None):
@@ -260,17 +255,26 @@ def academic_workload_detail(request, id):
     items_hours = sum((i.allocated_hours for i in report_items), Decimal('0.00'))
     staff_user = report.staff.user
 
-    research_hrs = round(float(anomaly_result['metrics']['research_pts']) * 17.25, 2)
+    metrics = anomaly_result['metrics']
+    research_hrs = round(float(metrics['research_pts']) * 17.25, 2)
     total_hours = round(_to_decimal_hours(items_hours) + research_hrs, 2)
 
     breakdown = _serialize_breakdown(report_items)
     if research_hrs > 0:
         breakdown['Research (residual)'] = [{'name': 'Research (residual)', 'hours': research_hrs}]
 
+    fte = float(report.snapshot_fte or 0)
+    calc_tr = float(metrics['calc_tr'])
+    calculated_band = metrics['calculated_band']
+    target_band = report.target_band
+
+    employment_type = 'Part-time' if fte < 1.0 else 'Full-time'
+
     return Response({
         'id': str(report.report_id),
         'name': staff_user.get_full_name().strip() or staff_user.username,
         'employeeId': report.staff.staff_number,
+        'department': report.snapshot_department.name if report.snapshot_department_id else None,
         'title': '',
         'notes': _get_supervisor_note(report),
         'hours': total_hours,
@@ -278,7 +282,10 @@ def academic_workload_detail(request, id):
         'semester': report.semester,
         'targetTeachingRatio': float(report.target_teaching_pct) if report.target_teaching_pct is not None else None,
         'teachingTargetHours': _calc_target_teaching_hours(report),
-        'actualTeachingRatio': _calc_actual_teaching_ratio(report_items),
+        'actualTeachingRatio': round(calc_tr * 100, 1),
+        'employmentType': employment_type,
+        'isNewStaff': bool(report.new_staff),
+        'hodReviewRequired': report.hod_review == 'yes',
         'status': report.status.lower(),
         'confirmation': confirmation,
         'confirmationTime': _get_confirmation_time(report),
@@ -289,6 +296,11 @@ def academic_workload_detail(request, id):
         'validation': {
             'isAbnormal': anomaly_result['is_anomaly'],
             'reason': ', '.join(anomaly_result['reasons']),
+            'teachingRatioOutOfRange': calc_tr < 0 or calc_tr > 1,
+            'bandMismatch': target_band is not None and target_band != calculated_band,
+            'hoursOutOfRange': (total_hours <= 856 * fte or total_hours > 864 * fte) if fte > 0 else False,
+            'expectedMinHours': round(856 * fte, 2),
+            'expectedMaxHours': round(864 * fte, 2),
         },
         'breakdown': breakdown,
     })

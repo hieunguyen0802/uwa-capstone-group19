@@ -249,6 +249,11 @@ class WorkloadReport(models.Model):
     )
     confirmation_at = models.DateTimeField(null=True, blank=True)
 
+    # Set by the School Ops distribute action; NULL means not yet distributed.
+    # Kept separate from status so that the academic→HoD workflow status
+    # (INITIAL / PENDING / APPROVED / REJECTED) is never mutated by distribution.
+    distributed_at = models.DateTimeField(null=True, blank=True)
+
     # ── Re-import tracking fields ─────────────────────────────────────────────
     #
     # Problem: Daniela finds that Cai's data was entered incorrectly and re-uploads

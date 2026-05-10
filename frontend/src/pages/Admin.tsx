@@ -1639,7 +1639,8 @@ export default function SchoolofOperations() {
 
   const itemsForFilter = useMemo(() => {
     const byStatus = pending.filter((it) => {
-      if (statusFilter === "all") return !it.cancelled && it.status === "pending";
+      // "all" = Pending Distribution: INITIAL items not yet distributed
+      if (statusFilter === "all") return !it.cancelled && it.status === "pending" && !it.distributedTime;
       if (statusFilter === "superseded") return Boolean(it.cancelled);
       if (statusFilter === "failed")
         return rowMatchesWorkloadFailedTab(
@@ -1650,8 +1651,10 @@ export default function SchoolofOperations() {
           workloadHdrImportByStaffId,
           workloadServiceImportByStaffId
         );
+      // "distributed" = items that have been distributed (distributedTime set),
+      // regardless of the academic→HoD workflow status
       if (statusFilter === "distributed") {
-        return !it.cancelled && it.status === "approved";
+        return !it.cancelled && Boolean(it.distributedTime);
       }
       return true;
     });
@@ -1676,7 +1679,7 @@ export default function SchoolofOperations() {
     pendingFilteredIds.length > 0 && pendingFilteredIds.every((id) => selectedIds.has(id));
   const somePendingFilteredSelected = pendingFilteredIds.some((id) => selectedIds.has(id));
   const hasSelectedPendingForDistribution = useMemo(
-    () => pending.some((it) => selectedIds.has(it.id) && !it.cancelled && it.status === "pending"),
+    () => pending.some((it) => selectedIds.has(it.id) && !it.cancelled && it.status === "pending" && !it.distributedTime),
     [pending, selectedIds]
   );
 

@@ -285,22 +285,22 @@ def _coerce_import_bool(value, default=None):
 
 def _get_distributed_time(report):
     """Return the local-timezone timestamp when this report was distributed."""
-    log = AuditLog.objects.filter(
-        report=report, action_type__in=['APPROVE', 'APPROVED']
-    ).order_by('-created_at').first()
-    if not log:
+    if not report.distributed_at:
         return ''
-    return timezone.localtime(log.created_at).strftime('%Y-%m-%d %H:%M')
+    return timezone.localtime(report.distributed_at).strftime('%Y-%m-%d %H:%M')
 
 
 def _get_operated_by_actor(report):
     """
     Return the staff member responsible for the current row state.
 
-    - APPROVED / REJECTED rows: last approver/rejector
+    - Distributed rows (distributed_at set): the person who ran distribute
+    - APPROVED / REJECTED rows (HoD decision): last approver/rejector
     - INITIAL rows (Pending Distribution): importer / re-importer
     """
-    if report.status == 'INITIAL':
+    if report.distributed_at:
+        action_types = ['DISTRIBUTED']
+    elif report.status == 'INITIAL':
         action_types = ['IMPORTED', 'MODIFIED_BY_REIMPORT']
     elif report.status == 'REJECTED':
         action_types = ['REJECT', 'REJECTED']
@@ -572,7 +572,7 @@ def admin_workload_requests(request):
     if status_filter == 'pending':
         qs = qs.filter(status='PENDING')
     elif status_filter == 'distributed':
-        qs = qs.filter(status='APPROVED')
+        qs = qs.filter(distributed_at__isnull=False)
     elif status_filter == 'failed':
         qs = qs.filter(status='REJECTED')
     elif status_filter == 'superseded':
@@ -581,7 +581,8 @@ def admin_workload_requests(request):
             'staff__user', 'staff__department', 'snapshot_department'
         )
     elif status_filter == 'initial':
-        qs = qs.filter(status='INITIAL')
+        # Pending Distribution = INITIAL status AND not yet distributed
+        qs = qs.filter(status='INITIAL', distributed_at__isnull=True)
     # 'all' → no additional filter
 
     # New contract query params
@@ -604,7 +605,7 @@ def admin_workload_requests(request):
 
     counts = {
         'pending': base_qs.filter(status='PENDING').count(),
-        'distributed': base_qs.filter(status='APPROVED').count(),
+        'distributed': base_qs.filter(distributed_at__isnull=False).count(),
         'failed': base_qs.filter(status='REJECTED').count(),
         'superseded': get_workload_queryset(request.staff).filter(is_current=False).count(),
     }
@@ -971,7 +972,7 @@ def admin_distribute_workloads(request):
                 })
                 continue
 
-            # ── Check 3: must be Pending Distribution (INITIAL) ────────────────
+            # ── Check 3: must be Pending Distribution (INITIAL, not yet distributed) ─
             if report.status != 'INITIAL':
                 failed.append({
                     'workloadId': str(report.report_id),
@@ -979,6 +980,16 @@ def admin_distribute_workloads(request):
                     'name': report.staff.user.get_full_name(),
                     'error': f'Workload is not in Pending Distribution state (current: {report.status})',
                     'errorCode': 'NOT_PENDING',
+                })
+                continue
+
+            if report.distributed_at is not None:
+                failed.append({
+                    'workloadId': str(report.report_id),
+                    'staffId': report.staff.staff_number,
+                    'name': report.staff.user.get_full_name(),
+                    'error': 'Workload has already been distributed',
+                    'errorCode': 'ALREADY_DISTRIBUTED',
                 })
                 continue
 
@@ -1025,13 +1036,16 @@ def admin_distribute_workloads(request):
                 })
                 continue
 
-            # ── Check 7: update status, record audit ────────────────────────────
-            report.status = 'APPROVED'
-            report.save(update_fields=['status', 'updated_at'])
+            # ── Check 7: record distribution timestamp, do NOT change status ──
+            # Status (INITIAL→PENDING→APPROVED/REJECTED) belongs to the
+            # academic→HoD workflow.  Distribution is a separate event tracked
+            # via distributed_at so the workflow status is never contaminated.
+            report.distributed_at = now
+            report.save(update_fields=['distributed_at', 'updated_at'])
             AuditLog.objects.create(
                 report=report,
                 action_by=request.staff,
-                action_type='APPROVED',
+                action_type='DISTRIBUTED',
                 changes={
                     'action': 'distribute',
                     'distributed_by': operated_by,
