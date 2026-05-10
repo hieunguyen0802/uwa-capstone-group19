@@ -600,6 +600,13 @@ export default function Supervisor() {
     () => visualizationData.reportingPeriodLabel || "N/A",
     [visualizationData]
   );
+  const workloadReportTitle = useMemo(() => {
+    const first = pending.find((r) => r.periodLabel);
+    if (!first?.periodLabel) return "Workload Report";
+    const matched = first.periodLabel.match(/^(\d{4})-(1|2)$/);
+    if (!matched) return `Workload Report ${first.periodLabel}`;
+    return `Workload Report ${matched[1]} - Sem ${matched[2]}`;
+  }, [pending]);
 
   function toggleSelected(id: number) {
     setSelectedIds((prev) => {
@@ -1109,7 +1116,7 @@ export default function Supervisor() {
 
           {/* Report title */}
           <div className="mt-6 text-lg font-semibold text-slate-700">
-            Workload Report Sem 1 - 2025
+            {workloadReportTitle}
           </div>
 
           {/* Table */}

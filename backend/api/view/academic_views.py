@@ -426,8 +426,13 @@ def academic_submit_workload_requests(request):
             status=status.HTTP_409_CONFLICT,
         )
 
-    # Academic must confirm before submit.
-    unconfirmed = [str(r.report_id) for r in reports if r.confirmation_status != 'CONFIRMED']
+    # Academic must confirm before submit — unless HoD review is required,
+    # in which case the confirmation button is disabled on the frontend and
+    # the academic submits directly to HoD without self-confirming.
+    unconfirmed = [
+        str(r.report_id) for r in reports
+        if r.confirmation_status != 'CONFIRMED' and str(r.hod_review or '').strip().lower() != 'yes'
+    ]
     if unconfirmed:
         return Response(
             {
@@ -438,8 +443,11 @@ def academic_submit_workload_requests(request):
         )
 
     # Re-evaluate anomaly on submit to prevent bypassing the confirm endpoint.
+    # Skip anomaly block for hod_review=yes reports — the HoD will review them directly.
     anomaly_map = {}
     for report in reports:
+        if str(report.hod_review or '').strip().lower() == 'yes':
+            continue
         anomaly_result = evaluate_mvp_anomaly(report, department_conflict=_is_department_conflict(report))
         if anomaly_result['is_anomaly']:
             anomaly_map[str(report.report_id)] = anomaly_result['reasons']
