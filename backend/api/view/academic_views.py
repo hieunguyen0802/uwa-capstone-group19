@@ -11,8 +11,8 @@ from rest_framework.decorators import api_view, permission_classes
 from rest_framework.permissions import IsAuthenticated
 from rest_framework.response import Response
 
-from api.decorators import require_role
 from api.models import AuditLog, WorkloadReport
+from api.permissions import IsAcademicOrHoD
 from api.services.workload_service import (
     evaluate_mvp_anomaly,
     persist_report_anomaly,
@@ -193,8 +193,7 @@ def _serialize_breakdown(report_items):
 
 
 @api_view(['GET'])
-@permission_classes([IsAuthenticated])
-@require_role('ACADEMIC', 'HOD')
+@permission_classes([IsAuthenticated, IsAcademicOrHoD])
 def academic_workloads(request):
     """GET /api/academic/workloads/"""
     qs = _own_reports_qs(request.staff).prefetch_related('items').order_by('-created_at')
@@ -255,8 +254,7 @@ def academic_workloads(request):
 
 
 @api_view(['GET'])
-@permission_classes([IsAuthenticated])
-@require_role('ACADEMIC', 'HOD')
+@permission_classes([IsAuthenticated, IsAcademicOrHoD])
 def academic_workload_detail(request, id):
     """GET /api/academic/workloads/{id}/"""
     qs = _own_reports_qs(request.staff).prefetch_related('items')
@@ -294,8 +292,7 @@ def academic_workload_detail(request, id):
 
 
 @api_view(['POST'])
-@permission_classes([IsAuthenticated])
-@require_role('ACADEMIC', 'HOD')
+@permission_classes([IsAuthenticated, IsAcademicOrHoD])
 @transaction.atomic
 def academic_confirm_workload(request, id):
     """POST /api/academic/workloads/{id}/confirm/  — no request body required."""
@@ -333,8 +330,7 @@ def academic_confirm_workload(request, id):
 
 
 @api_view(['POST'])
-@permission_classes([IsAuthenticated])
-@require_role('ACADEMIC', 'HOD')
+@permission_classes([IsAuthenticated, IsAcademicOrHoD])
 @transaction.atomic
 def academic_submit_workload_requests(request):
     """POST /api/academic/workload-requests/"""
@@ -456,8 +452,7 @@ def academic_submit_workload_requests(request):
 
 
 @api_view(['GET'])
-@permission_classes([IsAuthenticated])
-@require_role('ACADEMIC', 'HOD')
+@permission_classes([IsAuthenticated, IsAcademicOrHoD])
 def academic_visualization(request):
     """GET /api/academic/visualization/"""
     year_from, year_to = _parse_year_range(request)
@@ -521,8 +516,7 @@ def academic_visualization(request):
 
 
 @api_view(['GET'])
-@permission_classes([IsAuthenticated])
-@require_role('ACADEMIC', 'HOD')
+@permission_classes([IsAuthenticated, IsAcademicOrHoD])
 def academic_export(request):
     """GET /api/academic/export/"""
     try:
@@ -591,8 +585,7 @@ def academic_export(request):
 
 
 @api_view(['POST'])
-@permission_classes([IsAuthenticated])
-@require_role('ACADEMIC', 'HOD')
+@permission_classes([IsAuthenticated, IsAcademicOrHoD])
 def academic_contact_school_ops(request):
     """POST /api/academic/contact-school-of-operations/"""
     message_body = (request.data.get('messageBody') or '').strip()
@@ -631,8 +624,7 @@ def academic_contact_school_ops(request):
 # ─── Legacy endpoints (kept for backward compatibility) ──────────────────────
 
 @api_view(['GET'])
-@permission_classes([IsAuthenticated])
-@require_role('ACADEMIC', 'HOD')
+@permission_classes([IsAuthenticated, IsAcademicOrHoD])
 def get_my_workloads(request):
     """GET /api/workloads/my/  — legacy response shape."""
     qs = _own_reports_qs(request.staff).order_by('-created_at')
@@ -652,8 +644,7 @@ def get_my_workloads(request):
 
 
 @api_view(['POST'])
-@permission_classes([IsAuthenticated])
-@require_role('ACADEMIC', 'HOD')
+@permission_classes([IsAuthenticated, IsAcademicOrHoD])
 @transaction.atomic
 def submit_query(request):
     """POST /api/queries/  — legacy query submission."""

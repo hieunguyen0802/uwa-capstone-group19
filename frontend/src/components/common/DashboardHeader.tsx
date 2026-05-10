@@ -1,3 +1,7 @@
+import { useNavigate } from "react-router-dom";
+
+import { useAuth } from "../../auth/AuthContext";
+
 type DashboardHeaderProps = {
   title: string;
   hasNewMessage?: boolean;
@@ -17,6 +21,14 @@ export default function DashboardHeader({
   onAvatarClick,
   avatarSrc,
 }: DashboardHeaderProps) {
+  const navigate = useNavigate();
+  const { logout } = useAuth();
+
+  function handleLogout() {
+    logout();
+    navigate("/login", { replace: true });
+  }
+
   return (
     <div className="grid grid-cols-1 gap-3 rounded-md bg-[#2f4d9c] px-4 py-3 text-white md:grid-cols-[minmax(230px,1fr)_auto_minmax(230px,1fr)] md:items-center md:px-6">
       <div className="flex min-w-0 justify-center md:justify-start">
@@ -61,7 +73,11 @@ export default function DashboardHeader({
             <div className="h-full w-full bg-white/90" />
           )}
         </button>
-        <button type="button" className="rounded px-2 py-1 text-sm font-semibold text-white hover:bg-white/15">
+        <button
+          type="button"
+          onClick={handleLogout}
+          className="rounded px-2 py-1 text-sm font-semibold text-white hover:bg-white/15"
+        >
           Logout
         </button>
       </div>

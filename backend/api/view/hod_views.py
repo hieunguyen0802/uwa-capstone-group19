@@ -21,8 +21,8 @@ from rest_framework.decorators import api_view, permission_classes
 from rest_framework.permissions import IsAuthenticated
 from rest_framework.response import Response
 
-from api.decorators import require_role
 from api.models import AuditLog, WorkloadItem, WorkloadReport
+from api.permissions import IsHoD
 from api.services.workload_service import (
     _filter_reports_by_range,
     _parse_year_range,
@@ -457,8 +457,7 @@ def _analytics_payload(qs, year_from, year_to, semester_filter, scope_label):
 # ─── GET /api/hod/workload-requests/ ────────────────────────────────────────
 
 @api_view(['GET'])
-@permission_classes([IsAuthenticated])
-@require_role('HOD')
+@permission_classes([IsAuthenticated, IsHoD])
 def hod_workload_requests(request):
     base_qs = _hod_visible_qs(request.staff)
     qs = base_qs.prefetch_related('items').select_related('staff__user', 'snapshot_department')
@@ -518,8 +517,7 @@ def hod_workload_requests(request):
 # ─── GET /api/hod/workload-requests/{id}/ ───────────────────────────────────
 
 @api_view(['GET'])
-@permission_classes([IsAuthenticated])
-@require_role('HOD')
+@permission_classes([IsAuthenticated, IsHoD])
 def hod_workload_request_detail(request, id):
     qs = _hod_visible_qs(request.staff).prefetch_related('items').select_related(
         'staff__user', 'snapshot_department'
@@ -531,8 +529,7 @@ def hod_workload_request_detail(request, id):
 # ─── POST /api/hod/workload-requests/{id}/decision/ ─────────────────────────
 
 @api_view(['POST'])
-@permission_classes([IsAuthenticated])
-@require_role('HOD')
+@permission_classes([IsAuthenticated, IsHoD])
 @transaction.atomic
 def hod_workload_request_decision(request, id):
     """
@@ -630,8 +627,7 @@ def hod_workload_request_decision(request, id):
 # ─── GET /api/hod/reports/semester ─────────────────────────────────────────
 
 @api_view(['GET'])
-@permission_classes([IsAuthenticated])
-@require_role('HOD')
+@permission_classes([IsAuthenticated, IsHoD])
 def hod_semester_reports(request):
     qs = _filter_period_params(
         _hod_visible_qs(request.staff)
@@ -658,8 +654,7 @@ def hod_semester_reports(request):
 # ─── GET /api/hod/reports/semester/{reportId}/download ─────────────────────
 
 @api_view(['GET'])
-@permission_classes([IsAuthenticated])
-@require_role('HOD')
+@permission_classes([IsAuthenticated, IsHoD])
 def hod_semester_report_download(request, report_id):
     year, semester = _parse_period_report_id(report_id, 'hod-report')
     if year is None or semester is None:
@@ -681,8 +676,7 @@ def hod_semester_report_download(request, report_id):
 # ─── GET /api/hod/analytics/workloads ──────────────────────────────────────
 
 @api_view(['GET'])
-@permission_classes([IsAuthenticated])
-@require_role('HOD')
+@permission_classes([IsAuthenticated, IsHoD])
 def hod_workload_analytics(request):
     year_from, year_to = _parse_year_range(request)
     semester_filter = request.GET.get('semester', 'All')
@@ -702,8 +696,7 @@ def hod_workload_analytics(request):
 # ─── GET /api/hod/exports/workloads ────────────────────────────────────────
 
 @api_view(['GET'])
-@permission_classes([IsAuthenticated])
-@require_role('HOD')
+@permission_classes([IsAuthenticated, IsHoD])
 def hod_workload_export(request):
     year_from, year_to = _parse_year_range(request)
     semester_filter = request.GET.get('semester', 'All')
@@ -720,8 +713,7 @@ def hod_workload_export(request):
 # ─── POST /api/hod/self-workload-requests ──────────────────────────────────
 
 @api_view(['POST'])
-@permission_classes([IsAuthenticated])
-@require_role('HOD')
+@permission_classes([IsAuthenticated, IsHoD])
 @transaction.atomic
 def hod_self_workload_requests(request):
     data = request.data or {}
