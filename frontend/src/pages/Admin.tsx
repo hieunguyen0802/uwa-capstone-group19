@@ -18,7 +18,6 @@ import ExcelJS from "exceljs";
 import * as XLSX from "xlsx";
 import DashboardHeader from "../components/common/DashboardHeader";
 import FilterFormRow from "../components/common/FilterFormRow";
-import InfoField from "../components/common/InfoField";
 import PaginationControls from "../components/common/PaginationControls";
 import ProfileModal from "../components/common/ProfileModal";
 import SearchButton from "../components/common/SearchButton";
@@ -51,6 +50,10 @@ import {
 import TemplateImportExportActions from "../components/common/TemplateImportExportActions";
 import ThemedNoticeModal, { SUPERSEDED_RECORD_MESSAGE } from "../components/common/ThemedNoticeModal";
 import WorkHoursBadge from "../components/common/WorkHoursBadge";
+import WorkloadDetailModal, {
+  type WorkloadDetailField,
+  type WorkloadDetailNoteSection,
+} from "../components/common/WorkloadDetailModal";
 import { apiJson } from "../api/client";
 import { useAuth } from "../auth/AuthContext";
 import { profileFromAuth } from "../auth/profileFromAuth";
@@ -157,23 +160,6 @@ type WorkloadDetailSnapshot = {
 
 /** HDR tab: imported summary row label (must match merged HDR breakdown). */
 const HDR_TOTAL_ROW_LABEL = "HDR Total";
-
-function workloadBreakdownTotalLabel(tab: BreakdownCategory): string {
-  switch (tab) {
-    case "Teaching":
-      return "Teaching Total";
-    case "HDR":
-      return HDR_TOTAL_ROW_LABEL;
-    case "Service":
-      return "Service Total";
-    case "Assigned Roles":
-      return "Assigned Roles Total";
-    case "Research (residual)":
-      return "Research Total";
-    default:
-      return "Total";
-  }
-}
 
 const ADMIN_WORKLOAD_BREAKDOWN_TABS: BreakdownCategory[] = [
   "Teaching",
@@ -1136,6 +1122,7 @@ export default function SchoolofOperations() {
   const [statusFilter, setStatusFilter] = useState<
     "all" | "distributed" | "failed" | "superseded"
   >("all");
+  const [distributionFailedWorkloadIds, setDistributionFailedWorkloadIds] = useState<Set<string>>(new Set());
 
   const [popup, setPopup] = useState<{
     open: boolean;
@@ -1202,7 +1189,6 @@ export default function SchoolofOperations() {
   const [supersededNoticeOpen, setSupersededNoticeOpen] = useState(false);
   const [detailsItem, setDetailsItem] = useState<MockRequest | null>(null);
   const [detailsBreakdown, setDetailsBreakdown] = useState<BreakdownData | null>(null);
-  const [detailsTab, setDetailsTab] = useState<BreakdownCategory>("Teaching");
   const [noteModalOpen, setNoteModalOpen] = useState(false);
   const [noteDraft, setNoteDraft] = useState("");
   const [noteError, setNoteError] = useState("");
@@ -1655,14 +1641,15 @@ export default function SchoolofOperations() {
       if (statusFilter === "all") return !it.cancelled && it.status === "initial" && !it.distributedTime;
       if (statusFilter === "superseded") return Boolean(it.cancelled);
       if (statusFilter === "failed")
-        return rowMatchesWorkloadFailedTab(
-          it,
-          workloadAnomalyImportByStaffId,
-          workloadAssignedRoleImportByStaffId,
-          workloadTeachingImportLinesByStaffId,
-          workloadHdrImportByStaffId,
-          workloadServiceImportByStaffId
-        );
+        return Boolean(it.backendId && distributionFailedWorkloadIds.has(it.backendId)) ||
+          rowMatchesWorkloadFailedTab(
+            it,
+            workloadAnomalyImportByStaffId,
+            workloadAssignedRoleImportByStaffId,
+            workloadTeachingImportLinesByStaffId,
+            workloadHdrImportByStaffId,
+            workloadServiceImportByStaffId
+          );
       // "distributed" = items that have been distributed (distributedTime set),
       // regardless of the academic→HoD workflow status
       if (statusFilter === "distributed") {
@@ -1674,6 +1661,7 @@ export default function SchoolofOperations() {
   }, [
     pending,
     statusFilter,
+    distributionFailedWorkloadIds,
     workloadAnomalyImportByStaffId,
     workloadAssignedRoleImportByStaffId,
     workloadTeachingImportLinesByStaffId,
@@ -1720,17 +1708,19 @@ export default function SchoolofOperations() {
   const workloadFailedFilterCount = useMemo(
     () =>
       pending.filter((it) =>
+        Boolean(it.backendId && distributionFailedWorkloadIds.has(it.backendId)) ||
         rowMatchesWorkloadFailedTab(
-          it,
-          workloadAnomalyImportByStaffId,
-          workloadAssignedRoleImportByStaffId,
-          workloadTeachingImportLinesByStaffId,
-          workloadHdrImportByStaffId,
-          workloadServiceImportByStaffId
-        )
+            it,
+            workloadAnomalyImportByStaffId,
+            workloadAssignedRoleImportByStaffId,
+            workloadTeachingImportLinesByStaffId,
+            workloadHdrImportByStaffId,
+            workloadServiceImportByStaffId
+          )
       ).length,
     [
       pending,
+      distributionFailedWorkloadIds,
       workloadAnomalyImportByStaffId,
       workloadAssignedRoleImportByStaffId,
       workloadTeachingImportLinesByStaffId,
@@ -2293,11 +2283,13 @@ export default function SchoolofOperations() {
         setSearchSemesterInput("");
         // Re-fetch from backend so list reflects the active cycle after distribution.
         void fetchWorkloadList(resetQuery);
-        setSelectedIds(new Set());
-        setStatusFilter("all");
-        setDistributeModalOpen(false);
         const ok = resp.data?.processedCount ?? 0;
         const bad = resp.data?.failedCount ?? 0;
+        const failedIds = new Set((resp.data?.failed ?? []).map((f) => f.workloadId).filter(Boolean));
+        setDistributionFailedWorkloadIds(failedIds);
+        setSelectedIds(new Set());
+        setStatusFilter(bad > 0 ? "failed" : "distributed");
+        setDistributeModalOpen(false);
         const failDetails = (resp.data?.failed ?? [])
           .map((f) => `• ${f.name || f.staffId}: ${f.error}`)
           .join("\n");
@@ -2846,6 +2838,7 @@ export default function SchoolofOperations() {
       const failedRows = Array.from(failedRowSet).sort((a, b) => a - b);
 
       setStatusFilter("all");
+      setDistributionFailedWorkloadIds(new Set());
       setSelectedIds(new Set());
       setPage(1);
       setDetailsOpen(false);
@@ -3958,224 +3951,117 @@ export default function SchoolofOperations() {
                 </div>
               </div>
 
-              {detailsOpen && detailsItem && (
-                <div
-                  className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 p-4"
-                  onClick={closeDetails}
-                >
-                  <div
-                    className="w-full max-w-2xl rounded-sm bg-white p-0 shadow"
-                    onClick={(e) => e.stopPropagation()}
-                  >
-                    <div className="rounded-sm border border-black">
-                      <div className="flex items-center justify-between rounded-t-sm bg-[#2f4d9c] px-5 py-3 text-white">
-                        <div className="text-lg font-bold">
-                          {`${workloadDetailReportingPeriodLabel(detailsItem)}-${detailsItem.department?.trim() || "Department N/A"}-Academic`}
-                        </div>
-                        <button
-                          type="button"
-                          onClick={closeDetails}
-                          className="inline-flex h-9 w-9 items-center justify-center rounded-md bg-white/10 hover:bg-white/20"
-                        >
-                          <span className="text-xl leading-none">×</span>
-                        </button>
-                      </div>
+              {detailsOpen && detailsItem && (() => {
+                const fields: WorkloadDetailField[] = [
+                  { label: "Name", value: displayNameWithoutComma(detailsItem.name) },
+                  { label: "Staff ID", value: detailsItem.studentId },
+                  {
+                    label: "Target teaching ratio",
+                    value:
+                      detailsItem.targetTeachingRatio != null
+                        ? `${formatOneDecimal(detailsItem.targetTeachingRatio)}%`
+                        : "-",
+                  },
+                  {
+                    label: "Actual teaching ratio",
+                    value: actualTeachingRatioDisplay,
+                    className: "tabular-nums font-sans",
+                    inputClassName: actualTeachingRatioOutOfRange
+                      ? "border-red-500 ring-1 ring-red-300 bg-red-50/60 text-red-900"
+                      : showActualTeachingRatioBandWarning
+                        ? "border-yellow-500 ring-1 ring-yellow-300 bg-yellow-50/60 text-amber-900"
+                        : "",
+                    tooltipText: actualRatioHoverText,
+                    tooltipClassName: actualTeachingRatioOutOfRange
+                      ? "border-red-300 bg-red-50 text-red-900"
+                      : "border-yellow-300 bg-yellow-50 text-amber-900",
+                  },
+                  {
+                    label: "Total work hours",
+                    value: totalHoursDisplay,
+                    className: "tabular-nums font-sans",
+                    inputClassName: adminModalHoursAbnormal
+                      ? "border-red-500 ring-1 ring-red-300 bg-red-50/40 text-red-900 text-xs sm:text-sm"
+                      : "text-xs sm:text-sm",
+                    tooltipText: totalHoursTooltipText,
+                  },
+                  {
+                    label: "Employment type",
+                    value: employmentTypeLabelFromFte(detailsAnomaly?.fte ?? null),
+                    className: "font-sans",
+                    inputClassName: "text-slate-800",
+                  },
+                  {
+                    label: "New Staff",
+                    value: templateNewStaffDisplay(detailsItem.workloadNewStaff),
+                    className: "font-sans",
+                    inputClassName: "text-slate-800",
+                  },
+                  {
+                    label: "HoD Review",
+                    value: showActualTeachingRatioBandWarning
+                      ? "Yes"
+                      : templateHodReviewDisplay(detailsItem.hodReview),
+                    className: "font-sans",
+                    inputClassName:
+                      showActualTeachingRatioBandWarning || detailsItem.hodReview === "yes"
+                        ? "border-yellow-500 ring-1 ring-yellow-300 bg-yellow-50/60 text-amber-900"
+                        : "text-slate-800",
+                    tooltipText: showActualTeachingRatioBandWarning
+                      ? "T:R band mismatch detected. HoD Review is required; workload can still be distributed, but Academic must submit to HoD for approval."
+                      : detailsItem.hodReview === "yes"
+                        ? "HoD Review is flagged for this staff member. Please ensure the workload is submitted to HoD for review."
+                        : undefined,
+                    tooltipClassName: "border-yellow-300 bg-yellow-50 text-amber-900",
+                  },
+                ];
+                const notesSections: WorkloadDetailNoteSection[] = [
+                  {
+                    label: "NOTES",
+                    value: workloadModalNotes(detailsItem).trim(),
+                    placeholder: STAFF_PROFILE_NOTES_PLACEHOLDER,
+                    rows: 4,
+                  },
+                ];
+                const historyAction =
+                  statusFilter === "distributed" ? (
+                    <button
+                      type="button"
+                      onClick={() => {
+                        setChangeHistoryPage(1);
+                        setChangeHistoryRows([]);
+                        setChangeHistoryOpen(true);
+                        if (detailsItem?.backendId) {
+                          setChangeHistoryLoading(true);
+                          void apiJson<{ success: boolean; data: ChangeHistoryEntry[] }>(
+                            `/api/school-operations/workloads/${detailsItem.backendId}/history`
+                          )
+                            .then((resp) => {
+                              if (resp.success) setChangeHistoryRows(resp.data ?? []);
+                            })
+                            .finally(() => setChangeHistoryLoading(false));
+                        }
+                      }}
+                      className="rounded border border-[#2f4d9c] px-4 py-2 text-sm font-semibold text-[#2f4d9c] hover:bg-[#eef2ff]"
+                    >
+                      Change history
+                    </button>
+                  ) : null;
 
-                      <div className="space-y-4 px-5 py-4">
-                        <div className="grid grid-cols-1 gap-4 sm:grid-cols-2">
-                          <InfoField label="Name" value={displayNameWithoutComma(detailsItem.name)} />
-                          <InfoField label="Staff ID" value={detailsItem.studentId} />
-                        </div>
-                        <div className="grid grid-cols-1 gap-4 sm:grid-cols-2">
-                          <InfoField
-                            label="Target teaching ratio"
-                            value={
-                              detailsItem.targetTeachingRatio != null
-                                ? `${formatOneDecimal(detailsItem.targetTeachingRatio)}%`
-                                : "—"
-                            }
-                          />
-                          <InfoField
-                            label="Actual teaching ratio"
-                            value={actualTeachingRatioDisplay}
-                            className="tabular-nums font-sans"
-                            inputClassName={
-                              actualTeachingRatioOutOfRange
-                                ? "border-red-500 ring-1 ring-red-300 bg-red-50/60 text-red-900"
-                                : showActualTeachingRatioBandWarning
-                                  ? "border-yellow-500 ring-1 ring-yellow-300 bg-yellow-50/60 text-amber-900"
-                                  : ""
-                            }
-                            tooltipText={actualRatioHoverText}
-                            tooltipClassName={
-                              actualTeachingRatioOutOfRange
-                                ? "border-red-300 bg-red-50 text-red-900"
-                                : "border-yellow-300 bg-yellow-50 text-amber-900"
-                            }
-                          />
-                          <InfoField
-                            label="Total work hours"
-                            value={totalHoursDisplay}
-                            className="tabular-nums font-sans"
-                            inputClassName={
-                              adminModalHoursAbnormal
-                                ? "border-red-500 ring-1 ring-red-300 bg-red-50/40 text-red-900 text-xs sm:text-sm"
-                                : "text-xs sm:text-sm"
-                            }
-                            tooltipText={totalHoursTooltipText}
-                          />
-                          <InfoField
-                            label="Employment type"
-                            value={employmentTypeLabelFromFte(detailsAnomaly?.fte ?? null)}
-                            className="font-sans"
-                            inputClassName="text-slate-800"
-                          />
-                          <InfoField
-                            label="New Staff"
-                            value={templateNewStaffDisplay(detailsItem.workloadNewStaff)}
-                            className="font-sans"
-                            inputClassName="text-slate-800"
-                          />
-                          <InfoField
-                            label="HoD Review"
-                            value={
-                              showActualTeachingRatioBandWarning
-                                ? "Yes"
-                                : templateHodReviewDisplay(detailsItem.hodReview)
-                            }
-                            className="font-sans"
-                            inputClassName={
-                              showActualTeachingRatioBandWarning || detailsItem.hodReview === "yes"
-                                ? "border-yellow-500 ring-1 ring-yellow-300 bg-yellow-50/60 text-amber-900"
-                                : "text-slate-800"
-                            }
-                            tooltipText={
-                              showActualTeachingRatioBandWarning
-                                ? "T:R band mismatch detected. HoD Review is required — workload can still be distributed, but Academic must submit to HoD for approval."
-                                : detailsItem.hodReview === "yes"
-                                  ? "HoD Review is flagged for this staff member. Please ensure the workload is submitted to HoD for review."
-                                  : undefined
-                            }
-                            tooltipClassName="border-yellow-300 bg-yellow-50 text-amber-900"
-                          />
-                        </div>
-                        <div>
-                          <div className="text-xs font-semibold uppercase text-slate-500">Workload Breakdown</div>
-                          <div className="mt-1 overflow-hidden rounded border border-slate-300">
-                            <div className="flex flex-wrap gap-2 border-b border-slate-200 bg-slate-50 px-3 py-2">
-                              {ADMIN_WORKLOAD_BREAKDOWN_TABS.map((tab) => (
-                                <button
-                                  key={tab}
-                                  type="button"
-                                  onClick={() => setDetailsTab(tab)}
-                                  className={`rounded px-3 py-1 text-xs font-semibold ${
-                                    detailsTab === tab
-                                      ? "bg-[#2f4d9c] text-white"
-                                      : "bg-white text-slate-700 ring-1 ring-slate-300 hover:bg-slate-100"
-                                  }`}
-                                >
-                                  {tab}
-                                </button>
-                              ))}
-                            </div>
-                            <table className="min-w-full">
-                              <thead className="bg-white">
-                                <tr className="text-left text-xs font-semibold uppercase text-slate-600">
-                                  <th className="px-3 py-2">{detailsTab}</th>
-                                  <th className="px-3 py-2 text-right">Hours</th>
-                                </tr>
-                              </thead>
-                              <tbody className="divide-y divide-slate-200 bg-white text-sm text-slate-700">
-                                {(adminModalBreakdown?.[detailsTab] ?? []).map((row, idx) => {
-                                  const isHdrSummaryRow =
-                                    detailsTab === "HDR" && row.name === HDR_TOTAL_ROW_LABEL;
-                                  const conflictHighlightRow = Boolean(
-                                    row.roleHourConflict || row.teachingDuplicateUnit
-                                  );
-                                  return (
-                                    <tr
-                                      key={`${detailsItem.id}-${detailsTab}-${idx}`}
-                                      className={
-                                        conflictHighlightRow
-                                          ? "bg-red-50"
-                                          : isHdrSummaryRow
-                                            ? "bg-slate-50"
-                                            : undefined
-                                      }
-                                    >
-                                      <td
-                                        className={`px-3 py-2 ${
-                                          isHdrSummaryRow ? "font-bold text-slate-800" : ""
-                                        } ${conflictHighlightRow ? "font-semibold text-red-900" : ""}`}
-                                      >
-                                        {row.name}
-                                      </td>
-                                      <td
-                                        className={`px-3 py-2 text-right tabular-nums font-sans ${
-                                          isHdrSummaryRow ? "font-bold text-slate-800" : ""
-                                        } ${conflictHighlightRow ? "font-semibold text-red-900" : ""}`}
-                                      >
-                                        {row.hours}
-                                      </td>
-                                    </tr>
-                                  );
-                                })}
-                                {detailsTab !== "HDR" && (
-                                  <tr className="bg-slate-50">
-                                    <td className="px-3 py-2 font-bold text-slate-800">
-                                      {workloadBreakdownTotalLabel(detailsTab)}
-                                    </td>
-                                    <td className="px-3 py-2 text-right font-bold tabular-nums font-sans text-slate-800">
-                                      {(adminModalBreakdown?.[detailsTab] ?? []).reduce(
-                                        (sum, row) => sum + workloadHoursForBreakdownRow(row),
-                                        0
-                                      )}
-                                    </td>
-                                  </tr>
-                                )}
-                              </tbody>
-                            </table>
-                          </div>
-                        </div>
-                        <div>
-                          <div className="mb-1 text-xs font-semibold text-slate-500">NOTES</div>
-                          <textarea
-                            readOnly
-                            value={workloadModalNotes(detailsItem).trim()}
-                            placeholder={STAFF_PROFILE_NOTES_PLACEHOLDER}
-                            rows={4}
-                            className="w-full resize-y rounded border border-slate-300 bg-white px-3 py-2 text-sm text-slate-700 outline-none placeholder:text-slate-500 read-only:bg-slate-50"
-                          />
-                        </div>
-                        {statusFilter === "distributed" && (
-                          <div className="flex justify-end pt-1">
-                            <button
-                              type="button"
-                              onClick={() => {
-                                setChangeHistoryPage(1);
-                                setChangeHistoryRows([]);
-                                setChangeHistoryOpen(true);
-                                if (detailsItem?.backendId) {
-                                  setChangeHistoryLoading(true);
-                                  void apiJson<{ success: boolean; data: ChangeHistoryEntry[] }>(
-                                    `/api/school-operations/workloads/${detailsItem.backendId}/history`
-                                  ).then((resp) => {
-                                    if (resp.success) setChangeHistoryRows(resp.data ?? []);
-                                  }).finally(() => setChangeHistoryLoading(false));
-                                }
-                              }}
-                              className="rounded border border-[#2f4d9c] px-4 py-2 text-sm font-semibold text-[#2f4d9c] hover:bg-[#eef2ff]"
-                            >
-                              追溯修改记录
-                            </button>
-                          </div>
-                        )}
-                        <div className="h-2" />
-                      </div>
-                    </div>
-                  </div>
-                </div>
-              )}
+                return (
+                  <WorkloadDetailModal
+                    title={`${workloadDetailReportingPeriodLabel(detailsItem)}-${detailsItem.department?.trim() || "Department N/A"}-Academic`}
+                    fields={fields}
+                    breakdown={adminModalBreakdown ?? emptyBreakdown()}
+                    tabs={ADMIN_WORKLOAD_BREAKDOWN_TABS}
+                    rowKeyPrefix={detailsItem.id}
+                    onClose={closeDetails}
+                    notesSections={notesSections}
+                    historyAction={historyAction}
+                    footer={<div className="h-2" />}
+                  />
+                );
+              })()}
 
               {changeHistoryOpen && detailsItem && (() => {
                 const HISTORY_PAGE_SIZE = 10;

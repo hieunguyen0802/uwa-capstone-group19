@@ -68,8 +68,10 @@ export default function Login() {
     setLoginError("");
     try {
       const result = await verifyOtp(email, otpCode.trim());
-      localStorage.setItem(ACCESS_TOKEN_KEY, result.access);
-      localStorage.setItem(REFRESH_TOKEN_KEY, result.refresh);
+      localStorage.removeItem(ACCESS_TOKEN_KEY);
+      localStorage.removeItem(REFRESH_TOKEN_KEY);
+      sessionStorage.setItem(ACCESS_TOKEN_KEY, result.access);
+      sessionStorage.setItem(REFRESH_TOKEN_KEY, result.refresh);
       await reload();
       navigate(homeRouteForRole(result.role), { replace: true });
     } catch (err) {

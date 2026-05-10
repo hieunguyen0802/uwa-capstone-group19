@@ -45,6 +45,8 @@ from api.services.workload_service import (
     _parse_year_range,
     evaluate_mvp_anomaly,
     stale_report_response_payload,
+    workload_item_counts_toward_total,
+    workload_item_hours_for_totals,
 )
 from api.services.audit_service import compute_diffs, write_audit
 from api.view.supervisor_views import (
@@ -75,6 +77,32 @@ class AdminImportThrottle(UserRateThrottle):
 
 class AdminExportThrottle(UserRateThrottle):
     rate = '60/hour'
+
+
+def _normalized_band(value):
+    return str(value or '').strip().lower()
+
+
+def _has_target_band_mismatch(target_band, calculated_band):
+    return bool(target_band and calculated_band and _normalized_band(target_band) != _normalized_band(calculated_band))
+
+
+def _effective_hod_review(report, calculated_band=None):
+    if str(report.hod_review or '').strip().lower() == 'yes':
+        return 'yes'
+    if _has_target_band_mismatch(report.target_band, calculated_band):
+        return 'yes'
+    return 'no'
+
+
+def _format_excel_count(value):
+    try:
+        numeric = Decimal(str(value if value is not None else 0))
+    except Exception:
+        numeric = Decimal('0')
+    if numeric == numeric.to_integral_value():
+        return str(int(numeric))
+    return str(numeric.normalize())
 
 
 def _ensure_media_subdir(segment: str) -> Path:
@@ -345,7 +373,7 @@ def _serialize_workload_row(report, items):
     if assignee:
         assigned_name = assignee.user.get_full_name().strip() or assignee.user.username
         assigned_staff_number = assignee.staff_number
-    items_hours = sum((i.allocated_hours for i in items), Decimal('0.00'))
+    items_hours = sum((workload_item_hours_for_totals(i) for i in items), Decimal('0.00'))
     first_teaching = next((i for i in items if i.category == 'TEACHING' and i.unit_code), None)
     sem = report.semester or ''
     sem_label = sem
@@ -355,6 +383,7 @@ def _serialize_workload_row(report, items):
     anomaly_result = evaluate_mvp_anomaly(report)
     research_hrs = round(float(anomaly_result['metrics']['research_pts']) * 17.25, 2)
     total_hours = round(_to_decimal_hours(items_hours) + research_hrs, 2)
+    calculated_band = anomaly_result['metrics'].get('calculated_band')
 
     return {
         'id': str(report.report_id),
@@ -383,7 +412,7 @@ def _serialize_workload_row(report, items):
         'importedFromTemplate': report.import_batch_id is not None,
         'targetBand': report.target_band,
         'workloadNewStaff': report.new_staff,
-        'hodReview': report.hod_review,
+        'hodReview': _effective_hod_review(report, calculated_band),
         'fte': float(report.snapshot_fte),
         'distributedTime': _get_distributed_time(report),
         'createdAt': report.created_at.isoformat(),
@@ -394,7 +423,7 @@ def _serialize_workload_detail(report, items):
     """Serialize a WorkloadReport to the school-operations contract detail shape."""
     staff_user = report.staff.user
     full_name = staff_user.get_full_name().strip() or staff_user.username
-    total_hours = sum((i.allocated_hours for i in items), Decimal('0.00'))
+    total_hours = sum((workload_item_hours_for_totals(i) for i in items), Decimal('0.00'))
 
     anomaly_result = evaluate_mvp_anomaly(report)
     metrics = anomaly_result['metrics']
@@ -415,6 +444,7 @@ def _serialize_workload_detail(report, items):
             breakdown[label].append({
                 'name': item.unit_code or item.description or item.category,
                 'hours': _to_decimal_hours(item.allocated_hours),
+                'excludeFromWorkloadTotal': not workload_item_counts_toward_total(item),
             })
 
     research_hrs = round(float(metrics['research_pts']) * 17.25, 2)
@@ -433,7 +463,7 @@ def _serialize_workload_detail(report, items):
 
     # Backend-computed visual indicator flags (frontend only displays, never computes)
     teaching_ratio_out_of_range = calc_tr < 0 or calc_tr > 1
-    band_mismatch = (target_band is not None and target_band != calculated_band)
+    band_mismatch = _has_target_band_mismatch(target_band, calculated_band)
     hours_out_of_range = (total_with_research <= 856 * fte or total_with_research > 864 * fte) if fte > 0 else False
 
     return {
@@ -449,7 +479,7 @@ def _serialize_workload_detail(report, items):
         'calculatedBand': calculated_band,
         'fte': fte,
         'workloadNewStaff': report.new_staff,
-        'hodReview': report.hod_review,
+        'hodReview': _effective_hod_review(report, calculated_band),
         'cancelled': False,
         'notes': _get_request_reason(report),
         'validation': {
@@ -506,7 +536,7 @@ def _build_visualization_payload(reports_queryset, year_from, year_to, semester_
             'rejected': 0,
         })
         bucket['academics'].add(report.staff_id)
-        total_h = sum((i.allocated_hours for i in report.items.all()), Decimal('0.00'))
+        total_h = sum((workload_item_hours_for_totals(i) for i in report.items.all()), Decimal('0.00'))
         bucket['total_hours'] += total_h
         status_key = report.status.lower()
         if status_key == 'pending':
@@ -533,14 +563,14 @@ def _build_visualization_payload(reports_queryset, year_from, year_to, semester_
         label = f"{report.academic_year} {report.semester}"
         entry = trend_map.setdefault(label, {'semester': label})
         dept_name = report.snapshot_department.name
-        hrs = sum((i.allocated_hours for i in report.items.all()), Decimal('0.00'))
+        hrs = sum((workload_item_hours_for_totals(i) for i in report.items.all()), Decimal('0.00'))
         entry[dept_name] = float(round(Decimal(str(entry.get(dept_name, 0))) + hrs, 2))
 
     workload_trend = [trend_map[key] for key in sorted(trend_map.keys())]
 
     total_hours_all = Decimal('0.00')
     for report in reports_queryset:
-        total_hours_all += sum((i.allocated_hours for i in report.items.all()), Decimal('0.00'))
+        total_hours_all += sum((workload_item_hours_for_totals(i) for i in report.items.all()), Decimal('0.00'))
     academics_union = set()
     pending_total = approved_total = rejected_total = 0
     for report in reports_queryset:
@@ -1045,7 +1075,7 @@ def admin_distribute_workloads(request):
             items = list(report.items.all())
             anomaly_result = evaluate_mvp_anomaly(report)
             research_hrs = float(anomaly_result['metrics']['research_pts']) * 17.25
-            items_hours = float(sum((i.allocated_hours for i in items), Decimal('0.00')))
+            items_hours = float(sum((workload_item_hours_for_totals(i) for i in items), Decimal('0.00')))
             total_hours = round(items_hours + research_hrs, 2)
             fte = float(report.snapshot_fte)
             if fte > 0 and (total_hours <= 856 * fte or total_hours > 864 * fte):
@@ -1065,8 +1095,29 @@ def admin_distribute_workloads(request):
             # Status (INITIAL→PENDING→APPROVED/REJECTED) belongs to the
             # academic→HoD workflow.  Distribution is a separate event tracked
             # via distributed_at so the workflow status is never contaminated.
+            previous_assigned_by = report.assigned_by
             report.distributed_at = now
-            report.save(update_fields=['distributed_at', 'updated_at'])
+            report.assigned_by = request.staff
+            report.save(update_fields=['distributed_at', 'assigned_by', 'updated_at'])
+
+            academic_visible = WorkloadReport.objects.filter(
+                report_id=report.report_id,
+                staff=report.staff,
+                is_current=True,
+                distributed_at__isnull=False,
+            ).exists()
+            if not academic_visible:
+                report.distributed_at = None
+                report.assigned_by = previous_assigned_by
+                report.save(update_fields=['distributed_at', 'assigned_by', 'updated_at'])
+                failed.append({
+                    'workloadId': str(report.report_id),
+                    'staffId': report.staff.staff_number,
+                    'name': report.staff.user.get_full_name(),
+                    'error': 'Distribution did not create an Academic-visible workload record',
+                    'errorCode': 'ACADEMIC_VISIBILITY_FAILED',
+                })
+                continue
             AuditLog.objects.create(
                 report=report,
                 action_by=request.staff,
@@ -1347,6 +1398,7 @@ def admin_workload_import(request):
                     fte_val = am.get('fte')
                     target_pct = rm.get('targetTeachingPct')
                     target_band_val = am.get('targetBand')
+                    calculated_band_val = am.get('calculatedBand')
                     try:
                         snapshot_fte = Decimal(str(fte_val)) if fte_val is not None else (staff_row.fte if hasattr(staff_row, 'fte') else Decimal('1.00'))
                     except Exception:
@@ -1358,6 +1410,8 @@ def admin_workload_import(request):
 
                     hod_review_val = rm.get('hodReview') or 'no'
                     hod_review_val = 'yes' if str(hod_review_val).strip().lower() == 'yes' else 'no'
+                    if _has_target_band_mismatch(target_band_val, calculated_band_val):
+                        hod_review_val = 'yes'
                     new_staff_val = str(rm.get('newStaff') or '').strip().lower() in ('yes', 'true', '1', 'y')
 
                     # Always force INITIAL — import must never bypass the approval workflow.
@@ -1412,15 +1466,52 @@ def admin_workload_import(request):
                         ))
 
                     hdr = hdr_metrics.get(staff_number) or {}
-                    hdr_hrs = Decimal(str(hdr.get('totalHrs', 0) or 0))
-                    if hdr_hrs > 0:
-                        items_to_create.append(WorkloadItem(
-                            report=report,
-                            category='HDR_SUPERVISION',
-                            unit_code=None,
-                            description='HDR Supervision',
-                            allocated_hours=hdr_hrs,
+                    if hdr:
+                        ft_hours = Decimal(str(hdr.get('ftHours', 0) or 0))
+                        pt_hours = Decimal(str(hdr.get('ptHours', 0) or 0))
+                        hdr_hrs = Decimal(str(hdr.get('totalHrs', 0) or 0))
+                        if hdr_hrs <= 0:
+                            derived_hrs = Decimal(str(hdr.get('derivedHrs', 0) or 0))
+                            hdr_points = Decimal(str(hdr.get('hdrPoints', 0) or 0))
+                            if derived_hrs > 0:
+                                hdr_hrs = derived_hrs
+                            elif ft_hours + pt_hours > 0:
+                                hdr_hrs = ft_hours + pt_hours
+                            elif hdr_points > 0:
+                                hdr_hrs = hdr_points * Decimal('17.25')
+
+                        has_hdr_data = any((
+                            ft_hours > 0,
+                            pt_hours > 0,
+                            hdr_hrs > 0,
+                            hdr.get('ftStudents') is not None,
+                            hdr.get('ptStudents') is not None,
                         ))
+                        if has_hdr_data:
+                            items_to_create.extend([
+                                WorkloadItem(
+                                    report=report,
+                                    category='HDR_SUPERVISION',
+                                    unit_code=None,
+                                    description=f"Full time students ({_format_excel_count(hdr.get('ftStudents'))})",
+                                    allocated_hours=ft_hours,
+                                ),
+                                WorkloadItem(
+                                    report=report,
+                                    category='HDR_SUPERVISION',
+                                    unit_code=None,
+                                    description=f"Part time students ({_format_excel_count(hdr.get('ptStudents'))})",
+                                    allocated_hours=pt_hours,
+                                ),
+                            ])
+                            if hdr_hrs > 0:
+                                items_to_create.append(WorkloadItem(
+                                    report=report,
+                                    category='HDR_SUPERVISION',
+                                    unit_code=None,
+                                    description='HDR Total',
+                                    allocated_hours=hdr_hrs,
+                                ))
 
                     svc = service_metrics.get(staff_number) or {}
                     svc_pts = Decimal(str(svc.get('servicePoints', 0) or 0))
@@ -1430,7 +1521,7 @@ def admin_workload_import(request):
                             report=report,
                             category='SERVICE',
                             unit_code=None,
-                            description='Service',
+                            description='Self-Directed Svc Pts',
                             allocated_hours=svc_hrs,
                         ))
 
@@ -1968,7 +2059,7 @@ def _persist_export_workbook(request):
         staff_user = report.staff.user
         name = staff_user.get_full_name().strip() or staff_user.username
         dept = report.snapshot_department.name
-        hours_total = sum((i.allocated_hours for i in report.items.all()), Decimal('0.00'))
+        hours_total = sum((workload_item_hours_for_totals(i) for i in report.items.all()), Decimal('0.00'))
 
         sheet.append([
             report.staff.staff_number,

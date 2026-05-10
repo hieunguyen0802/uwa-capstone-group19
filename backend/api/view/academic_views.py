@@ -16,18 +16,23 @@ from api.models import AuditLog, WorkloadReport
 from api.permissions import IsAcademicOrHoD
 from api.services.workload_service import (
     evaluate_mvp_anomaly,
+    workload_item_hours_for_totals,
     _parse_year_range,
     _filter_reports_by_range,
     _build_semester_label,
     _reporting_period_label,
 )
+from api.view.supervisor_views import _get_request_reason
+from api.view.ops_admin_views import _serialize_workload_detail as _serialize_ops_workload_detail
 
 
 def _own_reports_qs(staff):
     # Academic pages always show only the requesting staff member's own reports,
     # even when a HOD is acting in their Academic identity.
     return WorkloadReport.objects.filter(
-        is_current=True, staff=staff
+        is_current=True,
+        staff=staff,
+        distributed_at__isnull=False,
     ).select_related('staff__user', 'staff__department', 'snapshot_department')
 
 CATEGORY_LABELS = {
@@ -93,11 +98,28 @@ def _get_supervisor_note(report):
     return note_log.comment if note_log else ''
 
 
+def _normalized_band(value):
+    return str(value or '').strip().lower()
+
+
+def _has_target_band_mismatch(target_band, calculated_band):
+    return bool(target_band and calculated_band and _normalized_band(target_band) != _normalized_band(calculated_band))
+
+
+def _hod_review_required(report, calculated_band=None):
+    if str(report.hod_review or '').strip().lower() == 'yes':
+        return True
+    return _has_target_band_mismatch(report.target_band, calculated_band)
+
+
 def _get_assigned_by(report):
-    """Return the name of the SCHOOL_OPS staff who imported this report."""
+    """Return the School Ops staff member who distributed this report."""
+    if report.assigned_by_id:
+        return report.assigned_by.user.get_full_name().strip() or report.assigned_by.user.username
+
     log = AuditLog.objects.filter(
         report=report,
-        action_type__in=['IMPORTED', 'MODIFIED_BY_REIMPORT'],
+        action_type__in=['DISTRIBUTED', 'IMPORTED', 'MODIFIED_BY_REIMPORT'],
     ).select_related('action_by__user').order_by('-created_at').first()
     if not log or not log.action_by:
         return ''
@@ -133,7 +155,7 @@ def _serialize_workload_row(report, confirmation, anomaly_result=None, report_it
     staff_user = report.staff.user
     full_name = staff_user.get_full_name().strip() or staff_user.username
     items = report_items if report_items is not None else list(report.items.all())
-    items_hours = sum((item.allocated_hours for item in items), Decimal('0.00'))
+    items_hours = sum((workload_item_hours_for_totals(item) for item in items), Decimal('0.00'))
 
     if anomaly_result is None:
         anomaly_result = evaluate_mvp_anomaly(report)
@@ -141,6 +163,7 @@ def _serialize_workload_row(report, confirmation, anomaly_result=None, report_it
     # Include research residual so total matches the 5-tab breakdown in School Ops
     research_hrs = round(float(anomaly_result['metrics']['research_pts']) * 17.25, 2)
     total_hours = round(_to_decimal_hours(items_hours) + research_hrs, 2)
+    calculated_band = anomaly_result['metrics'].get('calculated_band')
 
     return {
         'id': str(report.report_id),
@@ -148,7 +171,7 @@ def _serialize_workload_row(report, confirmation, anomaly_result=None, report_it
         'employeeId': report.staff.staff_number,
         'department': report.snapshot_department.name if report.snapshot_department_id else None,
         'title': report.staff.title or '',
-        'notes': _get_supervisor_note(report),
+        'notes': _get_request_reason(report),
         'hours': total_hours,
         'academicYear': report.academic_year,
         'semester': report.semester,
@@ -158,6 +181,7 @@ def _serialize_workload_row(report, confirmation, anomaly_result=None, report_it
         'confirmation': confirmation,
         'confirmationTime': _get_confirmation_time(report),
         'supervisorNote': _get_supervisor_note(report),
+        'hodReviewRequired': _hod_review_required(report, calculated_band),
         'assignedBy': _get_assigned_by(report),
         'pushedAt': _get_pushed_at(report),
         'cancelled': report.status == 'REJECTED',
@@ -255,43 +279,32 @@ def academic_workload_detail(request, id):
     report = get_object_or_404(qs, report_id=id)
 
     report_items = list(report.items.all())
-    anomaly_result = evaluate_mvp_anomaly(report, department_conflict=_is_department_conflict(report))
     confirmation = _get_report_confirmation(report)
-    items_hours = sum((i.allocated_hours for i in report_items), Decimal('0.00'))
-    staff_user = report.staff.user
-
-    metrics = anomaly_result['metrics']
-    research_hrs = round(float(metrics['research_pts']) * 17.25, 2)
-    total_hours = round(_to_decimal_hours(items_hours) + research_hrs, 2)
-
-    breakdown = _serialize_breakdown(report_items)
-    if research_hrs > 0:
-        breakdown['Research (residual)'] = [{'name': 'Research (residual)', 'hours': research_hrs}]
-
-    fte = float(report.snapshot_fte or 0)
-    calc_tr = float(metrics['calc_tr'])
-    calculated_band = metrics['calculated_band']
-    target_band = report.target_band
-
-    employment_type = 'Part-time' if fte < 1.0 else 'Full-time'
+    ops_detail = _serialize_ops_workload_detail(report, report_items)
+    validation = ops_detail.get('validation') or {}
+    hod_review_required = str(ops_detail.get('hodReview') or '').strip().lower() == 'yes'
 
     return Response({
         'id': str(report.report_id),
-        'name': staff_user.get_full_name().strip() or staff_user.username,
+        'name': ops_detail.get('name', ''),
         'employeeId': report.staff.staff_number,
-        'department': report.snapshot_department.name if report.snapshot_department_id else None,
+        'studentId': report.staff.staff_number,
+        'department': ops_detail.get('department'),
         'title': '',
-        'notes': _get_supervisor_note(report),
-        'hours': total_hours,
+        'notes': _get_request_reason(report),
+        'hours': ops_detail.get('hours'),
         'academicYear': report.academic_year,
         'semester': report.semester,
-        'targetTeachingRatio': float(report.target_teaching_pct) if report.target_teaching_pct is not None else None,
+        'targetTeachingRatio': ops_detail.get('targetTeachingRatio'),
         'teachingTargetHours': _calc_target_teaching_hours(report),
-        'actualTeachingRatio': round(calc_tr * 100, 1),
-        'employmentType': employment_type,
-        'isNewStaff': bool(report.new_staff),
-        'hodReviewRequired': report.hod_review == 'yes',
-        'status': report.status.lower(),
+        'actualTeachingRatio': ops_detail.get('actualTeachingRatio'),
+        'targetBand': ops_detail.get('targetBand'),
+        'calculatedBand': ops_detail.get('calculatedBand'),
+        'employmentType': 'Part-time' if float(report.snapshot_fte or 0) < 1.0 else 'Full-time',
+        'isNewStaff': bool(ops_detail.get('workloadNewStaff')),
+        'hodReviewRequired': hod_review_required,
+        'hodReview': ops_detail.get('hodReview'),
+        'status': ops_detail.get('status'),
         'confirmation': confirmation,
         'confirmationTime': _get_confirmation_time(report),
         'supervisorNote': _get_supervisor_note(report),
@@ -299,15 +312,15 @@ def academic_workload_detail(request, id):
         'pushedAt': _get_pushed_at(report),
         'cancelled': report.status == 'REJECTED',
         'validation': {
-            'isAbnormal': anomaly_result['is_anomaly'],
-            'reason': ', '.join(anomaly_result['reasons']),
-            'teachingRatioOutOfRange': calc_tr < 0 or calc_tr > 1,
-            'bandMismatch': target_band is not None and target_band != calculated_band,
-            'hoursOutOfRange': (total_hours <= 856 * fte or total_hours > 864 * fte) if fte > 0 else False,
-            'expectedMinHours': round(856 * fte, 2),
-            'expectedMaxHours': round(864 * fte, 2),
+            'isAbnormal': bool(validation.get('failedReasons') or validation.get('teachingRatioOutOfRange') or validation.get('bandMismatch') or validation.get('hoursOutOfRange')),
+            'reason': ', '.join(validation.get('failedReasons') or []),
+            'teachingRatioOutOfRange': bool(validation.get('teachingRatioOutOfRange')),
+            'bandMismatch': bool(validation.get('bandMismatch')),
+            'hoursOutOfRange': bool(validation.get('hoursOutOfRange')),
+            'expectedMinHours': validation.get('expectedMinHours'),
+            'expectedMaxHours': validation.get('expectedMaxHours'),
         },
-        'breakdown': breakdown,
+        'breakdown': ops_detail.get('breakdown'),
     })
 
 
@@ -492,7 +505,7 @@ def academic_visualization(request):
     my_hours_map = {}
     for r in reports:
         key = (r.academic_year, r.semester)
-        total = sum(item.allocated_hours for item in r.items.all())
+        total = sum((workload_item_hours_for_totals(item) for item in r.items.all()), Decimal('0.00'))
         my_hours_map[key] = my_hours_map.get(key, Decimal('0.00')) + total
 
     dept_id = request.staff.department_id
@@ -505,7 +518,7 @@ def academic_visualization(request):
     dept_hours_map = {}
     for r in dept_qs.order_by('academic_year', 'semester'):
         key = (r.academic_year, r.semester)
-        total = sum(item.allocated_hours for item in r.items.all())
+        total = sum((workload_item_hours_for_totals(item) for item in r.items.all()), Decimal('0.00'))
         dept_hours_map.setdefault(key, []).append(total)
 
     my_vs_dept = []

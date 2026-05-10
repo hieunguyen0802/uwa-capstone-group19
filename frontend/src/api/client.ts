@@ -2,7 +2,8 @@
  * Thin axios client with JWT bearer injection + 401 handling.
  *
  * All API calls go through this client so token management lives in one place.
- * Access token is stored in localStorage under 'access_token'; refresh is TODO
+ * Access token is stored per browser tab in sessionStorage under 'access_token';
+ * localStorage is only a legacy fallback. Refresh is TODO
  * (next milestone once backend exposes /api/login/refresh/).
  */
 import axios, { AxiosError, AxiosInstance, InternalAxiosRequestConfig } from "axios";
@@ -35,7 +36,7 @@ export const apiClient: AxiosInstance = axios.create({
 });
 
 apiClient.interceptors.request.use((config: InternalAxiosRequestConfig) => {
-  const token = localStorage.getItem(ACCESS_TOKEN_KEY);
+  const token = readAccessToken();
   if (token) {
     config.headers = config.headers ?? {};
     (config.headers as Record<string, string>).Authorization = `Bearer ${token}`;
@@ -68,12 +69,12 @@ export function readAccessToken(): string {
   if (typeof window === "undefined") return "";
 
   const directToken =
-    window.localStorage.getItem(ACCESS_TOKEN_KEY) ||
     window.sessionStorage.getItem(ACCESS_TOKEN_KEY) ||
-    window.localStorage.getItem("access") ||
     window.sessionStorage.getItem("access") ||
-    window.localStorage.getItem("token") ||
-    window.sessionStorage.getItem("token");
+    window.sessionStorage.getItem("token") ||
+    window.localStorage.getItem(ACCESS_TOKEN_KEY) ||
+    window.localStorage.getItem("access") ||
+    window.localStorage.getItem("token");
   if (directToken) return directToken;
 
   const userRecord = parseStoredJson(window.localStorage.getItem("user"));

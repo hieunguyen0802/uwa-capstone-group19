@@ -3,6 +3,7 @@ from decimal import Decimal, ROUND_HALF_UP
 from api.models import WorkloadReport
 
 POINT_TO_HOURS = Decimal('17.25')
+HDR_DISPLAY_ROW_PREFIXES = ('Full time students', 'Part time students')
 
 STALE_REPORT_ERROR = {
     'success': False,
@@ -40,6 +41,20 @@ def _quantize_2(value: Decimal) -> Decimal:
     return value.quantize(Decimal('0.01'), rounding=ROUND_HALF_UP)
 
 
+def workload_item_counts_toward_total(item) -> bool:
+    """Display-only HDR count rows should not affect workload totals."""
+    if item.category != 'HDR_SUPERVISION':
+        return True
+    description = (item.description or '').strip()
+    return not description.startswith(HDR_DISPLAY_ROW_PREFIXES)
+
+
+def workload_item_hours_for_totals(item) -> Decimal:
+    if not workload_item_counts_toward_total(item):
+        return Decimal('0.00')
+    return item.allocated_hours or Decimal('0.00')
+
+
 def _teaching_band(calc_tr: Decimal) -> str:
     if calc_tr <= Decimal('0.20'):
         return 'Research Focused'
@@ -72,7 +87,7 @@ def evaluate_mvp_anomaly(report, department_conflict=False):
     assigned_roles_pts = Decimal('0.00')
 
     for item in items:
-        hours = item.allocated_hours or Decimal('0.00')
+        hours = workload_item_hours_for_totals(item)
         pts = hours / POINT_TO_HOURS
         if item.category == 'TEACHING':
             teaching_pts += pts
