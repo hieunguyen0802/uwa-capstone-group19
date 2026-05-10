@@ -18,6 +18,8 @@ import { profileFromAuth } from "../auth/profileFromAuth";
 
 type MockRequest = {
   id: number;
+  /** Original UUID string from backend — used for API calls to avoid parseInt truncation. */
+  backendId?: string;
   sourceWorkloadId?: number;
   studentId: string;
   semesterLabel: string;
@@ -221,6 +223,7 @@ function mapHodRowToRequest(row: HodWorkloadRowResponse): MockRequest {
   const numericId = Number.parseInt(String(row.id), 10);
   return {
     id: Number.isFinite(numericId) ? numericId : Date.now(),
+    backendId: String(row.id),
     studentId: row.staffId,
     semesterLabel: row.semesterLabel || row.periodLabel,
     periodLabel: row.periodLabel,
@@ -403,7 +406,7 @@ function HodDetailModal({
   async function handleDecision(note: string) {
     setSubmitting(true);
     try {
-      await apiJson(`/api/hod/workload-requests/${item.id}/decision/`, {
+      await apiJson(`/api/hod/workload-requests/${item.backendId ?? item.id}/decision/`, {
         method: "POST",
         body: JSON.stringify({ decision: noteKind, note: note.trim(), breakdown }),
       });
@@ -509,8 +512,21 @@ function HodDetailModal({
   );
 }
 
+function formatIsoDateTime(iso: string): string {
+  const d = new Date(iso);
+  if (Number.isNaN(d.getTime())) return iso;
+  const y = d.getFullYear();
+  const mo = String(d.getMonth() + 1).padStart(2, "0");
+  const day = String(d.getDate()).padStart(2, "0");
+  const hh = String(d.getHours()).padStart(2, "0");
+  const mm = String(d.getMinutes()).padStart(2, "0");
+  return `${y}-${mo}-${day} ${hh}:${mm}`;
+}
+
 function submittedAtDisplay(item: Pick<MockRequest, "submittedAt">): string {
-  return item.submittedAt?.trim() || "—";
+  const raw = item.submittedAt?.trim();
+  if (!raw) return "—";
+  return formatIsoDateTime(raw);
 }
 
 export default function Supervisor() {
@@ -681,10 +697,11 @@ export default function Supervisor() {
     }
   }
 
-  async function loadHodDetail(id: number) {
-    const response = await apiJson<HodWorkloadDetailResponse>(`/api/hod/workload-requests/${id}/`);
+  async function loadHodDetail(numericId: number, backendId?: string) {
+    const apiId = backendId || String(numericId);
+    const response = await apiJson<HodWorkloadDetailResponse>(`/api/hod/workload-requests/${apiId}/`);
     const mapped = mapHodDetailToRequest(response as HodWorkloadDetailPayload);
-    const existing = pending.find((row) => row.id === id);
+    const existing = pending.find((row) => row.id === numericId);
     const merged = existing
       ? {
           ...existing,
@@ -694,7 +711,7 @@ export default function Supervisor() {
           submittedAt: existing.submittedAt,
         }
       : mapped;
-    setPending((prev) => prev.map((row) => (row.id === id ? { ...row, ...merged } : row)));
+    setPending((prev) => prev.map((row) => (row.id === numericId ? { ...row, ...merged } : row)));
     return merged;
   }
 
@@ -908,7 +925,7 @@ export default function Supervisor() {
       return;
     }
     try {
-      const detail = await loadHodDetail(item.id);
+      const detail = await loadHodDetail(item.id, item.backendId);
       setDetailsItem(detail);
       setDetailsOpen(true);
     } catch (error) {
