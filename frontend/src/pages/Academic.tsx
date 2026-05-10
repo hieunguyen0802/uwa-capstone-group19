@@ -411,25 +411,11 @@ function AcademicDetailModal({
   item,
   onClose,
   onConfirm,
-  onSubmitToHod,
 }: {
   item: AcademicItem;
   onClose: () => void;
   onConfirm: () => void;
-  onSubmitToHod?: (reason: string) => Promise<void>;
 }) {
-  const [hodReason, setHodReason] = useState("");
-  const [hodReasonError, setHodReasonError] = useState("");
-  const [hodSubmitting, setHodSubmitting] = useState(false);
-
-  async function handleHodSubmit() {
-    const trimmed = hodReason.trim();
-    if (!trimmed) { setHodReasonError("Reason is required."); return; }
-    if (trimmed.length > REQUEST_REASON_MAX_LENGTH) { setHodReasonError(`Max ${REQUEST_REASON_MAX_LENGTH} characters.`); return; }
-    setHodSubmitting(true);
-    try { await onSubmitToHod?.(trimmed); } finally { setHodSubmitting(false); }
-  }
-
   const breakdown = useMemo(
     () => item.detailSnapshot?.breakdown ?? normalizeAcademicBreakdown(),
     [item.detailSnapshot]
@@ -529,45 +515,20 @@ function AcademicDetailModal({
       notesSections={notesSections}
       footer={
         <div className="flex flex-col items-center gap-2 pt-1">
-          {hodReviewRequiresSubmission && item.status !== "pending" ? (
-            <div className="w-full space-y-2">
-              <p className="text-center text-xs font-bold text-red-700">
-                Please submit to your Head of Department for adjustment review.
-              </p>
-              <textarea
-                value={hodReason}
-                onChange={(e) => { setHodReason(e.target.value); setHodReasonError(""); }}
-                placeholder="Reason for submission (required)"
-                maxLength={REQUEST_REASON_MAX_LENGTH}
-                rows={2}
-                className="w-full resize-none rounded border border-slate-300 px-3 py-2 text-sm outline-none focus:border-[#2f4d9c]"
-              />
-              {hodReasonError && <p className="text-xs font-semibold text-red-600">{hodReasonError}</p>}
-              <button
-                type="button"
-                onClick={handleHodSubmit}
-                disabled={hodSubmitting}
-                className="w-full rounded-md bg-[#2f4d9c] px-6 py-2 text-sm font-semibold text-white hover:bg-[#29458c] disabled:bg-slate-400"
-              >
-                {hodSubmitting ? "Submitting…" : "Submit to HoD"}
-              </button>
-            </div>
-          ) : (
-            <button
-              type="button"
-              onClick={onConfirm}
-              disabled={item.status === "pending"}
-              className={`rounded-md px-6 py-2 text-sm font-semibold ${
-                item.confirmation === "confirmed"
-                  ? "bg-[#16a34a] text-white"
-                  : item.status === "pending"
-                    ? "cursor-not-allowed bg-slate-400 text-white"
-                    : "bg-[#2f4d9c] text-white hover:bg-[#29458c]"
-              }`}
-            >
-              Confirmed
-            </button>
-          )}
+          <button
+            type="button"
+            onClick={onConfirm}
+            disabled={item.status === "pending" || hodReviewRequiresSubmission}
+            className={`rounded-md px-6 py-2 text-sm font-semibold ${
+              item.confirmation === "confirmed"
+                ? "bg-[#16a34a] text-white"
+                : item.status === "pending" || hodReviewRequiresSubmission
+                  ? "cursor-not-allowed bg-slate-400 text-white"
+                  : "bg-[#2f4d9c] text-white hover:bg-[#29458c]"
+            }`}
+          >
+            Confirmed
+          </button>
         </div>
       }
     />
@@ -837,8 +798,8 @@ export default function Academic() {
     });
   }
 
-  async function submitRequestToSupervisor(reason: string, overrideBackendIds?: string[]) {
-    const backendIds = overrideBackendIds ?? items.filter((x) => selectedIds.has(x.id)).map((x) => x.backendId);
+  async function submitRequestToSupervisor(reason: string) {
+    const backendIds = items.filter((x) => selectedIds.has(x.id)).map((x) => x.backendId);
     if (!backendIds.length) return;
     try {
       await apiJson<{ submittedCount?: number }>("/api/academic/workload-requests/", {
@@ -848,7 +809,7 @@ export default function Academic() {
           applicationReason: reason,
         }),
       });
-      if (!overrideBackendIds) setSelectedIds(new Set());
+      setSelectedIds(new Set());
       await loadAcademicWorkloads();
       setRequestInfo(`${backendIds.length} request(s) have been submitted to HoD.`);
     } catch (error) {
@@ -1516,10 +1477,6 @@ export default function Academic() {
           onClose={() => setDetailId(null)}
           onConfirm={async () => {
             await handleConfirmFromDetail(detailItem.id, detailItem.backendId);
-            setDetailId(null);
-          }}
-          onSubmitToHod={async (reason) => {
-            await submitRequestToSupervisor(reason, [detailItem.backendId]);
             setDetailId(null);
           }}
         />

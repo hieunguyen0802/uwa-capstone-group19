@@ -47,6 +47,15 @@ type WorkloadDetailModalProps = {
   notesSections?: WorkloadDetailNoteSection[];
   footer?: ReactNode;
   historyAction?: ReactNode;
+  /** When provided, renders an Edit toggle in the breakdown header */
+  onEditModeToggle?: () => void;
+  /** When true, breakdown rows are rendered as editable inputs */
+  breakdownEditMode?: boolean;
+  onBreakdownRowChange?: (tab: WorkloadBreakdownCategory, idx: number, field: "name" | "hours", value: string) => void;
+  onBreakdownRowAdd?: (tab: WorkloadBreakdownCategory) => void;
+  onBreakdownRowRemove?: (tab: WorkloadBreakdownCategory, idx: number) => void;
+  /** Categories that must remain read-only even in edit mode */
+  readonlyBreakdownTabs?: WorkloadBreakdownCategory[];
 };
 
 export default function WorkloadDetailModal({
@@ -59,6 +68,12 @@ export default function WorkloadDetailModal({
   notesSections = [],
   footer,
   historyAction,
+  onEditModeToggle,
+  breakdownEditMode = false,
+  onBreakdownRowChange,
+  onBreakdownRowAdd,
+  onBreakdownRowRemove,
+  readonlyBreakdownTabs = ["Research (residual)"],
 }: WorkloadDetailModalProps) {
   const [activeTab, setActiveTab] = useState<WorkloadBreakdownCategory>(tabs[0] ?? "Teaching");
   const [expandedNotes, setExpandedNotes] = useState<Record<string, boolean>>({});
@@ -115,7 +130,18 @@ export default function WorkloadDetailModal({
             </div>
 
             <div>
-              <div className="text-xs font-semibold uppercase text-slate-500">Workload Breakdown</div>
+              <div className="flex items-center justify-between">
+                <div className="text-xs font-semibold uppercase text-slate-500">Workload Breakdown</div>
+                {onEditModeToggle && (
+                  <button
+                    type="button"
+                    onClick={onEditModeToggle}
+                    className="rounded bg-[#2f4d9c] px-3 py-1 text-xs font-bold text-white hover:bg-[#264183]"
+                  >
+                    {breakdownEditMode ? "Done" : "Edit"}
+                  </button>
+                )}
+              </div>
               <div className="mt-1 overflow-hidden rounded border border-slate-300">
                 <div className="flex flex-wrap gap-2 border-b border-slate-200 bg-slate-50 px-3 py-2">
                   {tabs.map((tab) => (
@@ -133,51 +159,92 @@ export default function WorkloadDetailModal({
                     </button>
                   ))}
                 </div>
-                <table className="min-w-full">
-                  <thead className="bg-white">
-                    <tr className="text-left text-xs font-semibold uppercase text-slate-600">
-                      <th className="px-3 py-2">{activeTab}</th>
-                      <th className="px-3 py-2 text-right">Hours</th>
-                    </tr>
-                  </thead>
-                  <tbody className="divide-y divide-slate-200 bg-white text-sm text-slate-700">
-                    {rows.map((row, idx) => {
-                      const isHdrSummaryRow = activeTab === "HDR" && row.name === "HDR Total";
-                      const conflictHighlightRow = Boolean(row.roleHourConflict || row.teachingDuplicateUnit);
-                      return (
-                        <tr
-                          key={`${rowKeyPrefix}-${activeTab}-${idx}`}
-                          className={conflictHighlightRow ? "bg-red-50" : isHdrSummaryRow ? "bg-slate-50" : undefined}
-                        >
-                          <td
-                            className={`px-3 py-2 ${
-                              isHdrSummaryRow ? "font-bold text-slate-800" : ""
-                            } ${conflictHighlightRow ? "font-semibold text-red-900" : ""}`}
-                          >
-                            {row.name}
-                          </td>
-                          <td
-                            className={`px-3 py-2 text-right tabular-nums font-sans ${
-                              isHdrSummaryRow ? "font-bold text-slate-800" : ""
-                            } ${conflictHighlightRow ? "font-semibold text-red-900" : ""}`}
-                          >
-                            {row.hours}
-                          </td>
+                {(() => {
+                  const isEditing = breakdownEditMode && !readonlyBreakdownTabs.includes(activeTab);
+                  const showActionCol = isEditing;
+                  return (
+                    <table className="min-w-full">
+                      <thead className="bg-white">
+                        <tr className="text-left text-xs font-semibold uppercase text-slate-600">
+                          <th className="px-3 py-2">{activeTab}</th>
+                          <th className="px-3 py-2 text-right">Hours</th>
+                          {showActionCol && <th className="w-[88px] px-3 py-2 text-center">Action</th>}
                         </tr>
-                      );
-                    })}
-                    {activeTab !== "HDR" && (
-                      <tr className="bg-slate-50">
-                        <td className="px-3 py-2 font-bold text-slate-800">
-                          {workloadBreakdownTotalLabel(activeTab)}
-                        </td>
-                        <td className="px-3 py-2 text-right font-bold tabular-nums font-sans text-slate-800">
-                          {tabTotal}
-                        </td>
-                      </tr>
-                    )}
-                  </tbody>
-                </table>
+                      </thead>
+                      <tbody className="divide-y divide-slate-200 bg-white text-sm text-slate-700">
+                        {rows.map((row, idx) => {
+                          const isHdrSummaryRow = activeTab === "HDR" && row.name === "HDR Total";
+                          const conflictHighlightRow = Boolean(row.roleHourConflict || row.teachingDuplicateUnit);
+                          return (
+                            <tr
+                              key={`${rowKeyPrefix}-${activeTab}-${idx}`}
+                              className={conflictHighlightRow ? "bg-red-50" : isHdrSummaryRow ? "bg-slate-50" : undefined}
+                            >
+                              <td className={`px-3 py-2 ${isHdrSummaryRow ? "font-bold text-slate-800" : ""} ${conflictHighlightRow ? "font-semibold text-red-900" : ""}`}>
+                                {isEditing ? (
+                                  <input
+                                    value={row.name}
+                                    onChange={(e) => onBreakdownRowChange?.(activeTab, idx, "name", e.target.value)}
+                                    maxLength={60}
+                                    className="w-[220px] max-w-full rounded border border-slate-300 px-2 py-1 text-sm"
+                                  />
+                                ) : row.name}
+                              </td>
+                              <td className={`px-3 py-2 text-right tabular-nums font-sans ${isHdrSummaryRow ? "font-bold text-slate-800" : ""} ${conflictHighlightRow ? "font-semibold text-red-900" : ""}`}>
+                                {isEditing ? (
+                                  <input
+                                    type="text"
+                                    inputMode="decimal"
+                                    maxLength={8}
+                                    value={String(row.hours)}
+                                    onChange={(e) => onBreakdownRowChange?.(activeTab, idx, "hours", e.target.value)}
+                                    className="ml-auto w-24 rounded border border-slate-300 px-2 py-1 text-right text-sm tabular-nums font-sans"
+                                  />
+                                ) : row.hours}
+                              </td>
+                              {showActionCol && (
+                                <td className="px-3 py-2 text-center">
+                                  <button
+                                    type="button"
+                                    onClick={() => onBreakdownRowRemove?.(activeTab, idx)}
+                                    disabled={rows.length <= 1}
+                                    className="rounded bg-slate-200 px-2 py-1 text-xs font-semibold text-slate-700 hover:bg-slate-300 disabled:opacity-50"
+                                  >
+                                    Delete
+                                  </button>
+                                </td>
+                              )}
+                            </tr>
+                          );
+                        })}
+                        {isEditing && (
+                          <tr>
+                            <td colSpan={3} className="px-3 py-2">
+                              <button
+                                type="button"
+                                onClick={() => onBreakdownRowAdd?.(activeTab)}
+                                className="rounded bg-[#2f4d9c] px-3 py-1 text-xs font-semibold text-white hover:bg-[#264183]"
+                              >
+                                + Add Row
+                              </button>
+                            </td>
+                          </tr>
+                        )}
+                        {activeTab !== "HDR" && (
+                          <tr className="bg-slate-50">
+                            <td className="px-3 py-2 font-bold text-slate-800">
+                              {workloadBreakdownTotalLabel(activeTab)}
+                            </td>
+                            <td className="px-3 py-2 text-right font-bold tabular-nums font-sans text-slate-800">
+                              {tabTotal}
+                            </td>
+                            {showActionCol && <td />}
+                          </tr>
+                        )}
+                      </tbody>
+                    </table>
+                  );
+                })()}
               </div>
             </div>
 

@@ -11,6 +11,7 @@ import StatusPill from "../components/common/StatusPill";
 import VisualizationSummaryCards from "../components/common/VisualizationSummaryCards";
 import ThemedNoticeModal, { SUPERSEDED_RECORD_MESSAGE } from "../components/common/ThemedNoticeModal";
 import WorkHoursBadge from "../components/common/WorkHoursBadge";
+import WorkloadDetailModal, { type WorkloadBreakdownCategory } from "../components/common/WorkloadDetailModal";
 import { apiJson, clearLocalStorageKeys, downloadApiFile, isAbortError } from "../api/client";
 import { useAuth } from "../auth/AuthContext";
 import { profileFromAuth } from "../auth/profileFromAuth";
@@ -75,55 +76,52 @@ type HodAnnualReportItem = {
 
 type HodWorkloadRowResponse = {
   id: string;
-  employee_id: string;
+  staffId: string;
   name: string;
   title: string;
   department: string;
-  request_reason?: string;
+  reason?: string;
   status: "pending" | "approved" | "rejected";
-  total_hours: number;
-  submitted_time?: string | null;
-  semester_label?: string;
-  period_label: string;
-  is_anomaly?: boolean;
+  totalWorkHours: number;
+  submittedAt?: string | null;
+  semesterLabel?: string;
+  periodLabel: string;
 };
 
 type HodWorkloadListResponse = {
-  success?: boolean;
-  message?: string;
-  data?: {
-    items?: HodWorkloadRowResponse[];
-    page?: number;
-    page_size?: number;
-    total?: number;
-    summary?: {
-      pending?: number;
-      approved?: number;
-      rejected?: number;
-    };
+  items?: HodWorkloadRowResponse[];
+  page?: number;
+  pageSize?: number;
+  total?: number;
+  summary?: {
+    pending?: number;
+    approved?: number;
+    rejected?: number;
   };
 };
 
 type HodWorkloadDetailPayload = {
   id: string;
-  employee_id: string;
+  staffId: string;
   name: string;
   title: string;
   department: string;
-  total_hours: number;
-  request_reason?: string | null;
-  description?: string | null;
-  supervisor_note?: string | null;
+  totalWorkHours: number;
+  applicationReason?: string | null;
+  schoolOperationsNotes?: string | null;
+  reviewerNote?: string | null;
   status: "pending" | "approved" | "rejected";
   breakdown: Partial<Record<BreakdownCategory, BreakdownEntry[]>>;
-  is_anomaly?: boolean;
+  canEditBreakdown?: boolean;
+  periodLabel?: string;
+  targetTeachingRatio?: number;
+  actualTeachingRatio?: number;
+  employmentType?: string;
+  isNewStaff?: boolean;
+  hodReviewRequired?: boolean;
 };
 
-type HodWorkloadDetailResponse = {
-  success?: boolean;
-  message?: string;
-  data?: HodWorkloadDetailPayload;
-};
+type HodWorkloadDetailResponse = HodWorkloadDetailPayload;
 
 type HodVisualizationResponse = {
   success?: boolean;
@@ -223,19 +221,19 @@ function mapHodRowToRequest(row: HodWorkloadRowResponse): MockRequest {
   const numericId = Number.parseInt(String(row.id), 10);
   return {
     id: Number.isFinite(numericId) ? numericId : Date.now(),
-    studentId: row.employee_id,
-    semesterLabel: row.semester_label || row.period_label,
-    periodLabel: row.period_label,
+    studentId: row.staffId,
+    semesterLabel: row.semesterLabel || row.periodLabel,
+    periodLabel: row.periodLabel,
     name: row.name,
     unit: "",
     notes: "",
-    requestReason: row.request_reason || "",
+    requestReason: row.reason || "",
     title: row.title || "",
     department: row.department || "",
     rate: 0,
     status: row.status,
-    hours: Number(row.total_hours ?? 0),
-    submittedAt: row.submitted_time ?? "",
+    hours: Number(row.totalWorkHours ?? 0),
+    submittedAt: row.submittedAt ?? "",
     cancelled: false,
   };
 }
@@ -243,26 +241,272 @@ function mapHodRowToRequest(row: HodWorkloadRowResponse): MockRequest {
 function mapHodDetailToRequest(detail: HodWorkloadDetailPayload): MockRequest {
   const base = mapHodRowToRequest({
     id: detail.id,
-    employee_id: detail.employee_id,
+    staffId: detail.staffId,
     name: detail.name,
     title: detail.title,
     department: detail.department,
-    request_reason: detail.request_reason || "",
+    reason: detail.applicationReason || "",
     status: detail.status,
-    total_hours: detail.total_hours,
-    submitted_time: "",
-    semester_label: "",
-    period_label: "",
+    totalWorkHours: detail.totalWorkHours,
+    submittedAt: "",
+    semesterLabel: "",
+    periodLabel: detail.periodLabel || "",
   });
   return {
     ...base,
-    notes: detail.description ?? "",
-    supervisorNote: detail.supervisor_note ?? "",
+    notes: detail.schoolOperationsNotes ?? "",
+    supervisorNote: detail.reviewerNote ?? "",
+    targetTeachingRatio: detail.targetTeachingRatio,
+    actualTeachingRatio: detail.actualTeachingRatio,
+    employmentType: detail.employmentType,
+    newStaff: detail.isNewStaff === true ? "Yes" : detail.isNewStaff === false ? "No" : undefined,
+    hodReviewRequired: detail.hodReviewRequired,
     detailSnapshot: {
       breakdown: normalizeHodBreakdown(detail.breakdown),
     },
     cancelled: false,
   };
+}
+
+const HOD_BREAKDOWN_TABS: WorkloadBreakdownCategory[] = [
+  "Teaching",
+  "Assigned Roles",
+  "HDR",
+  "Service",
+  "Research (residual)",
+];
+
+function HodDetailModal({
+  item,
+  onClose,
+  onDecisionComplete,
+}: {
+  item: MockRequest;
+  onClose: () => void;
+  onDecisionComplete: () => Promise<void>;
+}) {
+  const [breakdown, setBreakdown] = useState<BreakdownData>(
+    item.detailSnapshot?.breakdown ?? normalizeHodBreakdown()
+  );
+  const [editMode, setEditMode] = useState(false);
+  const [modalError, setModalError] = useState("");
+  const [noteOpen, setNoteOpen] = useState(false);
+  const [noteKind, setNoteKind] = useState<"approve" | "reject">("approve");
+  const [noteDraft, setNoteDraft] = useState("");
+  const [noteError, setNoteError] = useState("");
+  const [submitting, setSubmitting] = useState(false);
+
+  const actualTeachingRatio = useMemo(() => {
+    const source = breakdown;
+    const teaching = source.Teaching.reduce((s, r) => s + r.hours, 0);
+    const total = HOD_BREAKDOWN_TABS.reduce(
+      (s, tab) => s + source[tab].reduce((ts, r) => ts + r.hours, 0),
+      0
+    );
+    if (typeof item.actualTeachingRatio === "number" && !editMode) {
+      return `${item.actualTeachingRatio.toFixed(1)}%`;
+    }
+    return total <= 0 ? "0.0%" : `${((teaching / total) * 100).toFixed(1)}%`;
+  }, [breakdown, editMode, item.actualTeachingRatio]);
+
+  const totalHoursDisplay = useMemo(() => {
+    if (!editMode) return String(item.hours);
+    return String(
+      HOD_BREAKDOWN_TABS.reduce(
+        (s, tab) => s + breakdown[tab].reduce((ts, r) => ts + r.hours, 0),
+        0
+      )
+    );
+  }, [breakdown, editMode, item.hours]);
+
+  const periodTitle = useMemo(() => {
+    const matched = item.periodLabel.match(/^(\d{4})-(1|2)$/);
+    const period = matched
+      ? `${matched[1]}-${matched[2] === "1" ? "S1" : "S2"}`
+      : item.semesterLabel;
+    return `${period}-${item.department}-Academic`;
+  }, [item.periodLabel, item.semesterLabel, item.department]);
+
+  const fields = [
+    { label: "Name", value: item.name },
+    { label: "Staff ID", value: item.studentId },
+    {
+      label: "Target teaching ratio",
+      value: typeof item.targetTeachingRatio === "number"
+        ? `${item.targetTeachingRatio.toFixed(1)}%`
+        : "—",
+    },
+    { label: "Actual teaching ratio", value: actualTeachingRatio, className: "tabular-nums font-sans" },
+    { label: "Total work hours", value: totalHoursDisplay, className: "tabular-nums font-sans" },
+    { label: "Employment type", value: item.employmentType || "—" },
+    { label: "New Staff", value: item.newStaff || "—" },
+    {
+      label: "HoD Review",
+      value: typeof item.hodReviewRequired === "boolean"
+        ? (item.hodReviewRequired ? "Yes" : "No")
+        : "—",
+    },
+  ];
+
+  const notesSections = [
+    {
+      label: "School of Operations notes",
+      value: item.notes?.trim() || "",
+      rows: 4 as const,
+      collapsible: true,
+      defaultExpanded: true,
+    },
+    {
+      label: "Application Reason",
+      value: item.requestReason?.trim() || "— no reason provided —",
+      rows: 3 as const,
+      collapsible: false,
+    },
+  ];
+
+  function updateRow(tab: WorkloadBreakdownCategory, idx: number, field: "name" | "hours", value: string) {
+    setBreakdown((prev) => {
+      const rows = [...(prev[tab] ?? [])];
+      rows[idx] = {
+        ...rows[idx],
+        [field]: field === "hours" ? (parseFloat(value) || 0) : value,
+      };
+      return { ...prev, [tab]: rows };
+    });
+  }
+
+  function addRow(tab: WorkloadBreakdownCategory) {
+    setBreakdown((prev) => ({
+      ...prev,
+      [tab]: [...(prev[tab] ?? []), { name: "", hours: 0 }],
+    }));
+  }
+
+  function removeRow(tab: WorkloadBreakdownCategory, idx: number) {
+    setBreakdown((prev) => {
+      const rows = (prev[tab] ?? []).filter((_, i) => i !== idx);
+      return { ...prev, [tab]: rows };
+    });
+  }
+
+  function toggleEdit() {
+    if (editMode) {
+      const hasEmpty = (Object.keys(breakdown) as WorkloadBreakdownCategory[]).some((tab) =>
+        breakdown[tab].some((r) => r.name.trim() === "")
+      );
+      if (hasEmpty) { setModalError("All breakdown rows must have a name."); return; }
+    }
+    setModalError("");
+    setEditMode((v) => !v);
+  }
+
+  async function handleDecision(note: string) {
+    setSubmitting(true);
+    try {
+      await apiJson(`/api/hod/workload-requests/${item.id}/decision/`, {
+        method: "POST",
+        body: JSON.stringify({ decision: noteKind, note: note.trim(), breakdown }),
+      });
+      setNoteOpen(false);
+      await onDecisionComplete();
+    } catch (err) {
+      setNoteError(err instanceof Error ? err.message : "Failed to submit decision.");
+    } finally {
+      setSubmitting(false);
+    }
+  }
+
+  return (
+    <>
+      <WorkloadDetailModal
+        title={periodTitle}
+        fields={fields}
+        breakdown={breakdown}
+        tabs={HOD_BREAKDOWN_TABS}
+        rowKeyPrefix={item.id}
+        onClose={onClose}
+        notesSections={notesSections}
+        onEditModeToggle={item.status === "pending" ? toggleEdit : undefined}
+        breakdownEditMode={editMode}
+        onBreakdownRowChange={updateRow}
+        onBreakdownRowAdd={addRow}
+        onBreakdownRowRemove={removeRow}
+        readonlyBreakdownTabs={["Research (residual)"]}
+        footer={
+          <div className="flex flex-col items-center gap-2 pt-1">
+            {modalError && <p className="text-sm font-semibold text-[#dc2626]">{modalError}</p>}
+            {item.status === "pending" && (
+              <div className="flex items-center justify-center gap-24">
+                <button
+                  type="button"
+                  disabled={submitting}
+                  onClick={() => { setNoteKind("approve"); setNoteDraft(""); setNoteError(""); setNoteOpen(true); }}
+                  className="w-56 rounded-sm bg-[#4a9a3d] py-3 text-center text-lg font-semibold text-white shadow-sm disabled:opacity-60"
+                >
+                  Approve
+                </button>
+                <button
+                  type="button"
+                  disabled={submitting}
+                  onClick={() => { setNoteKind("reject"); setNoteDraft(""); setNoteError(""); setNoteOpen(true); }}
+                  className="w-56 rounded-sm bg-[#e53935] py-3 text-center text-lg font-semibold text-white shadow-sm disabled:opacity-60"
+                >
+                  Decline
+                </button>
+              </div>
+            )}
+          </div>
+        }
+      />
+      {noteOpen && (
+        <div className="fixed inset-0 z-[80] flex items-center justify-center bg-black/40 p-4">
+          <div className="w-full max-w-lg rounded-md bg-white shadow-lg">
+            <div className="flex items-center justify-between rounded-t-md bg-[#2f4d9c] px-5 py-3 text-white">
+              <div className="text-base font-bold">
+                {noteKind === "approve" ? "Approved Notes" : "Rejected Notes"}
+              </div>
+              <button
+                type="button"
+                className="inline-flex h-8 w-8 items-center justify-center rounded bg-white/10 text-lg hover:bg-white/20"
+                onClick={() => { setNoteOpen(false); setNoteError(""); }}
+              >
+                ×
+              </button>
+            </div>
+            <div className="space-y-3 p-5">
+              <div className="text-sm font-semibold text-slate-700">Notes for Academic</div>
+              <textarea
+                value={noteDraft}
+                onChange={(e) => { setNoteDraft(e.target.value); if (noteError) setNoteError(""); }}
+                maxLength={240}
+                placeholder="Write your feedback..."
+                className="h-32 w-full resize-none rounded border border-slate-300 px-3 py-2 text-sm text-slate-800 outline-none focus:border-[#2f4d9c]"
+              />
+              <div className="flex items-center justify-between text-xs text-slate-500">
+                <span>{noteError ? <span className="text-[#dc2626]">{noteError}</span> : " "}</span>
+                <span>{noteDraft.length}/240</span>
+              </div>
+              <div className="flex justify-center">
+                <button
+                  type="button"
+                  disabled={submitting}
+                  onClick={async () => {
+                    const trimmed = noteDraft.trim();
+                    if (!trimmed) { setNoteError("Note is required."); return; }
+                    if (trimmed.length > 240) { setNoteError("Note must be ≤240 characters."); return; }
+                    await handleDecision(trimmed);
+                  }}
+                  className="rounded bg-[#2f4d9c] px-6 py-2 text-sm font-semibold text-white hover:bg-[#264183] disabled:opacity-60"
+                >
+                  Finished
+                </button>
+              </div>
+            </div>
+          </div>
+        </div>
+      )}
+    </>
+  );
 }
 
 function submittedAtDisplay(item: Pick<MockRequest, "submittedAt">): string {
@@ -310,16 +554,6 @@ export default function Supervisor() {
   const [detailsOpen, setDetailsOpen] = useState(false);
   const [supersededNoticeOpen, setSupersededNoticeOpen] = useState(false);
   const [detailsItem, setDetailsItem] = useState<MockRequest | null>(null);
-  const [detailsBreakdown, setDetailsBreakdown] = useState<BreakdownData | null>(null);
-  const [detailsTab, setDetailsTab] = useState<BreakdownCategory>("Teaching");
-  const [detailsEditMode, setDetailsEditMode] = useState(false);
-  const [descriptionExpanded, setDescriptionExpanded] = useState(false);
-  const [noteModalOpen, setNoteModalOpen] = useState(false);
-  const [noteDraft, setNoteDraft] = useState("");
-  const [noteError, setNoteError] = useState("");
-  const [detailsModalError, setDetailsModalError] = useState("");
-  const [noteDecision, setNoteDecision] = useState<"approve" | "reject">("approve");
-  const [noteTargetId, setNoteTargetId] = useState<number | null>(null);
 
   const [searchEmployeeIdInput, setSearchEmployeeIdInput] = useState("");
   const [searchNameInput, setSearchNameInput] = useState("");
@@ -342,7 +576,7 @@ export default function Supervisor() {
   const [visualSemesterInput, setVisualSemesterInput] = useState<"All" | "S1" | "S2">("All");
   const [visualError, setVisualError] = useState("");
   const [visualizationLoading, setVisualizationLoading] = useState(false);
-  const [appliedVisualFilters, setAppliedVisualFilters] = useState({
+  const [, setAppliedVisualFilters] = useState({
     yearFrom: "",
     yearTo: "",
     semester: "All" as "All" | "S1" | "S2",
@@ -379,8 +613,8 @@ export default function Supervisor() {
     setLoading(true);
     setPageError("");
     try {
-      const response = await apiJson<HodWorkloadListResponse>("/api/supervisor/workload-requests/?page=1&page_size=200");
-      setPending((response.data?.items ?? []).map(mapHodRowToRequest));
+      const response = await apiJson<HodWorkloadListResponse>("/api/hod/workload-requests/?page_size=200");
+      setPending((response.items ?? []).map(mapHodRowToRequest));
     } catch (error) {
       if (!isAbortError(error)) {
         setPending([]);
@@ -448,8 +682,8 @@ export default function Supervisor() {
   }
 
   async function loadHodDetail(id: number) {
-    const response = await apiJson<HodWorkloadDetailResponse>(`/api/supervisor/workload-requests/${id}/`);
-    const mapped = mapHodDetailToRequest(response.data as HodWorkloadDetailPayload);
+    const response = await apiJson<HodWorkloadDetailResponse>(`/api/hod/workload-requests/${id}/`);
+    const mapped = mapHodDetailToRequest(response as HodWorkloadDetailPayload);
     const existing = pending.find((row) => row.id === id);
     const merged = existing
       ? {
@@ -617,12 +851,6 @@ export default function Supervisor() {
     });
   }
 
-  function statusLabel(status: string) {
-    if (status === "pending") return "Pending";
-    if (status === "approved") return "Approved";
-    if (status === "rejected") return "Rejected";
-    return status;
-  }
 
   async function handleApplyVisualizationFilter() {
     setVisualError("");
@@ -653,133 +881,13 @@ export default function Supervisor() {
       if (exportYearFromInput) params.set("year_from", exportYearFromInput);
       if (exportYearToInput) params.set("year_to", exportYearToInput);
       params.set("semester", exportSemesterInput);
-      await downloadApiFile(`/api/supervisor/export/?${params.toString()}`, "HoD_Workloads.xlsx");
+      await downloadApiFile(`/api/hod/exports/workloads/?${params.toString()}`, "HoD_Workloads.xlsx");
       setExportMessage("HoD workload export downloaded.");
     } catch (error) {
       setExportMessage(error instanceof Error ? error.message : "Failed to export workloads.");
     }
   }
 
-  const canSubmit =
-    statusFilter === "pending" && selectedIds.size > 0 && !submitting;
-
-  async function handleDecision(kind: "approve" | "reject") {
-    if (!canSubmit) return;
-    setSubmitting(true);
-    const count = selectedIds.size;
-    try {
-      await apiJson("/api/supervisor/workload-requests/batch-decision/", {
-        method: "POST",
-        body: JSON.stringify({
-          request_ids: Array.from(selectedIds).map(String),
-          decision: kind === "approve" ? "approved" : "rejected",
-        }),
-      });
-      setSelectedIds(new Set());
-      await loadHodRequests();
-    } catch (error) {
-      setPopup({
-        open: true,
-        title: "Request Failed",
-        message: error instanceof Error ? error.message : "Failed to update HoD decisions.",
-        status: "pending",
-      });
-      setSubmitting(false);
-      return;
-    } finally {
-      setSubmitting(false);
-    }
-
-    setPopup({
-      open: true,
-      title: kind === "approve" ? "Approved" : "Rejected",
-      message:
-        count === 1
-          ? `1 request has been marked as ${kind === "approve" ? "Approved" : "Rejected"}.`
-          : `${count} requests have been marked as ${
-              kind === "approve" ? "Approved" : "Rejected"
-            }.`,
-      status: kind === "approve" ? "approved" : "rejected",
-    });
-  }
-
-  async function handleDecisionForId(kind: "approve" | "reject", id: number, note: string) {
-    setSubmitting(true);
-    try {
-      await apiJson(`/api/supervisor/workload-requests/${id}/decision/`, {
-        method: "POST",
-        body: JSON.stringify({
-          decision: kind === "approve" ? "approved" : "rejected",
-          note: note.trim(),
-          breakdown: detailsBreakdown,
-        }),
-      });
-      await loadHodRequests();
-      setSelectedIds((prev) => {
-        if (!prev.has(id)) return prev;
-        const next = new Set(prev);
-        next.delete(id);
-        return next;
-      });
-      if (detailsItem) {
-        const refreshed = await loadHodDetail(id);
-        setDetailsItem(refreshed);
-        setDetailsBreakdown(refreshed.detailSnapshot?.breakdown ?? normalizeHodBreakdown());
-      }
-    } catch (error) {
-      setPopup({
-        open: true,
-        title: "Request Failed",
-        message: error instanceof Error ? error.message : "Failed to update HoD decision.",
-        status: "pending",
-      });
-      return;
-    } finally {
-      setSubmitting(false);
-    }
-
-    setPopup({
-      open: true,
-      title: kind === "approve" ? "Approved" : "Rejected",
-      message: `The request has been marked as ${
-        kind === "approve" ? "Approved" : "Rejected"
-      }.`,
-      status: kind === "approve" ? "approved" : "rejected",
-    });
-  }
-
-  function openNoteModal(kind: "approve" | "reject", id: number) {
-    if (detailsBreakdown) {
-      const hasEmptyRow = (Object.keys(detailsBreakdown) as BreakdownCategory[]).some((tab) =>
-        detailsBreakdown[tab].some((row) => row.name.trim() === "")
-      );
-      if (hasEmptyRow) {
-        setDetailsModalError("Empty breakdown rows must be completed or deleted first.");
-        return;
-      }
-    }
-    setNoteDecision(kind);
-    setNoteTargetId(id);
-    setNoteDraft("");
-    setNoteError("");
-    setNoteModalOpen(true);
-  }
-
-  async function handleFinishNote() {
-    const trimmed = noteDraft.trim();
-    if (!trimmed) {
-      setNoteError("Supervisor note is required.");
-      return;
-    }
-    if (trimmed.length > 240) {
-      setNoteError("Supervisor note must be 240 characters or less.");
-      return;
-    }
-    if (noteTargetId === null) return;
-    await handleDecisionForId(noteDecision, noteTargetId, trimmed);
-    setNoteModalOpen(false);
-    closeDetails();
-  }
 
   function handleSearch() {
     setSearchFilters({
@@ -792,7 +900,6 @@ export default function Supervisor() {
     setSelectedIds(new Set());
     setDetailsOpen(false);
     setDetailsItem(null);
-    setDetailsBreakdown(null);
   }
 
   async function openDetails(item: MockRequest) {
@@ -803,11 +910,7 @@ export default function Supervisor() {
     try {
       const detail = await loadHodDetail(item.id);
       setDetailsItem(detail);
-      setDetailsBreakdown(detail.detailSnapshot?.breakdown ?? normalizeHodBreakdown());
       setDetailsOpen(true);
-      setDetailsEditMode(false);
-      setDescriptionExpanded(false);
-      setDetailsModalError("");
     } catch (error) {
       setPopup({
         open: true,
@@ -818,68 +921,9 @@ export default function Supervisor() {
     }
   }
 
-  function requestCloseDetails() {
-    if (detailsEditMode && detailsBreakdown) {
-      const hasEmptyRow = (Object.keys(detailsBreakdown) as BreakdownCategory[]).some((tab) =>
-        detailsBreakdown[tab].some((row) => row.name.trim() === "")
-      );
-      if (hasEmptyRow) {
-        setDetailsModalError("Empty breakdown rows must be completed or deleted before closing.");
-        return;
-      }
-    }
-    closeDetails();
-  }
-
   function closeDetails() {
     setDetailsOpen(false);
     setDetailsItem(null);
-    setDetailsBreakdown(null);
-    setDetailsEditMode(false);
-    setDetailsModalError("");
-    setNoteModalOpen(false);
-    setNoteDraft("");
-    setNoteError("");
-    setNoteTargetId(null);
-  }
-
-  function updateBreakdownRow(tab: BreakdownCategory, idx: number, field: "name" | "hours", value: string) {
-    setDetailsModalError("");
-    setDetailsBreakdown((prev) => {
-      if (!prev) return prev;
-      const nextRows = prev[tab].map((row, rowIdx) => {
-        if (rowIdx !== idx) return row;
-        if (field === "name") return { ...row, name: value };
-        const parsedHours = Number.parseFloat(value);
-        const normalizedHours = Number.isFinite(parsedHours) ? parsedHours : 0;
-        return { ...row, hours: normalizedHours };
-      });
-      return { ...prev, [tab]: nextRows };
-    });
-  }
-
-  function addBreakdownRow(tab: BreakdownCategory) {
-    setDetailsModalError("");
-    setDetailsBreakdown((prev) => {
-      if (!prev) return prev;
-      return {
-        ...prev,
-        [tab]: [...prev[tab], { name: "", hours: 0 }],
-      };
-    });
-  }
-
-  function removeBreakdownRow(tab: BreakdownCategory, idx: number) {
-    setDetailsModalError("");
-    setDetailsBreakdown((prev) => {
-      if (!prev) return prev;
-      const currentRows = prev[tab];
-      if (currentRows.length <= 1) return prev;
-      return {
-        ...prev,
-        [tab]: currentRows.filter((_, rowIdx) => rowIdx !== idx),
-      };
-    });
   }
 
   function handleSearchKeyDown(event: React.KeyboardEvent<HTMLInputElement | HTMLSelectElement>) {
@@ -1332,361 +1376,15 @@ export default function Supervisor() {
               disableNext={page >= totalPages || submitting}
             />
 
-            {/* Details Modal (placeholder format for now) */}
             {detailsOpen && detailsItem && (
-              <div
-                className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 p-4"
-                onClick={requestCloseDetails}
-              >
-                <div
-                  className="w-full max-w-2xl rounded-sm bg-white p-0 shadow"
-                  onClick={(e) => e.stopPropagation()}
-                >
-                  <div className="rounded-sm border border-black">
-                    {/* Header */}
-                    <div className="flex items-center justify-between rounded-t-sm bg-[#2f4d9c] px-5 py-3 text-white">
-                      <div className="text-lg font-bold">
-                        {(() => {
-                          const matched = detailsItem.periodLabel.match(/^(\d{4})-(1|2)$/);
-                          const period = matched ? `${matched[1]}-${matched[2] === "1" ? "S1" : "S2"}` : detailsItem.semesterLabel;
-                          return `${period}-${detailsItem.department}-Academic`;
-                        })()}
-                      </div>
-                      <button
-                        type="button"
-                        onClick={requestCloseDetails}
-                        className="inline-flex h-9 w-9 items-center justify-center rounded-md bg-white/10 hover:bg-white/20"
-                      >
-                        <span className="text-xl leading-none">×</span>
-                      </button>
-                    </div>
-
-                    {/* Form body */}
-                    <form
-                      className="space-y-4 px-6 py-5"
-                      onSubmit={(e) => e.preventDefault()}
-                    >
-                      <div className="grid grid-cols-2 gap-5">
-                        <div className="flex items-center gap-3">
-                          <div className="w-32 rounded-sm bg-[#2f4d9c] px-3 py-2 text-center text-base font-semibold text-white">
-                            Name
-                          </div>
-                          <input readOnly value={detailsItem.name} className="w-full flex-1 rounded-sm border border-[#2f4d9c] px-3 py-2 text-base" />
-                        </div>
-
-                        <div className="flex items-center gap-3">
-                          <div className="w-32 rounded-sm bg-[#2f4d9c] px-3 py-2 text-center text-base font-semibold text-white">
-                            Staff ID
-                          </div>
-                          <input readOnly value={detailsItem.studentId} className="w-full flex-1 rounded-sm border border-[#2f4d9c] px-3 py-2 text-base" />
-                        </div>
-
-                        <div className="flex items-center gap-3">
-                          <div className="w-32 rounded-sm bg-[#2f4d9c] px-3 py-2 text-center text-base font-semibold text-white">
-                            Target teaching ratio
-                          </div>
-                          <input
-                            readOnly
-                            value={
-                              typeof detailsItem.targetTeachingRatio === "number"
-                                ? `${detailsItem.targetTeachingRatio.toFixed(1)}%`
-                                : "—"
-                            }
-                            className="w-full flex-1 rounded-sm border border-[#2f4d9c] px-3 py-2 text-base"
-                          />
-                        </div>
-
-                        <div className="flex items-center gap-3">
-                          <div className="w-32 rounded-sm bg-[#2f4d9c] px-3 py-2 text-center text-base font-semibold text-white">
-                            Actual teaching ratio
-                          </div>
-                          {(() => {
-                            const source = detailsBreakdown ?? detailsItem.detailSnapshot?.breakdown ?? normalizeHodBreakdown();
-                            const teaching = source.Teaching.reduce((sum, row) => sum + row.hours, 0);
-                            const total = (["Teaching", "Assigned Roles", "HDR", "Service", "Research (residual)"] as BreakdownCategory[]).reduce(
-                              (tabSum, tab) => tabSum + source[tab].reduce((sum, row) => sum + row.hours, 0),
-                              0
-                            );
-                            const ratio =
-                              typeof detailsItem.actualTeachingRatio === "number" && !detailsEditMode
-                                ? `${detailsItem.actualTeachingRatio.toFixed(1)}%`
-                                : total <= 0
-                                  ? "0.0%"
-                                  : `${((teaching / total) * 100).toFixed(1)}%`;
-                            return (
-                              <input readOnly value={ratio} className="w-full flex-1 rounded-sm border border-[#2f4d9c] px-3 py-2 text-base tabular-nums font-sans" />
-                            );
-                          })()}
-                        </div>
-
-                        <div className="flex items-center gap-3">
-                          <div className="w-32 rounded-sm bg-[#2f4d9c] px-3 py-2 text-center text-base font-semibold text-white">
-                            Total work hours
-                          </div>
-                          {(() => {
-                            const totalHours = detailsBreakdown
-                              ? (["Teaching", "Assigned Roles", "HDR", "Service", "Research (residual)"] as BreakdownCategory[]).reduce(
-                                  (tabSum, tab) => tabSum + detailsBreakdown[tab].reduce((sum, row) => sum + row.hours, 0),
-                                  0
-                                )
-                              : detailsItem.hours;
-                            return (
-                              <input readOnly value={totalHours} className="w-full flex-1 rounded-sm border border-[#2f4d9c] px-3 py-2 text-base tabular-nums font-sans" />
-                            );
-                          })()}
-                        </div>
-
-                        <div className="flex items-center gap-3">
-                          <div className="w-32 rounded-sm bg-[#2f4d9c] px-3 py-2 text-center text-base font-semibold text-white">
-                            Employment type
-                          </div>
-                          {(() => {
-                            const totalHours = detailsBreakdown
-                              ? (["Teaching", "Assigned Roles", "HDR", "Service", "Research (residual)"] as BreakdownCategory[]).reduce(
-                                  (tabSum, tab) => tabSum + detailsBreakdown[tab].reduce((sum, row) => sum + row.hours, 0),
-                                  0
-                                )
-                              : detailsItem.hours;
-                            return (
-                              <input
-                                readOnly
-                                value={detailsItem.employmentType || "—"}
-                                className="w-full flex-1 rounded-sm border border-[#2f4d9c] px-3 py-2 text-base"
-                              />
-                            );
-                          })()}
-                        </div>
-
-                        <div className="flex items-center gap-3">
-                          <div className="w-32 rounded-sm bg-[#2f4d9c] px-3 py-2 text-center text-base font-semibold text-white">
-                            New Staff
-                          </div>
-                          <input readOnly value={detailsItem.newStaff || "—"} className="w-full flex-1 rounded-sm border border-[#2f4d9c] px-3 py-2 text-base" />
-                        </div>
-
-                        <div className="flex items-center gap-3">
-                          <div className="w-32 rounded-sm bg-[#2f4d9c] px-3 py-2 text-center text-base font-semibold text-white">
-                            HoD Review
-                          </div>
-                          <input
-                            readOnly
-                            value={typeof detailsItem.hodReviewRequired === "boolean" ? (detailsItem.hodReviewRequired ? "Yes" : "No") : "—"}
-                            className="w-full flex-1 rounded-sm border border-[#2f4d9c] px-3 py-2 text-base"
-                          />
-                        </div>
-                      </div>
-
-                      <div>
-                        <div className="flex items-center justify-between">
-                          <div className="text-sm font-semibold uppercase text-slate-700">Workload Breakdown</div>
-                          <button
-                            type="button"
-                            onClick={() => {
-                              setDetailsEditMode((v) => !v);
-                              setDetailsModalError("");
-                            }}
-                            className="rounded bg-[#2f4d9c] px-3 py-1 text-xs font-bold text-white hover:bg-[#264183]"
-                          >
-                            {detailsEditMode ? "Done" : "Edit"}
-                          </button>
-                        </div>
-                        <div className="mt-2 overflow-hidden rounded-sm border border-slate-300">
-                          <div className="flex flex-wrap gap-2 border-b border-slate-200 bg-slate-50 px-3 py-2">
-                            {(["Teaching", "Assigned Roles", "HDR", "Service", "Research (residual)"] as BreakdownCategory[]).map((tab) => (
-                              <button
-                                key={tab}
-                                type="button"
-                                onClick={() => setDetailsTab(tab)}
-                                className={`rounded px-3 py-1 text-xs font-semibold ${
-                                  detailsTab === tab
-                                    ? "bg-[#2f4d9c] text-white"
-                                    : "bg-white text-slate-700 ring-1 ring-slate-300 hover:bg-slate-100"
-                                }`}
-                              >
-                                {tab}
-                              </button>
-                            ))}
-                          </div>
-                          <table className="min-w-full">
-                            <thead className="bg-white">
-                              <tr className="text-left text-xs font-semibold uppercase text-slate-600">
-                                <th className="px-3 py-2">{detailsTab}</th>
-                                <th className="w-[120px] px-3 py-2 text-right">Hours</th>
-                                {detailsEditMode ? <th className="w-[88px] px-3 py-2 text-center">Action</th> : null}
-                              </tr>
-                            </thead>
-                            <tbody className="divide-y divide-slate-200 bg-white text-sm text-slate-700">
-                              {(detailsBreakdown?.[detailsTab] ?? detailsItem.detailSnapshot?.breakdown?.[detailsTab] ?? []).map((row, idx) => (
-                                <tr key={`${detailsItem.id}-${detailsTab}-${idx}`}>
-                                  <td className="px-3 py-2">
-                                    {detailsEditMode ? (
-                                      <input
-                                        value={row.name}
-                                        onChange={(e) => updateBreakdownRow(detailsTab, idx, "name", e.target.value)}
-                                        maxLength={60}
-                                        className="w-[240px] max-w-full overflow-hidden text-ellipsis whitespace-nowrap rounded border border-slate-300 px-2 py-1 text-sm"
-                                      />
-                                    ) : (
-                                      <span className="block px-1 py-1">{row.name}</span>
-                                    )}
-                                  </td>
-                                  <td className="px-3 py-2">
-                                    {detailsEditMode ? (
-                                      <input
-                                        type="text"
-                                        inputMode="decimal"
-                                        maxLength={8}
-                                        value={String(row.hours)}
-                                        onChange={(e) => updateBreakdownRow(detailsTab, idx, "hours", e.target.value)}
-                                        className="ml-auto w-24 rounded border border-slate-300 px-2 py-1 text-right tabular-nums font-sans text-sm"
-                                      />
-                                    ) : (
-                                      <div className="text-right tabular-nums font-sans">{row.hours}</div>
-                                    )}
-                                  </td>
-                                  {detailsEditMode ? (
-                                    <td className="px-3 py-2 text-center">
-                                      <button
-                                        type="button"
-                                        onClick={() => removeBreakdownRow(detailsTab, idx)}
-                                        className="rounded bg-slate-200 px-2 py-1 text-xs font-semibold text-slate-700 hover:bg-slate-300 disabled:opacity-50"
-                                        disabled={(detailsBreakdown?.[detailsTab] ?? []).length <= 1}
-                                      >
-                                        Delete
-                                      </button>
-                                    </td>
-                                  ) : null}
-                                </tr>
-                              ))}
-                              {detailsEditMode ? (
-                                <tr>
-                                  <td colSpan={3} className="px-3 py-2">
-                                    <button
-                                      type="button"
-                                      onClick={() => addBreakdownRow(detailsTab)}
-                                      className="rounded bg-[#2f4d9c] px-3 py-1 text-xs font-semibold text-white hover:bg-[#264183]"
-                                    >
-                                      + Add Row
-                                    </button>
-                                  </td>
-                                </tr>
-                              ) : null}
-                              <tr className="bg-slate-50">
-                                <td className="px-3 py-2 font-semibold">Total</td>
-                                <td className="px-3 py-2 text-right font-semibold tabular-nums font-sans">
-                                  {(detailsBreakdown?.[detailsTab] ?? detailsItem.detailSnapshot?.breakdown?.[detailsTab] ?? []).reduce(
-                                    (sum, row) => sum + row.hours,
-                                    0
-                                  )}
-                                </td>
-                                {detailsEditMode ? <td /> : null}
-                              </tr>
-                            </tbody>
-                          </table>
-                        </div>
-                      </div>
-
-                      <div>
-                        <button
-                          type="button"
-                          onClick={() => setDescriptionExpanded((v) => !v)}
-                          className="flex w-full items-center justify-between rounded-sm border border-slate-300 bg-slate-50 px-3 py-2 text-left text-sm font-semibold uppercase text-slate-700"
-                        >
-                          <span>School of Operations notes</span>
-                          <span className="text-base leading-none">{descriptionExpanded ? "−" : "+"}</span>
-                        </button>
-                        {descriptionExpanded && (
-                          <textarea
-                            readOnly
-                            value={workloadModalNotes(detailsItem)}
-                            className="mt-2 h-28 w-full resize-none rounded-sm border border-slate-300 bg-white px-4 py-3 text-sm text-slate-700"
-                          />
-                        )}
-                      </div>
-
-                      <div>
-                        <div className="text-sm font-semibold text-slate-700">Application Reason</div>
-                        <textarea
-                          readOnly
-                          value={requestReasonText(detailsItem) || "- no reason provided -"}
-                          className="mt-2 h-24 w-full resize-none rounded-sm border border-slate-300 bg-white px-4 py-3 text-sm text-slate-700"
-                        />
-                      </div>
-                      {detailsModalError && (
-                        <div className="text-sm font-semibold text-[#dc2626]">{detailsModalError}</div>
-                      )}
-
-                      {detailsItem.status === "pending" && (
-                        <div className="flex items-center justify-center gap-24 pt-2">
-                          <button
-                            type="button"
-                            disabled={submitting}
-                            onClick={() => openNoteModal("approve", detailsItem.id)}
-                            className="w-56 rounded-sm bg-[#4a9a3d] py-3 text-center text-lg font-semibold text-white shadow-sm disabled:opacity-60"
-                          >
-                            Approve
-                          </button>
-                          <button
-                            type="button"
-                            disabled={submitting}
-                            onClick={() => openNoteModal("reject", detailsItem.id)}
-                            className="w-56 rounded-sm bg-[#e53935] py-3 text-center text-lg font-semibold text-white shadow-sm disabled:opacity-60"
-                          >
-                            Decline
-                          </button>
-                        </div>
-                      )}
-                    </form>
-                  </div>
-                </div>
-              </div>
-            )}
-            {noteModalOpen && (
-              <div className="fixed inset-0 z-[80] flex items-center justify-center bg-black/40 p-4">
-                <div className="w-full max-w-lg rounded-md bg-white shadow-lg">
-                  <div className="flex items-center justify-between rounded-t-md bg-[#2f4d9c] px-5 py-3 text-white">
-                    <div className="text-base font-bold">
-                      {noteDecision === "approve" ? "Approved Notes" : "Rejected Notes"}
-                    </div>
-                    <button
-                      type="button"
-                      className="inline-flex h-8 w-8 items-center justify-center rounded bg-white/10 text-lg hover:bg-white/20"
-                      onClick={() => {
-                        setNoteModalOpen(false);
-                        setNoteError("");
-                      }}
-                    >
-                      ×
-                    </button>
-                  </div>
-                  <div className="space-y-3 p-5">
-                    <div className="text-sm font-semibold text-slate-700">Notes for Academic</div>
-                    <textarea
-                      value={noteDraft}
-                      onChange={(e) => {
-                        setNoteDraft(e.target.value);
-                        if (noteError) setNoteError("");
-                      }}
-                      maxLength={240}
-                      placeholder="Write your feedback..."
-                      className="h-32 w-full resize-none rounded border border-slate-300 px-3 py-2 text-sm text-slate-800 outline-none focus:border-[#2f4d9c]"
-                    />
-                    <div className="flex items-center justify-between text-xs text-slate-500">
-                      <span>{noteError ? <span className="text-[#dc2626]">{noteError}</span> : " "}</span>
-                      <span>{noteDraft.length}/240</span>
-                    </div>
-                    <div className="flex justify-center">
-                      <button
-                        type="button"
-                        onClick={handleFinishNote}
-                        className="rounded bg-[#2f4d9c] px-6 py-2 text-sm font-semibold text-white hover:bg-[#264183]"
-                      >
-                        Finished
-                      </button>
-                    </div>
-                  </div>
-                </div>
-              </div>
+              <HodDetailModal
+                item={detailsItem}
+                onClose={closeDetails}
+                onDecisionComplete={async () => {
+                  closeDetails();
+                  await loadHodRequests();
+                }}
+              />
             )}
             </div>
             </section>
