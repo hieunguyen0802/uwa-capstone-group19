@@ -17,7 +17,7 @@ import {
 } from "react";
 import {
   ACCESS_TOKEN_KEY,
-  REFRESH_TOKEN_KEY,
+  clearAuthStorage,
 } from "../api/client";
 import { AuthProfile, fetchMe } from "../api/auth";
 
@@ -62,8 +62,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   }, []);
 
   const logout = useCallback(() => {
-    localStorage.removeItem(ACCESS_TOKEN_KEY);
-    localStorage.removeItem(REFRESH_TOKEN_KEY);
+    clearAuthStorage();
     setState({ profile: null, loading: false, error: null });
   }, []);
 

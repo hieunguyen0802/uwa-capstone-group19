@@ -12,8 +12,8 @@ from rest_framework.decorators import api_view, permission_classes
 from rest_framework.permissions import IsAuthenticated
 from rest_framework.response import Response
 
-from api.decorators import require_role
 from api.models import AuditLog, WorkloadItem, WorkloadReport
+from api.permissions import IsAnyStaff, IsApprover
 from api.services.audit_service import (
     compute_workload_item_diffs,
     snapshot_workload_items,
@@ -177,8 +177,7 @@ def _hod_visible_qs(staff):
 # ─── 8.3 GET /supervisor/workload-requests/ ───────────────────────────────────
 
 @api_view(['GET'])
-@permission_classes([IsAuthenticated])
-@require_role('HOD', 'SCHOOL_OPS', 'HOS')
+@permission_classes([IsAuthenticated, IsApprover])
 def supervisor_workload_requests(request):
     """GET /api/supervisor/workload-requests/"""
     # base_qs: all reports HOD is allowed to see (confirmed INITIAL + submitted)
@@ -250,8 +249,7 @@ def supervisor_workload_requests(request):
 # ─── 8.4 GET /supervisor/workload-requests/{id}/ ─────────────────────────────
 
 @api_view(['GET'])
-@permission_classes([IsAuthenticated])
-@require_role('HOD', 'SCHOOL_OPS', 'HOS')
+@permission_classes([IsAuthenticated, IsApprover])
 def supervisor_workload_request_detail(request, id):
     """GET /api/supervisor/workload-requests/{id}/"""
     qs = _hod_visible_qs(request.staff).prefetch_related('items').select_related(
@@ -287,8 +285,7 @@ def supervisor_workload_request_detail(request, id):
 # ─── 8.5 POST /supervisor/workload-requests/batch-decision/ ──────────────────
 
 @api_view(['POST'])
-@permission_classes([IsAuthenticated])
-@require_role('HOD', 'SCHOOL_OPS', 'HOS')
+@permission_classes([IsAuthenticated, IsApprover])
 @transaction.atomic
 def supervisor_batch_decision(request):
     """POST /api/supervisor/workload-requests/batch-decision/"""
@@ -361,8 +358,7 @@ def supervisor_batch_decision(request):
 # ─── 8.6 POST /supervisor/workload-requests/{id}/decision/ ───────────────────
 
 @api_view(['POST'])
-@permission_classes([IsAuthenticated])
-@require_role('HOD', 'SCHOOL_OPS', 'HOS')
+@permission_classes([IsAuthenticated, IsApprover])
 @transaction.atomic
 def supervisor_single_decision(request, id):
     """POST /api/supervisor/workload-requests/{id}/decision/"""
@@ -462,8 +458,7 @@ def supervisor_single_decision(request, id):
 # ─── 8.7 GET /supervisor/visualization/ ──────────────────────────────────────
 
 @api_view(['GET'])
-@permission_classes([IsAuthenticated])
-@require_role('HOD', 'SCHOOL_OPS', 'HOS')
+@permission_classes([IsAuthenticated, IsApprover])
 def supervisor_visualization(request):
     """GET /api/supervisor/visualization/"""
     year_from, year_to = _parse_year_range(request)
@@ -532,8 +527,7 @@ def supervisor_visualization(request):
 # ─── 8.8 GET /supervisor/export/ ─────────────────────────────────────────────
 
 @api_view(['GET'])
-@permission_classes([IsAuthenticated])
-@require_role('HOD', 'SCHOOL_OPS', 'HOS')
+@permission_classes([IsAuthenticated, IsApprover])
 def supervisor_export(request):
     """GET /api/supervisor/export/"""
     try:
@@ -613,8 +607,7 @@ def _serialize_report(r):
 
 
 @api_view(['GET'])
-@permission_classes([IsAuthenticated])
-@require_role('HOD', 'SCHOOL_OPS', 'HOS')
+@permission_classes([IsAuthenticated, IsApprover])
 def supervisor_requests(request):
     """Return workload reports grouped by status, scoped to the caller's role."""
     # Reuse v2 visibility rules for legacy endpoint to avoid leaking
@@ -629,8 +622,7 @@ def supervisor_requests(request):
 
 
 @api_view(['POST'])
-@permission_classes([IsAuthenticated])
-@require_role('HOD', 'SCHOOL_OPS', 'HOS')
+@permission_classes([IsAuthenticated, IsApprover])
 @transaction.atomic
 def approve_request(request, id):
     qs = get_workload_queryset(request.staff)
@@ -647,8 +639,7 @@ def approve_request(request, id):
 
 
 @api_view(['POST'])
-@permission_classes([IsAuthenticated])
-@require_role('HOD', 'SCHOOL_OPS', 'HOS')
+@permission_classes([IsAuthenticated, IsApprover])
 @transaction.atomic
 def reject_request(request, id):
     comment = request.data.get('comment', '').strip()
@@ -671,16 +662,14 @@ def reject_request(request, id):
 
 
 @api_view(['GET'])
-@permission_classes([IsAuthenticated])
-@require_role('HOD', 'SCHOOL_OPS', 'HOS')
+@permission_classes([IsAuthenticated, IsApprover])
 def get_pending_requests(request):
     qs = get_workload_queryset(request.staff).filter(status='PENDING').order_by('-created_at')
     return Response([_serialize_report(r) for r in qs])
 
 
 @api_view(['GET'])
-@permission_classes([IsAuthenticated])
-@require_role('HOD', 'SCHOOL_OPS', 'HOS')
+@permission_classes([IsAuthenticated, IsApprover])
 def get_my_workloads(request):
     qs = get_workload_queryset(request.staff).order_by('-created_at')[:20]
     return Response([_serialize_report(r) for r in qs])
@@ -723,8 +712,7 @@ def _can_view_report_history(staff, report) -> bool:
 
 
 @api_view(['GET'])
-@permission_classes([IsAuthenticated])
-@require_role('ACADEMIC', 'HOD', 'SCHOOL_OPS', 'HOS')
+@permission_classes([IsAuthenticated, IsAnyStaff])
 def report_history(request, id):
     """GET /api/reports/{id}/history
 

@@ -27,7 +27,6 @@ from rest_framework.permissions import IsAuthenticated
 from rest_framework.response import Response
 from rest_framework.throttling import UserRateThrottle
 
-from api.decorators import require_any_perm
 from api.models import (
     AuditLog,
     Department,
@@ -37,6 +36,7 @@ from api.models import (
     WorkloadItem,
     WorkloadReport,
 )
+from api.permissions import CanAccessSchoolOpsApi
 from api.services.workload_service import (
     get_workload_queryset,
     _filter_reports_by_range,
@@ -53,7 +53,6 @@ from api.view.supervisor_views import (
     _to_decimal_hours,
 )
 
-OPS_API_PERMISSION = 'api.access_school_ops_api'
 SUPERSEDED_ROLE_REASON = 'Superseded by a newer role assignment.'
 MAX_EXCEL_UPLOAD_BYTES = 5 * 1024 * 1024
 EXPORT_MEDIA_SUBDIR = 'exports'
@@ -361,8 +360,7 @@ def _staff_from_body_or_path(request, lookup_id: str):
 
 
 @api_view(['GET'])
-@permission_classes([IsAuthenticated])
-@require_any_perm(OPS_API_PERMISSION)
+@permission_classes([IsAuthenticated, CanAccessSchoolOpsApi])
 def admin_workload_requests(request):
     """GET /api/school-operations/workloads  (also /api/admin/workload-requests/)"""
     base_qs = _admin_reports_qs(request.staff).prefetch_related('items').select_related(
@@ -451,8 +449,7 @@ def admin_workload_requests(request):
 
 
 @api_view(['GET'])
-@permission_classes([IsAuthenticated])
-@require_any_perm(OPS_API_PERMISSION)
+@permission_classes([IsAuthenticated, CanAccessSchoolOpsApi])
 def admin_workload_request_detail(request, id):
     """GET /api/school-operations/workloads/{id}  (also /api/admin/workload-requests/{id}/)"""
     qs = (
@@ -471,8 +468,7 @@ def admin_workload_request_detail(request, id):
 
 
 @api_view(['POST'])
-@permission_classes([IsAuthenticated])
-@require_any_perm(OPS_API_PERMISSION)
+@permission_classes([IsAuthenticated, CanAccessSchoolOpsApi])
 @transaction.atomic
 def admin_batch_decision(request):
     """POST /api/admin/workload-requests/batch-decision/"""
@@ -543,8 +539,7 @@ def admin_batch_decision(request):
 
 
 @api_view(['POST'])
-@permission_classes([IsAuthenticated])
-@require_any_perm(OPS_API_PERMISSION)
+@permission_classes([IsAuthenticated, CanAccessSchoolOpsApi])
 @transaction.atomic
 def admin_single_decision(request, id):
     """POST /api/admin/workload-requests/{id}/decision/"""
@@ -625,8 +620,7 @@ def admin_single_decision(request, id):
 
 
 @api_view(['POST'])
-@permission_classes([IsAuthenticated])
-@require_any_perm(OPS_API_PERMISSION)
+@permission_classes([IsAuthenticated, CanAccessSchoolOpsApi])
 @transaction.atomic
 def admin_distribute_workloads(request):
     """POST /api/school-operations/workloads/distribute  (also /api/admin/workloads/distribute/)"""
@@ -771,38 +765,33 @@ def _dispatch_template_download(request, filename: str):
 
 
 @api_view(['GET'])
-@permission_classes([IsAuthenticated])
-@require_any_perm(OPS_API_PERMISSION)
+@permission_classes([IsAuthenticated, CanAccessSchoolOpsApi])
 def admin_workload_import_template(request):
     headers = ['employee_id', 'name', 'description', 'total_work_hours', 'status']
     return _admin_template_urls(request, 'workloads/import-template', 'Workload_Template.xlsx', headers, [])
 
 
 @api_view(['GET'])
-@permission_classes([IsAuthenticated])
-@require_any_perm(OPS_API_PERMISSION)
+@permission_classes([IsAuthenticated, CanAccessSchoolOpsApi])
 def admin_workload_import_template_download(request):
     return _dispatch_template_download(request, 'Workload_Template.xlsx')
 
 
 @api_view(['GET'])
-@permission_classes([IsAuthenticated])
-@require_any_perm(OPS_API_PERMISSION)
+@permission_classes([IsAuthenticated, CanAccessSchoolOpsApi])
 def admin_staff_import_template(request):
     headers = ['employee_id', 'first_name', 'last_name', 'email', 'department', 'active_status']
     return _admin_template_urls(request, 'staff/import-template', 'Staff_Template.xlsx', headers, [])
 
 
 @api_view(['GET'])
-@permission_classes([IsAuthenticated])
-@require_any_perm(OPS_API_PERMISSION)
+@permission_classes([IsAuthenticated, CanAccessSchoolOpsApi])
 def admin_staff_import_template_download(request):
     return _dispatch_template_download(request, 'Staff_Template.xlsx')
 
 
 @api_view(['POST'])
-@permission_classes([IsAuthenticated])
-@require_any_perm(OPS_API_PERMISSION)
+@permission_classes([IsAuthenticated, CanAccessSchoolOpsApi])
 @throttle_classes([AdminImportThrottle])
 @transaction.atomic
 def admin_workload_import(request):
@@ -982,8 +971,7 @@ def admin_workload_import(request):
 
 
 @api_view(['POST'])
-@permission_classes([IsAuthenticated])
-@require_any_perm(OPS_API_PERMISSION)
+@permission_classes([IsAuthenticated, CanAccessSchoolOpsApi])
 @throttle_classes([AdminImportThrottle])
 @transaction.atomic
 def admin_staff_import(request):
@@ -1153,8 +1141,7 @@ def admin_staff_import(request):
 
 
 @api_view(['GET'])
-@permission_classes([IsAuthenticated])
-@require_any_perm(OPS_API_PERMISSION)
+@permission_classes([IsAuthenticated, CanAccessSchoolOpsApi])
 def admin_staff_list(request):
     """GET /api/school-operations/staff  (also /api/admin/staff/)"""
     queryset = Staff.objects.select_related('user', 'department').order_by('staff_number')
@@ -1206,8 +1193,7 @@ def admin_staff_list(request):
 
 
 @api_view(['GET', 'PATCH'])
-@permission_classes([IsAuthenticated])
-@require_any_perm(OPS_API_PERMISSION)
+@permission_classes([IsAuthenticated, CanAccessSchoolOpsApi])
 @transaction.atomic
 def admin_staff_patch(request, staff_id):
     """GET /api/school-operations/staff/{staffId}  or  PATCH /api/school-operations/staff/{staffId}"""
@@ -1333,8 +1319,7 @@ def admin_staff_patch(request, staff_id):
 
 
 @api_view(['GET', 'POST'])
-@permission_classes([IsAuthenticated])
-@require_any_perm(OPS_API_PERMISSION)
+@permission_classes([IsAuthenticated, CanAccessSchoolOpsApi])
 @transaction.atomic
 def admin_role_assignments(request):
     """GET list + POST create."""
@@ -1412,8 +1397,7 @@ def admin_role_assignments(request):
 
 
 @api_view(['POST'])
-@permission_classes([IsAuthenticated])
-@require_any_perm(OPS_API_PERMISSION)
+@permission_classes([IsAuthenticated, CanAccessSchoolOpsApi])
 @transaction.atomic
 def admin_role_assignment_disable(request, assignment_id):
     payload = request.data or {}
@@ -1453,8 +1437,7 @@ def admin_role_assignment_disable(request, assignment_id):
 
 
 @api_view(['GET'])
-@permission_classes([IsAuthenticated])
-@require_any_perm(OPS_API_PERMISSION)
+@permission_classes([IsAuthenticated, CanAccessSchoolOpsApi])
 def admin_visualization(request):
     semester_filter = _parse_semester_filter(request)
     year_from, year_to = _parse_year_range(request)
@@ -1558,8 +1541,7 @@ def _persist_export_workbook(request):
 
 
 @api_view(['GET'])
-@permission_classes([IsAuthenticated])
-@require_any_perm(OPS_API_PERMISSION)
+@permission_classes([IsAuthenticated, CanAccessSchoolOpsApi])
 @throttle_classes([AdminExportThrottle])
 def admin_export_manifest(request):
     """
@@ -1579,8 +1561,7 @@ def admin_export_manifest(request):
 
 
 @api_view(['GET'])
-@permission_classes([IsAuthenticated])
-@require_any_perm(OPS_API_PERMISSION)
+@permission_classes([IsAuthenticated, CanAccessSchoolOpsApi])
 @throttle_classes([AdminExportThrottle])
 def admin_export_download(request):
     """Binary companion for `/admin/export/` JSON contracts."""
@@ -1642,8 +1623,7 @@ def _build_workload_export_workbook(qs):
 
 
 @api_view(['GET'])
-@permission_classes([IsAuthenticated])
-@require_any_perm(OPS_API_PERMISSION)
+@permission_classes([IsAuthenticated, CanAccessSchoolOpsApi])
 @throttle_classes([AdminExportThrottle])
 def admin_workload_export(request):
     """GET /api/school-operations/workloads/export — direct file stream filtered by status/staff/dept/year/semester."""
@@ -1695,8 +1675,7 @@ def admin_workload_export(request):
 
 
 @api_view(['GET'])
-@permission_classes([IsAuthenticated])
-@require_any_perm(OPS_API_PERMISSION)
+@permission_classes([IsAuthenticated, CanAccessSchoolOpsApi])
 @throttle_classes([AdminExportThrottle])
 def admin_school_export(request):
     """GET /api/school-operations/export — school-level history Excel, direct file stream."""
@@ -1724,8 +1703,7 @@ def admin_school_export(request):
 
 
 @api_view(['POST'])
-@permission_classes([IsAuthenticated])
-@require_any_perm(OPS_API_PERMISSION)
+@permission_classes([IsAuthenticated, CanAccessSchoolOpsApi])
 def admin_contact_staff(request):
     """POST /api/school-operations/contact-staff — stub; stores message as AuditLog comment."""
     body = request.data or {}
@@ -1788,8 +1766,7 @@ _AUDIT_ACTION_HUMAN = {
 
 
 @api_view(['GET'])
-@permission_classes([IsAuthenticated])
-@require_any_perm(OPS_API_PERMISSION)
+@permission_classes([IsAuthenticated, CanAccessSchoolOpsApi])
 @throttle_classes([AdminExportThrottle])
 def admin_audit_log_export(request):
     """GET /api/school-operations/audit-log/export

@@ -21,8 +21,8 @@ from rest_framework.decorators import api_view, permission_classes
 from rest_framework.permissions import IsAuthenticated
 from rest_framework.response import Response
 
-from api.decorators import require_role
 from api.models import AuditLog, Department, Staff, StaffRoleAssignment, WorkloadItem, WorkloadReport
+from api.permissions import IsHoSOrSchoolOps
 from api.services.workload_service import _filter_reports_by_range, _parse_year_range, stale_report_response_payload
 from api.view.hos_views import (
     ALLOWED_STAFF_DEPARTMENTS,
@@ -209,8 +209,7 @@ def _normalize_staff_import_row(row, row_number):
 # ─── GET /api/hos/workload-requests/ ────────────────────────────────────────
 
 @api_view(['GET'])
-@permission_classes([IsAuthenticated])
-@require_role('HOS', 'SCHOOL_OPS')
+@permission_classes([IsAuthenticated, IsHoSOrSchoolOps])
 def hos_workload_requests(request):
     base_qs = _hos_visible_qs()
     qs = base_qs.prefetch_related('items')
@@ -274,8 +273,7 @@ def hos_workload_requests(request):
 # ─── GET /api/hos/workload-requests/{id}/ ───────────────────────────────────
 
 @api_view(['GET'])
-@permission_classes([IsAuthenticated])
-@require_role('HOS', 'SCHOOL_OPS')
+@permission_classes([IsAuthenticated, IsHoSOrSchoolOps])
 def hos_workload_request_detail(request, id):
     qs = _hos_visible_qs().prefetch_related('items')
     report = get_object_or_404(qs, report_id=id)
@@ -285,8 +283,7 @@ def hos_workload_request_detail(request, id):
 # ─── POST /api/hos/workload-requests/{id}/decision/ ─────────────────────────
 
 @api_view(['POST'])
-@permission_classes([IsAuthenticated])
-@require_role('HOS', 'SCHOOL_OPS')
+@permission_classes([IsAuthenticated, IsHoSOrSchoolOps])
 @transaction.atomic
 def hos_workload_request_decision(request, id):
     """
@@ -382,8 +379,7 @@ def hos_workload_request_decision(request, id):
 # ─── GET /api/hos/reports/semester-distribution ────────────────────────────
 
 @api_view(['GET'])
-@permission_classes([IsAuthenticated])
-@require_role('HOS', 'SCHOOL_OPS')
+@permission_classes([IsAuthenticated, IsHoSOrSchoolOps])
 def hos_semester_distribution_reports(request):
     department = (request.GET.get('department') or '').strip()
     qs = _filter_period_params(
@@ -423,8 +419,7 @@ def hos_semester_distribution_reports(request):
 # ─── GET /api/hos/reports/semester-distribution/{reportId}/download ────────
 
 @api_view(['GET'])
-@permission_classes([IsAuthenticated])
-@require_role('HOS', 'SCHOOL_OPS')
+@permission_classes([IsAuthenticated, IsHoSOrSchoolOps])
 def hos_semester_distribution_report_download(request, report_id):
     year, semester = _parse_period_report_id(report_id, 'hos-report')
     if year is None or semester is None:
@@ -448,8 +443,7 @@ def hos_semester_distribution_report_download(request, report_id):
 # ─── GET /api/hos/staff-directory ──────────────────────────────────────────
 
 @api_view(['GET'])
-@permission_classes([IsAuthenticated])
-@require_role('HOS', 'SCHOOL_OPS')
+@permission_classes([IsAuthenticated, IsHoSOrSchoolOps])
 def hos_staff_directory(request):
     qs = Staff.objects.select_related('user', 'department').order_by('staff_number')
 
@@ -489,8 +483,7 @@ def hos_staff_directory(request):
 # ─── POST /api/hos/staff-directory/import ─────────────────────────────────
 
 @api_view(['POST'])
-@permission_classes([IsAuthenticated])
-@require_role('HOS', 'SCHOOL_OPS')
+@permission_classes([IsAuthenticated, IsHoSOrSchoolOps])
 @transaction.atomic
 def hos_staff_directory_import(request):
     upload_file = request.FILES.get('file')
@@ -604,8 +597,7 @@ def hos_staff_directory_import(request):
 # ─── GET/POST /api/hos/role-assignments ────────────────────────────────────
 
 @api_view(['GET', 'POST'])
-@permission_classes([IsAuthenticated])
-@require_role('HOS', 'SCHOOL_OPS')
+@permission_classes([IsAuthenticated, IsHoSOrSchoolOps])
 @transaction.atomic
 def hos_v3_role_assignments(request):
     if request.method == 'GET':
@@ -667,8 +659,7 @@ def hos_v3_role_assignments(request):
 # ─── PATCH /api/hos/role-assignments/{assignmentId}/status ─────────────────
 
 @api_view(['PATCH'])
-@permission_classes([IsAuthenticated])
-@require_role('HOS', 'SCHOOL_OPS')
+@permission_classes([IsAuthenticated, IsHoSOrSchoolOps])
 @transaction.atomic
 def hos_v3_role_assignment_status(request, assignment_id):
     desired = str((request.data or {}).get('status') or '').strip().lower()
@@ -707,8 +698,7 @@ def hos_v3_role_assignment_status(request, assignment_id):
 # ─── GET /api/hos/analytics/workloads ──────────────────────────────────────
 
 @api_view(['GET'])
-@permission_classes([IsAuthenticated])
-@require_role('HOS', 'SCHOOL_OPS')
+@permission_classes([IsAuthenticated, IsHoSOrSchoolOps])
 def hos_workload_analytics(request):
     year_from, year_to = _parse_year_range(request)
     semester_filter = request.GET.get('semester', 'All')
@@ -732,8 +722,7 @@ def hos_workload_analytics(request):
 # ─── GET /api/hos/exports/workloads ────────────────────────────────────────
 
 @api_view(['GET'])
-@permission_classes([IsAuthenticated])
-@require_role('HOS', 'SCHOOL_OPS')
+@permission_classes([IsAuthenticated, IsHoSOrSchoolOps])
 def hos_workload_export(request):
     year_from, year_to = _parse_year_range(request)
     semester_filter = request.GET.get('semester', 'All')

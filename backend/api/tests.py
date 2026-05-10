@@ -175,11 +175,11 @@ class TestOTPTokenModel(APITestCase):
         )
 
 
-# ─── Test: require_role decorator ────────────────────────────────────────────
+# ─── Test: DRF permission classes ────────────────────────────────────────────
 
-class TestRequireRole(BaseTestCase):
+class TestRolePermissions(BaseTestCase):
     """
-    Verifies that the @require_role decorator blocks wrong roles with 403.
+    Verifies that DRF permission classes block wrong roles with 403.
     These are pure permission-boundary tests — no business logic involved.
     """
 
@@ -195,7 +195,7 @@ class TestRequireRole(BaseTestCase):
         self.assertEqual(res.status_code, 200)
 
     def test_unauthenticated_gets_401(self):
-        # No token at all — DRF JWT middleware returns 401 before our decorator runs
+        # No token at all — DRF JWT auth returns 401 before role permissions run.
         res = self.client.get('/api/supervisor/requests/')
         self.assertEqual(res.status_code, 401)
 
@@ -1566,8 +1566,7 @@ class TestCodexAuditFixes(BaseTestCase):
         self.assertEqual(res.status_code, 401)
 
     def test_p1_report_history_authenticated_authorized_returns_200(self):
-        # Missing @require_role previously crashed with AttributeError for any
-        # authenticated caller. An authenticated HoD on their own department must now succeed.
+        # Authenticated HoD on their own department must succeed.
         client = self._auth_client(self.hod_csse)
         res = client.get(f'/api/reports/{self.report.report_id}/history/')
         self.assertEqual(res.status_code, 200)
@@ -1706,4 +1705,69 @@ class TestHoSStaffDirectoryImport(BaseTestCase):
         staff = Staff.objects.get(staff_number='87654323')
         self.assertTrue(staff.is_active)
         self.assertEqual(staff.user.email, 'active.default@uwa.edu.au')
+
+
+class _PermissionRequest:
+    def __init__(self, user, staff):
+        self.user = user
+        self._cached_staff = staff
+
+
+class TestNativePermissionClasses(BaseTestCase):
+    def _check_permission(self, permission_cls, staff, expected):
+        from rest_framework.exceptions import PermissionDenied
+
+        request = _PermissionRequest(staff.user, staff)
+        try:
+            allowed = permission_cls().has_permission(request, view=None)
+        except PermissionDenied:
+            allowed = False
+        self.assertEqual(allowed, expected)
+
+    def test_role_permissions_match_current_contract(self):
+        from api.permissions import (
+            CanAccessSchoolOpsApi,
+            IsAcademicOrHoD,
+            IsApprover,
+            IsHoD,
+            IsHoS,
+            IsHoSOrSchoolOps,
+            IsSchoolOps,
+        )
+
+        self._check_permission(IsHoS, self.hos, True)
+        self._check_permission(IsHoS, self.ops, False)
+        self._check_permission(IsHoD, self.hod_csse, True)
+        self._check_permission(IsSchoolOps, self.ops, True)
+        self._check_permission(IsHoSOrSchoolOps, self.hos, True)
+        self._check_permission(IsHoSOrSchoolOps, self.ops, True)
+        self._check_permission(IsApprover, self.hod_csse, True)
+        self._check_permission(IsApprover, self.academic, False)
+        self._check_permission(IsAcademicOrHoD, self.academic, True)
+        self._check_permission(IsAcademicOrHoD, self.hod_csse, True)
+        self._check_permission(IsAcademicOrHoD, self.hos, False)
+        self._check_permission(CanAccessSchoolOpsApi, self.ops, True)
+        self._check_permission(CanAccessSchoolOpsApi, self.hos, True)
+        self._check_permission(CanAccessSchoolOpsApi, self.academic, False)
+
+    def test_native_permissions_preserve_inactive_code(self):
+        from rest_framework.exceptions import PermissionDenied
+        from api.permissions import IsHoS
+
+        self.hos.is_active = False
+        self.hos.save(update_fields=['is_active'])
+        request = _PermissionRequest(self.hos.user, self.hos)
+        with self.assertRaises(PermissionDenied) as cm:
+            IsHoS().has_permission(request, view=None)
+        self.assertEqual(cm.exception.detail.get('code'), 'ACCOUNT_INACTIVE')
+
+    def test_native_permissions_do_not_fallback_to_staff_role(self):
+        from rest_framework.exceptions import PermissionDenied
+        from api.permissions import IsHoD
+
+        self.hod_csse.user.groups.clear()
+        request = _PermissionRequest(self.hod_csse.user, self.hod_csse)
+        with self.assertRaises(PermissionDenied) as cm:
+            IsHoD().has_permission(request, view=None)
+        self.assertEqual(cm.exception.detail.get('code'), 'FORBIDDEN')
 
