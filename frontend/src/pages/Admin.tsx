@@ -88,6 +88,10 @@ type MockRequest = {
   operatedBy?: string;
   /** Staff number of the School Ops / approver shown under DISTRIBUTED BY. */
   operatedByStaffId?: string;
+  /** School Ops user shown in ASSIGNED BY for Pending Distribution rows. */
+  assignedBy?: string;
+  /** Staff number shown under ASSIGNED BY for Pending Distribution rows. */
+  assignedByStaffId?: string;
   /** Target teaching share of total workload (0–100), for validation in the detail modal. */
   targetTeachingRatio?: number;
   /** Minimum teaching hours expected in the breakdown (optional). */
@@ -258,6 +262,10 @@ function operatorDisplayLabel(item: MockRequest): string {
   return item.operatedByStaffId?.trim()
     ? `${item.operatedBy}\n${item.operatedByStaffId}`
     : item.operatedBy ?? "—";
+}
+
+function hasAssignee(item: MockRequest): boolean {
+  return Boolean(item.assignedBy?.trim());
 }
 
 function buildWorkloadListQueryString(query: WorkloadListQuery): string {
@@ -984,7 +992,8 @@ export default function SchoolofOperations() {
             id: string; studentId: string; semesterLabel: string; periodLabel: string;
             name: string; unit: string; notes?: string; title: string; department: string;
             rate: number; status: string; confirmation?: "confirmed" | "unconfirmed"; confirmationTime?: string; hours: number; supervisorNote?: string;
-            operatedBy?: string; operatedByStaffId?: string; targetTeachingRatio?: number | null; targetBand?: string | null;
+            operatedBy?: string; operatedByStaffId?: string; assignedBy?: string; assignedByStaffId?: string;
+            targetTeachingRatio?: number | null; targetBand?: string | null;
             cancelled?: boolean; importedFromTemplate?: boolean; workloadNewStaff?: boolean;
             hodReview?: string; createdAt?: string; distributedTime?: string; fte?: number;
           }>;
@@ -1024,6 +1033,8 @@ export default function SchoolofOperations() {
         supervisorNote: row.supervisorNote ?? "",
         operatedBy: row.operatedBy ?? "—",
         operatedByStaffId: row.operatedByStaffId ?? "",
+        assignedBy: row.assignedBy ?? "",
+        assignedByStaffId: row.assignedByStaffId ?? "",
         targetTeachingRatio: row.targetTeachingRatio ?? undefined,
         targetBand: row.targetBand ?? undefined,
         cancelled: Boolean(row.cancelled),
@@ -2222,7 +2233,7 @@ export default function SchoolofOperations() {
       return;
     }
     const selectedPendingRows = pending.filter(
-      (it) => selectedIds.has(it.id) && !it.cancelled && it.status === "pending"
+      (it) => selectedIds.has(it.id) && !it.cancelled && it.status === "initial" && !it.distributedTime
     );
     if (!selectedPendingRows.length) {
       setDistributeError("Please select at least one pending workload.");
@@ -3731,6 +3742,9 @@ export default function SchoolofOperations() {
                         <th className="px-3 py-2 text-center">STATUS</th>
                         <th className="px-3 py-2 text-center whitespace-nowrap">TOTAL WORK HOURS</th>
                         <th className="px-3 py-2">CONFIRMATION</th>
+                        {statusFilter === "all" && (
+                          <th className="px-3 py-2 whitespace-nowrap">ASSIGNED BY</th>
+                        )}
                         {statusFilter !== "all" && (
                           <th className="px-3 py-2 text-right whitespace-nowrap">
                             {statusFilter === "distributed" ? "DISTRIBUTED TIME" : "CREATE TIME"}
@@ -3746,14 +3760,14 @@ export default function SchoolofOperations() {
                     <tbody className="divide-y divide-slate-200 bg-white">
                       {loading && (
                         <tr>
-                          <td colSpan={8} className="px-3 py-6 text-center text-sm text-slate-500">
+                          <td colSpan={statusFilter === "all" ? 7 : 8} className="px-3 py-6 text-center text-sm text-slate-500">
                             Loading...
                           </td>
                         </tr>
                       )}
                       {!loading && pageItems.length === 0 && (
                         <tr>
-                          <td colSpan={8} className="px-3 py-6 text-center text-sm text-slate-500">
+                          <td colSpan={statusFilter === "all" ? 7 : 8} className="px-3 py-6 text-center text-sm text-slate-500">
                             {statusFilter === "all" ? "No pending items" : "No items found"}
                           </td>
                         </tr>
@@ -3831,6 +3845,18 @@ export default function SchoolofOperations() {
                                   </span>
                                 )}
                               </td>
+                              {statusFilter === "all" && (
+                                <td className="px-3 py-3 text-sm text-slate-700">
+                                  {hasAssignee(item) ? (
+                                    <div className="space-y-1">
+                                      <div className="text-slate-700">{item.assignedBy}</div>
+                                      <div className="text-xs text-slate-400">{item.assignedByStaffId}</div>
+                                    </div>
+                                  ) : (
+                                    "—"
+                                  )}
+                                </td>
+                              )}
                               {statusFilter !== "all" && (
                                 <td className="px-3 py-3 text-right tabular-nums font-sans font-semibold text-slate-800">
                                   {statusFilter === "distributed"

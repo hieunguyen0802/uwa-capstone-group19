@@ -315,6 +315,19 @@ def _get_operated_by_actor(report):
     )
 
 
+def _get_pending_assignee(report):
+    """Return the School Ops assignee for INITIAL / Pending Distribution rows."""
+    if report.assigned_by_id:
+        return report.assigned_by
+    fallback_log = (
+        AuditLog.objects.filter(report=report, action_type__in=['IMPORTED', 'MODIFIED_BY_REIMPORT'])
+        .select_related('action_by__user')
+        .order_by('-created_at')
+        .first()
+    )
+    return fallback_log.action_by if fallback_log else None
+
+
 def _serialize_workload_row(report, items):
     """Serialize a WorkloadReport to the school-operations contract list shape."""
     staff_user = report.staff.user
@@ -326,6 +339,12 @@ def _serialize_workload_row(report, items):
     if actor:
         actor_name = actor.user.get_full_name().strip() or actor.user.username
         actor_staff_number = actor.staff_number
+    assignee = _get_pending_assignee(report)
+    assigned_name = ''
+    assigned_staff_number = ''
+    if assignee:
+        assigned_name = assignee.user.get_full_name().strip() or assignee.user.username
+        assigned_staff_number = assignee.staff_number
     items_hours = sum((i.allocated_hours for i in items), Decimal('0.00'))
     first_teaching = next((i for i in items if i.category == 'TEACHING' and i.unit_code), None)
     sem = report.semester or ''
@@ -356,6 +375,8 @@ def _serialize_workload_row(report, items):
         'supervisorNote': _get_supervisor_note(report),
         'operatedBy': actor_name,
         'operatedByStaffId': actor_staff_number,
+        'assignedBy': assigned_name,
+        'assignedByStaffId': assigned_staff_number,
         'targetTeachingRatio': float(report.target_teaching_pct) if report.target_teaching_pct is not None else None,
         'teachingTargetHours': None,
         'cancelled': False,
@@ -1347,6 +1368,7 @@ def admin_workload_import(request):
                         snapshot_fte=snapshot_fte,
                         snapshot_department=staff_row.department,
                         status='INITIAL',
+                        assigned_by=request.staff,
                         import_batch_id=batch_id,
                         is_current=True,
                         target_band=str(target_band_val) if target_band_val else None,
