@@ -216,7 +216,10 @@ def _serialize_row(report, request_meta_map=None):
     items = list(report.items.all())
     staff_user = report.staff.user
     full_name = staff_user.get_full_name().strip() or staff_user.username
-    total = sum((i.allocated_hours for i in items), Decimal('0.00'))
+    items_total = sum((i.allocated_hours for i in items), Decimal('0.00'))
+    # Include research residual so total matches Academic/Ops views
+    research_hours = evaluate_mvp_anomaly(report)['metrics']['research_pts'] * Decimal('17.25')
+    total = items_total + research_hours
     request_meta = (
         request_meta_map.get(str(report.report_id), {'reason': '', 'submittedAt': None})
         if request_meta_map is not None
@@ -246,7 +249,16 @@ def _serialize_detail(report):
     staff = report.staff
     staff_user = staff.user
     full_name = staff_user.get_full_name().strip() or staff_user.username
-    total_hours = sum((i.allocated_hours for i in items), Decimal('0.00'))
+    items_hours = sum((i.allocated_hours for i in items), Decimal('0.00'))
+
+    # Include research residual so total matches Academic/Ops views
+    anomaly_result = evaluate_mvp_anomaly(report)
+    research_hours = anomaly_result['metrics']['research_pts'] * Decimal('17.25')
+    total_hours = items_hours + research_hours
+
+    fte = float(report.snapshot_fte or Decimal('1.00'))
+    expected_min_hours = round(856 * fte, 2)
+    expected_max_hours = round(864 * fte, 2)
 
     # actualTeachingRatio: teaching hours / total hours, as percentage (0-100).
     teaching_hours = sum(
@@ -275,6 +287,8 @@ def _serialize_detail(report):
         'targetTeachingRatio': target_tr,
         'actualTeachingRatio': actual_tr,
         'totalWorkHours': _to_hours(total_hours),
+        'expectedMinHours': expected_min_hours,
+        'expectedMaxHours': expected_max_hours,
         'employmentType': employment_type,
         'isNewStaff': False,
         # hodReviewRequired / schoolOperationsNotes are not modelled yet; exposed as defaults

@@ -41,6 +41,8 @@ type MockRequest = {
   newStaff?: "Yes" | "No";
   hodReviewRequired?: boolean;
   actualTeachingRatio?: number;
+  expectedMinHours?: number;
+  expectedMaxHours?: number;
   detailSnapshot?: {
     breakdown: BreakdownData;
   };
@@ -121,6 +123,8 @@ type HodWorkloadDetailPayload = {
   employmentType?: string;
   isNewStaff?: boolean;
   hodReviewRequired?: boolean;
+  expectedMinHours?: number | null;
+  expectedMaxHours?: number | null;
 };
 
 type HodWorkloadDetailResponse = HodWorkloadDetailPayload;
@@ -264,6 +268,8 @@ function mapHodDetailToRequest(detail: HodWorkloadDetailPayload): MockRequest {
     employmentType: detail.employmentType,
     newStaff: detail.isNewStaff === true ? "Yes" : detail.isNewStaff === false ? "No" : undefined,
     hodReviewRequired: detail.hodReviewRequired,
+    expectedMinHours: detail.expectedMinHours ?? undefined,
+    expectedMaxHours: detail.expectedMaxHours ?? undefined,
     detailSnapshot: {
       breakdown: normalizeHodBreakdown(detail.breakdown),
     },
@@ -313,14 +319,19 @@ function HodDetailModal({
   }, [breakdown, editMode, item.actualTeachingRatio]);
 
   const totalHoursDisplay = useMemo(() => {
-    if (!editMode) return String(item.hours);
-    return String(
-      HOD_BREAKDOWN_TABS.reduce(
-        (s, tab) => s + breakdown[tab].reduce((ts, r) => ts + r.hours, 0),
-        0
-      )
-    );
-  }, [breakdown, editMode, item.hours]);
+    const hrs = editMode
+      ? HOD_BREAKDOWN_TABS.reduce(
+          (s, tab) => s + breakdown[tab].reduce((ts, r) => ts + r.hours, 0),
+          0
+        )
+      : item.hours;
+    if (!editMode && item.expectedMinHours != null && item.expectedMaxHours != null) {
+      const minDays = Math.ceil(item.expectedMinHours / 8);
+      const maxDays = Math.ceil(item.expectedMaxHours / 8);
+      return `${hrs} (>${minDays} & <=${maxDays} working days)`;
+    }
+    return String(hrs);
+  }, [breakdown, editMode, item.hours, item.expectedMinHours, item.expectedMaxHours]);
 
   const periodTitle = useMemo(() => {
     const matched = item.periodLabel.match(/^(\d{4})-(1|2)$/);
