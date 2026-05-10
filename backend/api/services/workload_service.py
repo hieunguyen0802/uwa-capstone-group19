@@ -88,10 +88,11 @@ def evaluate_mvp_anomaly(report, department_conflict=False):
     service_pts = _quantize_2(service_pts)
     assigned_roles_pts = _quantize_2(assigned_roles_pts)
 
-    expected_points = _quantize_2((report.snapshot_fte or Decimal('0.00')) * Decimal('100'))
+    # One semester = FTE × 50 workload points (FTE=1 → 50pts → 862.5h).
+    semester_points = _quantize_2((report.snapshot_fte or Decimal('0.00')) * Decimal('50'))
 
-    denominator = _quantize_2(expected_points - (assigned_roles_pts + service_pts + hdr_pts))
-    research_pts = _quantize_2(expected_points - (teaching_pts + assigned_roles_pts + service_pts + hdr_pts))
+    denominator = _quantize_2(semester_points - (assigned_roles_pts + service_pts + hdr_pts))
+    research_pts = _quantize_2(semester_points - (teaching_pts + assigned_roles_pts + service_pts + hdr_pts))
 
     reasons = []
 
@@ -105,7 +106,7 @@ def evaluate_mvp_anomaly(report, department_conflict=False):
 
     if target_teaching_pct is not None:
         target_teaching_pts = _quantize_2(
-            (Decimal(target_teaching_pct) / Decimal('100')) * Decimal('100') * (report.snapshot_fte or Decimal('0.00'))
+            (Decimal(target_teaching_pct) / Decimal('100')) * Decimal('50') * (report.snapshot_fte or Decimal('0.00'))
         )
         if abs(teaching_pts - target_teaching_pts) > Decimal('0.01'):
             reasons.append('teaching_mismatch')
@@ -142,13 +143,6 @@ def evaluate_mvp_anomaly(report, department_conflict=False):
         },
     }
 
-
-def persist_report_anomaly(report, department_conflict=False):
-    result = evaluate_mvp_anomaly(report, department_conflict=department_conflict)
-    if report.is_anomaly != result['is_anomaly']:
-        report.is_anomaly = result['is_anomaly']
-        report.save(update_fields=['is_anomaly', 'updated_at'])
-    return result
 
 
 # ─── Shared query helpers (used by both academic and supervisor views) ─────────

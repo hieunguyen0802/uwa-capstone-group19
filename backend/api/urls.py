@@ -65,6 +65,7 @@ from api.view.academic_views import (
 from api.view.ops_admin_views import (
     admin_workload_requests,
     admin_workload_request_detail,
+    admin_workload_history,
     admin_batch_decision,
     admin_single_decision,
     admin_distribute_workloads,
@@ -222,6 +223,7 @@ urlpatterns = [
     path('school-operations/workloads/import', admin_workload_import),
     path('school-operations/workloads/distribute', admin_distribute_workloads),
     path('school-operations/workloads/export', admin_workload_export),
+    path('school-operations/workloads/<str:id>/history', admin_workload_history),
     path('school-operations/workloads/<str:id>', admin_workload_request_detail),
     path('school-operations/workloads', admin_workload_requests),
     path('school-operations/staff/import', admin_staff_import),

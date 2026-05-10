@@ -238,18 +238,6 @@ class WorkloadReport(models.Model):
     ]
     status = models.CharField(max_length=20, choices=STATUS_CHOICES, default='INITIAL')
 
-    # Set to True at import time if the staff member's T:R ratio does not match
-    # their contract type (e.g. contract says T&R 50/50 but actual teaching is 90%).
-    is_anomaly = models.BooleanField(default=False)
-
-    # Target band and teaching percentage from the Excel template (columns F and G).
-    # Required to enable teaching_mismatch and tr_discrepancy anomaly checks.
-    # Null until populated by importer; workload_service uses getattr fallback in the interim.
-    target_band = models.CharField(max_length=50, blank=True, null=True)
-    target_teaching_pct = models.DecimalField(
-        max_digits=5, decimal_places=2, blank=True, null=True
-    )
-
     # ── Re-import tracking fields ─────────────────────────────────────────────
     #
     # Problem: Daniela finds that Cai's data was entered incorrectly and re-uploads
@@ -288,6 +276,12 @@ class WorkloadReport(models.Model):
     target_band = models.CharField(max_length=50, null=True, blank=True)
     target_teaching_pct = models.DecimalField(max_digits=5, decimal_places=2, null=True, blank=True)
 
+    # Excel column F — HoD Review flag imported from the workload template.
+    hod_review = models.CharField(max_length=3, choices=[('yes', 'Yes'), ('no', 'No')], default='no')
+
+    # Excel column D — New Staff flag imported from the workload template.
+    new_staff = models.BooleanField(default=False)
+
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
 
@@ -295,7 +289,6 @@ class WorkloadReport(models.Model):
         db_table = 'workload_reports'
         indexes = [
             models.Index(fields=['status']),                    # filter all PENDING reports
-            models.Index(fields=['is_anomaly']),                # filter anomalous reports
             models.Index(fields=['academic_year', 'semester']), # query by year + semester
             models.Index(fields=['import_batch_id']),           # query all records from one import
             models.Index(fields=['is_current']),                # filter active records

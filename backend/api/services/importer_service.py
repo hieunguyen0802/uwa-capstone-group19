@@ -297,10 +297,9 @@ def import_workload_excel(workbook, importing_staff: Staff) -> dict:
                 # Create WorkloadItems from all rows in this group
                 _create_workload_items(report, group, first_row)
 
-                # Evaluate anomaly after items are created
-                from api.services.workload_service import evaluate_mvp_anomaly, persist_report_anomaly
-                anomaly_result = evaluate_mvp_anomaly(report)
-                persist_report_anomaly(report, anomaly_result)
+                # Evaluate anomaly after items are created (for audit/logging only; not persisted)
+                from api.services.workload_service import evaluate_mvp_anomaly
+                evaluate_mvp_anomaly(report)
 
                 action = 'MODIFIED_BY_REIMPORT' if existing else 'IMPORTED'
                 AuditLog.objects.create(

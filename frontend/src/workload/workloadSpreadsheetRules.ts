@@ -45,3 +45,11 @@ export const ROLE_NAME_COL_START = "AG";
 export const ROLE_POINTS_COL_START = "AH";
 export const ROLE_BLOCK_STRIDE_COLS = 2;
 export const MAX_ROLE_PAIR_BLOCKS = 12;
+
+/**
+ * Teaching component WL-point columns (per unit row).
+ * O = Teaching WL Pts, Q = Unit Coord WL Pts, S = Teaching Activity WL Pts,
+ * U = Unit Supervision WL Pts, W = New Unit Dev WL Pts.
+ * Their sum must equal TEACHING_SCORE_COL (X) within ±0.05 tolerance.
+ */
+export const TEACHING_COMPONENT_PTS_COLS = ["O", "Q", "S", "U", "W"] as const;

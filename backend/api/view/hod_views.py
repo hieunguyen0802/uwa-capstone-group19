@@ -241,7 +241,6 @@ def _serialize_row(report, request_meta_map=None):
         'submittedAt': request_meta['submittedAt'],
         'semesterLabel': _sem_label(report.semester),
         'periodLabel': _period_label(report.academic_year, report.semester),
-        'isAnomaly': report.is_anomaly,
         # Optimistic-lock token placeholder. Current contract uses updated_at ISO;
         # strict ifVersion enforcement can be enabled later without renaming fields.
         'version': report.updated_at.isoformat() if report.updated_at else None,
@@ -294,7 +293,6 @@ def _serialize_detail(report):
         'canEditBreakdown': report.status == 'PENDING',
         'cancelled': False,
         'reviewerNote': _get_reviewer_note(report),
-        'isAnomaly': report.is_anomaly,
         'version': report.updated_at.isoformat() if report.updated_at else None,
     }
 

@@ -21,11 +21,14 @@ import StatusPill from "../components/common/StatusPill";
 import YearRangeSemesterActionRow from "../components/common/YearRangeSemesterActionRow";
 import ThemedNoticeModal, { SUPERSEDED_RECORD_MESSAGE } from "../components/common/ThemedNoticeModal";
 import WorkHoursBadge from "../components/common/WorkHoursBadge";
-import type { ProfileModalUser } from "../components/common/ProfileModalFieldGrid";
 import { apiJson, clearLocalStorageKeys, downloadApiFile, isAbortError } from "../api/client";
+import { useAuth } from "../auth/AuthContext";
+import { profileFromAuth } from "../auth/profileFromAuth";
 
 type AcademicItem = {
   id: number;
+  /** Original UUID from backend — used for all API calls. */
+  backendId: string;
   name: string;
   employeeId: string;
   department?: string;
@@ -148,14 +151,6 @@ const LEGACY_ACADEMIC_STORAGE_KEYS = [
   OPS_ACADEMIC_NOTIFICATION_KEY,
   OPS_ACADEMIC_DISTRIBUTED_KEY,
 ] as const;
-const ACADEMIC_DASHBOARD_USER: ProfileModalUser = {
-  surname: "Dias",
-  firstName: "John",
-  employeeId: "12345931",
-  title: "Lecturer",
-  department: "Physics",
-  email: "john.dias@uwa.edu.au",
-};
 
 type AcademicNotification = {
   id: string;
@@ -174,6 +169,7 @@ type AcademicWorkloadRowResponse = {
   id: string;
   name: string;
   employeeId: string;
+  department?: string | null;
   title?: string | null;
   notes?: string | null;
   hours: number;
@@ -234,12 +230,12 @@ function normalizeAcademicBreakdown(
 }
 
 function mapAcademicRowToItem(row: AcademicWorkloadRowResponse): AcademicItem {
-  const numericId = Number.parseInt(String(row.id), 10);
   return {
-    id: Number.isFinite(numericId) ? numericId : Date.now(),
+    id: Date.now() + Math.random(),
+    backendId: row.id,
     name: row.name,
     employeeId: row.employeeId,
-    department: ACADEMIC_DASHBOARD_USER.department,
+    department: row.department ?? undefined,
     title: row.title ?? undefined,
     notes: row.notes ?? "",
     hours: Number(row.hours ?? 0),
@@ -610,7 +606,8 @@ function AcademicDetailModal({
 }
 
 export default function Academic() {
-  const user = ACADEMIC_DASHBOARD_USER;
+  const { profile: authProfile } = useAuth();
+  const user = profileFromAuth(authProfile);
 
   const [items, setItems] = useState<AcademicItem[]>([]);
   const [loadingItems, setLoadingItems] = useState(true);
@@ -748,8 +745,8 @@ export default function Academic() {
     }
   }
 
-  async function loadAcademicWorkloadDetail(id: number) {
-    const detail = await apiJson<AcademicWorkloadDetailResponse>(`/api/academic/workloads/${id}/`);
+  async function loadAcademicWorkloadDetail(id: number, backendId: string) {
+    const detail = await apiJson<AcademicWorkloadDetailResponse>(`/api/academic/workloads/${backendId}/`);
     const mapped = mapAcademicDetailToItem(detail);
     setItems((prev) => prev.map((item) => (item.id === id ? { ...item, ...mapped } : item)));
     return mapped;
@@ -849,7 +846,7 @@ export default function Academic() {
       await apiJson<{ submittedCount?: number }>("/api/academic/workload-requests/", {
         method: "POST",
         body: JSON.stringify({
-          workloadIds: rows.map((row) => String(row.id)),
+          workloadIds: rows.map((row) => row.backendId),
           applicationReason: reason,
         }),
       });
@@ -899,10 +896,10 @@ export default function Academic() {
     event.target.value = "";
   }
 
-  async function handleConfirmFromDetail(id: number) {
+  async function handleConfirmFromDetail(id: number, backendId: string) {
     try {
       const response = await apiJson<{ confirmation: "confirmed"; confirmationTime?: string }>(
-        `/api/academic/workloads/${id}/confirm/`,
+        `/api/academic/workloads/${backendId}/confirm/`,
         { method: "POST" }
       );
       setItems((prev) =>
@@ -1218,7 +1215,7 @@ export default function Academic() {
                             setSupersededNoticeOpen(true);
                             return;
                           }
-                          void loadAcademicWorkloadDetail(item.id)
+                          void loadAcademicWorkloadDetail(item.id, item.backendId)
                             .then(() => setDetailId(item.id))
                             .catch((error) => {
                               setRequestInfo(error instanceof Error ? error.message : "Failed to load workload detail.");
@@ -1520,7 +1517,7 @@ export default function Academic() {
           item={detailItem}
           onClose={() => setDetailId(null)}
           onConfirm={async () => {
-            await handleConfirmFromDetail(detailItem.id);
+            await handleConfirmFromDetail(detailItem.id, detailItem.backendId);
             setDetailId(null);
           }}
         />

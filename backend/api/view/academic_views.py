@@ -16,7 +16,6 @@ from api.models import AuditLog, WorkloadReport
 from api.services.workload_service import (
     evaluate_mvp_anomaly,
     get_workload_queryset,
-    persist_report_anomaly,
     _parse_year_range,
     _filter_reports_by_range,
     _build_semester_label,
@@ -142,13 +141,14 @@ def _serialize_workload_row(report, confirmation, anomaly_result=None, report_it
     total_hours = sum((item.allocated_hours for item in items), Decimal('0.00'))
 
     if anomaly_result is None:
-        anomaly_result = {'is_anomaly': report.is_anomaly, 'reasons': []}
+        anomaly_result = evaluate_mvp_anomaly(report)
 
     return {
         'id': str(report.report_id),
         'name': full_name,
         'employeeId': report.staff.staff_number,
-        'title': '',
+        'department': report.snapshot_department.name if report.snapshot_department_id else None,
+        'title': report.staff.title or '',
         'notes': _get_supervisor_note(report),
         'hours': _to_decimal_hours(total_hours),
         'targetTeachingRatio': float(report.target_teaching_pct) if report.target_teaching_pct is not None else None,
@@ -293,7 +293,7 @@ def academic_workload_detail(request, id):
 def academic_confirm_workload(request, id):
     """POST /api/academic/workloads/{id}/confirm/  — no request body required."""
     report = get_object_or_404(get_workload_queryset(request.staff), report_id=id)
-    anomaly_result = persist_report_anomaly(report, department_conflict=_is_department_conflict(report))
+    anomaly_result = evaluate_mvp_anomaly(report, department_conflict=_is_department_conflict(report))
     if anomaly_result['is_anomaly']:
         return Response(
             {
@@ -405,7 +405,7 @@ def academic_submit_workload_requests(request):
     # Re-evaluate anomaly on submit to prevent bypassing the confirm endpoint.
     anomaly_map = {}
     for report in reports:
-        anomaly_result = persist_report_anomaly(report, department_conflict=_is_department_conflict(report))
+        anomaly_result = evaluate_mvp_anomaly(report, department_conflict=_is_department_conflict(report))
         if anomaly_result['is_anomaly']:
             anomaly_map[str(report.report_id)] = anomaly_result['reasons']
 
@@ -635,7 +635,6 @@ def get_my_workloads(request):
             'academic_year': r.academic_year,
             'semester': r.semester,
             'status': r.status,
-            'is_anomaly': r.is_anomaly,
             'snapshot_fte': str(r.snapshot_fte),
             'created_at': r.created_at.strftime('%Y-%m-%d %H:%M'),
         }

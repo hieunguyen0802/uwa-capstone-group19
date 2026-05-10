@@ -16,6 +16,7 @@ import {
   SERVICE_POINTS_COL,
   STAFF_ID_COL,
   TARGET_BAND_COL,
+  TEACHING_COMPONENT_PTS_COLS,
   TEACHING_HOURS_FACTOR,
   TEACHING_SCORE_COL,
   TEACHING_UNIT_COL,
@@ -51,6 +52,8 @@ export type WorkloadHdrMetrics = {
   ftStudentsConflict?: boolean;
   totalHrsConflict?: boolean;
   hdrPointsConflict?: boolean;
+  /** Derived hours (Z×86.25 + AB×43.125) differs from AC column by more than ±0.05. */
+  derivedVsTotalConflict?: boolean;
   /** Extra display rows (hours shown in modal; FT row shows count as today). */
   hdrExtraLines?: { name: string; hours: number }[];
 };
@@ -101,6 +104,8 @@ export type TeachingLineImport = {
   duplicateUnitConflict?: boolean;
   /** Second and later rows for the same unit code — excluded from teaching subtotal (first row still counts once). */
   excludeFromWorkloadTotal?: boolean;
+  /** Column X (Total Teaching WL Pts) does not equal sum of O+Q+S+U+W within ±0.05. */
+  teachingScoreConflict?: boolean;
 };
 
 export type ParsedWorkloadSheet = {
@@ -426,6 +431,11 @@ export function sheetToWorkloadPayload(sheetName: string, worksheet: WorkSheet):
         hm.totalHrs = zh != null ? Math.round(zh * 1000) / 1000 : null;
         hm.derivedHrs = derivedHdrHrs;
         hm.hdrPoints = hp != null ? Math.round(hp * 1000) / 1000 : null;
+        // Validate: derived hours (Z×86.25 + AB×43.125) must match AC column (totalHrs) within ±0.05
+        if (hm.derivedHrs != null && hm.totalHrs != null && Math.abs(hm.derivedHrs - hm.totalHrs) > ROLE_HOUR_COMPARE_EPS) {
+          hm.hasHdrFieldConflict = true;
+          hm.derivedVsTotalConflict = true;
+        }
       } else {
         if (hm.ftStudents == null && ft != null) hm.ftStudents = Math.round(ft * 1000) / 1000;
         if (hm.ptStudents == null && pt != null) hm.ptStudents = Math.round(pt * 1000) / 1000;
@@ -439,6 +449,10 @@ export function sheetToWorkloadPayload(sheetName: string, worksheet: WorkSheet):
           hm.hasHdrFieldConflict = true;
           hm.ftStudentsConflict = true;
           hm.hdrExtraLines!.push({ name: "FT students", hours: Math.round(ft * 1000) / 1000 });
+        }
+        if (pt != null && hm.ptStudents != null && Math.abs(hm.ptStudents - pt) > ROLE_HOUR_COMPARE_EPS) {
+          hm.hasHdrFieldConflict = true;
+          hm.hdrExtraLines!.push({ name: "PT students", hours: Math.round(pt * 1000) / 1000 });
         }
         if (zh != null && hm.totalHrs != null && Math.abs(hm.totalHrs - zh) > ROLE_HOUR_COMPARE_EPS) {
           hm.hasHdrFieldConflict = true;
@@ -509,13 +523,38 @@ export function sheetToWorkloadPayload(sheetName: string, worksheet: WorkSheet):
           pointsSum != null ? Math.round(pointsSum * TEACHING_HOURS_FACTOR * 1000) / 1000 : null;
         rm.totalPoints = pointsSum;
         rm.totalHours = hoursSum;
+        // Validate sum of role pair points (AG+AH, AI+AJ, ...) against AF column (Assigned Roles Total Pts)
+        const roleTotalTemplate = parseOptionalNumber(cellsByColumn[ROLE_TOTAL_POINTS_COL] ?? null);
+        if (roleTotalTemplate != null && pointsSum != null && Math.abs(pointsSum - roleTotalTemplate) > ROLE_HOUR_COMPARE_EPS) {
+          rm.hasAssignedRoleHourConflict = true;
+        }
       } else {
+        const baselineCanonical = rm.roles.filter((r) => !r.excludeFromWorkloadTotal);
+
+        // Flag if the repeated row has a different number of roles than the first row
+        if (assignedRoleRows.length !== baselineCanonical.length) {
+          rm.hasAssignedRoleHourConflict = true;
+        }
+
         for (const cur of assignedRoleRows) {
           const k = normalizeRoleNameKey(cur.name);
-          const baseline = rm.roles.find(
-            (r) => normalizeRoleNameKey(r.name) === k && !r.excludeFromWorkloadTotal
-          );
-          if (baseline && Math.abs(baseline.hours - cur.hours) > ROLE_HOUR_COMPARE_EPS) {
+          const baseline = baselineCanonical.find((r) => normalizeRoleNameKey(r.name) === k);
+          if (!baseline) {
+            // Role name in repeated row not present in first row → conflict
+            rm.hasAssignedRoleHourConflict = true;
+            const dup = rm.roles.some(
+              (r) => normalizeRoleNameKey(r.name) === k && Boolean(r.excludeFromWorkloadTotal)
+            );
+            if (!dup) {
+              rm.roles.push({
+                name: cur.name,
+                points: cur.points,
+                hours: cur.hours,
+                hourConflict: true,
+                excludeFromWorkloadTotal: true,
+              });
+            }
+          } else if (Math.abs(baseline.hours - cur.hours) > ROLE_HOUR_COMPARE_EPS) {
             rm.hasAssignedRoleHourConflict = true;
             baseline.hourConflict = true;
             const dup = rm.roles.some(
@@ -538,6 +577,22 @@ export function sheetToWorkloadPayload(sheetName: string, worksheet: WorkSheet):
       }
     }
 
+    // Validate X (Total Teaching WL Pts) = sum of O+Q+S+U+W within ±0.05
+    let teachingComponentSum = 0;
+    let hasAnyTeachingComponent = false;
+    for (const col of TEACHING_COMPONENT_PTS_COLS) {
+      const v = cellsByColumn[col];
+      if (v != null) {
+        const n = parseOptionalNumber(v);
+        if (n != null && Number.isFinite(n)) {
+          teachingComponentSum += n;
+          hasAnyTeachingComponent = true;
+        }
+      }
+    }
+    const teachingScoreConflict =
+      hasAnyTeachingComponent && teachingScore != null && Math.abs(teachingScore - teachingComponentSum) > ROLE_HOUR_COMPARE_EPS;
+
     if (unitDisplay && teachingScore != null && teachingHours != null) {
       if (!teachingLinesByStaffId[staffKey]) teachingLinesByStaffId[staffKey] = [];
       const linesArr = teachingLinesByStaffId[staffKey];
@@ -545,18 +600,19 @@ export function sheetToWorkloadPayload(sheetName: string, worksheet: WorkSheet):
       const dupIdx = unitKey ? linesArr.findIndex((l) => normalizeTeachingUnitKey(String(l.unit ?? "")) === unitKey) : -1;
       if (dupIdx >= 0) {
         const prev = linesArr[dupIdx];
-        linesArr[dupIdx] = { ...prev, duplicateUnitConflict: true };
+        linesArr[dupIdx] = { ...prev, duplicateUnitConflict: true, ...(teachingScoreConflict ? { teachingScoreConflict: true } : {}) };
         linesArr.push({
           unit: unitDisplay,
           hours: teachingHours,
           duplicateUnitConflict: true,
           excludeFromWorkloadTotal: true,
+          ...(teachingScoreConflict ? { teachingScoreConflict: true } : {}),
         });
       } else {
         teachingHoursSumByStaffId[staffKey] =
           (teachingHoursSumByStaffId[staffKey] ?? 0) + teachingHours;
         teachingPointsSumByStaffId[staffKey] = (teachingPointsSumByStaffId[staffKey] ?? 0) + teachingScore;
-        linesArr.push({ unit: unitDisplay, hours: teachingHours });
+        linesArr.push({ unit: unitDisplay, hours: teachingHours, ...(teachingScoreConflict ? { teachingScoreConflict: true } : {}) });
       }
     }
 
