@@ -78,7 +78,8 @@ type MockRequest = {
   title: string;
   department: string;
   rate: number;
-  status: "pending" | "approved" | "rejected";
+  /** "initial" = imported but not yet submitted to HoD (shows "-"); "pending" = submitted to HoD. */
+  status: "initial" | "pending" | "approved" | "rejected";
   confirmation?: "confirmed" | "unconfirmed";
   confirmationTime?: string;
   hours: number;
@@ -770,7 +771,7 @@ function rowMatchesWorkloadFailedTab(
   if (it.cancelled) return false;
   if (it.status === "rejected") return true;
   const sid = it.studentId.trim();
-  if (it.importedFromTemplate && it.status === "pending") {
+  if (it.importedFromTemplate && (it.status === "initial" || it.status === "pending")) {
     if (isImportedRowHoursOutOfBand(it, anomalyByStaffId)) return true;
     if (roleImportByStaffId[sid]?.hasAssignedRoleHourConflict) return true;
     if ((teachingLinesByStaffId[sid] ?? []).some((line) => line.duplicateUnitConflict)) return true;
@@ -1013,10 +1014,10 @@ export default function SchoolofOperations() {
         title: row.title ?? "",
         department: row.department ?? "",
         rate: row.rate ?? 100,
-        status: (row.status === "initial" || row.status === "pending") ? "pending"
-          : row.status === "approved" ? "approved"
+        status: row.status === "approved" ? "approved"
           : row.status === "rejected" ? "rejected"
-          : "pending",
+          : row.status === "pending" ? "pending"
+          : "initial",
         confirmation: row.confirmation ?? "unconfirmed",
         confirmationTime: row.confirmationTime ?? undefined,
         hours: typeof row.hours === "number" ? row.hours : 0,
@@ -1536,17 +1537,17 @@ export default function SchoolofOperations() {
     if (anomalyTotalHours != null) {
       return anomalyTotalHours;
     }
-    if (!adminModalBreakdownMerged) return 0;
+    if (!adminModalBreakdown) return 0;
     return ADMIN_WORKLOAD_BREAKDOWN_TABS.reduce(
       (sum, tab) =>
         sum +
-        adminModalBreakdownMerged[tab].reduce(
+        adminModalBreakdown[tab].reduce(
           (s, row) => s + workloadHoursForBreakdownRow(row),
           0
         ),
       0
     );
-  }, [adminModalBreakdownMerged, detailsItem, workloadAnomalyImportByStaffId]);
+  }, [adminModalBreakdown, detailsItem, workloadAnomalyImportByStaffId]);
 
   const detailsAnomaly = useMemo(() => {
     if (!detailsItem) return null;
@@ -1567,19 +1568,19 @@ export default function SchoolofOperations() {
     if (detailsAnomaly?.validationFlags?.hoursOutOfRange != null) {
       return detailsAnomaly.validationFlags.hoursOutOfRange;
     }
-    if (!adminModalBreakdownMerged) return false;
+    if (!adminModalBreakdown) return false;
     return (
       detailsComputedTotalHours <= detailsExpectedHoursRange.min ||
       detailsComputedTotalHours > detailsExpectedHoursRange.max
     );
-  }, [detailsAnomaly, adminModalBreakdownMerged, detailsComputedTotalHours, detailsExpectedHoursRange]);
+  }, [detailsAnomaly, adminModalBreakdown, detailsComputedTotalHours, detailsExpectedHoursRange]);
 
   const actualTeachingRatioPercent = useMemo(() => {
     if (detailsAnomaly?.calculatedTeachingRatio != null) {
       return detailsAnomaly.calculatedTeachingRatio * 100;
     }
-    return adminModalBreakdownMerged ? adminActualTeachingRatioPercent(adminModalBreakdownMerged) : 0;
-  }, [detailsAnomaly, adminModalBreakdownMerged]);
+    return adminModalBreakdown ? adminActualTeachingRatioPercent(adminModalBreakdown) : 0;
+  }, [detailsAnomaly, adminModalBreakdown]);
 
   const actualTeachingRatioDisplay = useMemo(
     () => `${formatOneDecimal(actualTeachingRatioPercent)}%`,
@@ -1633,14 +1634,14 @@ export default function SchoolofOperations() {
   }, [detailsExpectedHoursRange]);
 
   const totalHoursDisplay = useMemo(
-    () => `${formatOneDecimal(detailsComputedTotalHours)} ${totalHoursWorkingDaysSuffix}`,
+    () => `${detailsComputedTotalHours} ${totalHoursWorkingDaysSuffix}`,
     [detailsComputedTotalHours, totalHoursWorkingDaysSuffix]
   );
 
   const itemsForFilter = useMemo(() => {
     const byStatus = pending.filter((it) => {
       // "all" = Pending Distribution: INITIAL items not yet distributed
-      if (statusFilter === "all") return !it.cancelled && it.status === "pending" && !it.distributedTime;
+      if (statusFilter === "all") return !it.cancelled && it.status === "initial" && !it.distributedTime;
       if (statusFilter === "superseded") return Boolean(it.cancelled);
       if (statusFilter === "failed")
         return rowMatchesWorkloadFailedTab(
@@ -1670,8 +1671,9 @@ export default function SchoolofOperations() {
   ]);
 
   function displayStatusForOpsRow(row: MockRequest): "pending" | "approved" | "rejected" | "-" {
-    if (row.cancelled) return row.status;
-    return row.status;
+    if (row.status === "initial") return "-";
+    // after the guard above, row.status is narrowed to "pending" | "approved" | "rejected"
+    return row.status as "pending" | "approved" | "rejected";
   }
 
   const pendingFilteredIds = useMemo(() => itemsForFilter.map((it) => it.id), [itemsForFilter]);
@@ -1679,7 +1681,7 @@ export default function SchoolofOperations() {
     pendingFilteredIds.length > 0 && pendingFilteredIds.every((id) => selectedIds.has(id));
   const somePendingFilteredSelected = pendingFilteredIds.some((id) => selectedIds.has(id));
   const hasSelectedPendingForDistribution = useMemo(
-    () => pending.some((it) => selectedIds.has(it.id) && !it.cancelled && it.status === "pending" && !it.distributedTime),
+    () => pending.some((it) => selectedIds.has(it.id) && !it.cancelled && it.status === "initial" && !it.distributedTime),
     [pending, selectedIds]
   );
 
@@ -1694,12 +1696,12 @@ export default function SchoolofOperations() {
   }, [statusFilter, somePendingFilteredSelected, allPendingFilteredSelected]);
 
   const workloadPendingFilterCount = useMemo(
-    () => pending.filter((it) => !it.cancelled && it.status === "pending").length,
+    () => pending.filter((it) => !it.cancelled && it.status === "initial" && !it.distributedTime).length,
     [pending]
   );
 
   const workloadDistributedFilterCount = useMemo(
-    () => pending.filter((it) => !it.cancelled && it.status === "approved").length,
+    () => pending.filter((it) => !it.cancelled && Boolean(it.distributedTime)).length,
     [pending]
   );
 
@@ -4058,7 +4060,7 @@ export default function SchoolofOperations() {
                                 </tr>
                               </thead>
                               <tbody className="divide-y divide-slate-200 bg-white text-sm text-slate-700">
-                                {(adminModalBreakdownMerged?.[detailsTab] ?? []).map((row, idx) => {
+                                {(adminModalBreakdown?.[detailsTab] ?? []).map((row, idx) => {
                                   const isHdrSummaryRow =
                                     detailsTab === "HDR" && row.name === HDR_TOTAL_ROW_LABEL;
                                   const conflictHighlightRow = Boolean(
@@ -4087,7 +4089,7 @@ export default function SchoolofOperations() {
                                           isHdrSummaryRow ? "font-bold text-slate-800" : ""
                                         } ${conflictHighlightRow ? "font-semibold text-red-900" : ""}`}
                                       >
-                                        {formatOneDecimal(row.hours)}
+                                        {row.hours}
                                       </td>
                                     </tr>
                                   );
@@ -4098,11 +4100,9 @@ export default function SchoolofOperations() {
                                       {workloadBreakdownTotalLabel(detailsTab)}
                                     </td>
                                     <td className="px-3 py-2 text-right font-bold tabular-nums font-sans text-slate-800">
-                                      {formatOneDecimal(
-                                        (adminModalBreakdownMerged?.[detailsTab] ?? []).reduce(
-                                          (sum, row) => sum + workloadHoursForBreakdownRow(row),
-                                          0
-                                        )
+                                      {(adminModalBreakdown?.[detailsTab] ?? []).reduce(
+                                        (sum, row) => sum + workloadHoursForBreakdownRow(row),
+                                        0
                                       )}
                                     </td>
                                   </tr>

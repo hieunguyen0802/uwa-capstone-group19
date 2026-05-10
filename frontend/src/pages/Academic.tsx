@@ -40,7 +40,7 @@ type AcademicItem = {
   teachingTargetHours?: number;
   /** Target teaching share of total workload (0–100), e.g. staff sheet "Target Teaching %". */
   targetTeachingRatio?: number;
-  status: "pending" | "approved" | "rejected" | "";
+  status: "initial" | "pending" | "approved" | "rejected" | "";
   confirmation: "confirmed" | "unconfirmed";
   /** When confirmation is confirmed, time the workload was confirmed (empty in list when unconfirmed). */
   confirmationTime?: string;
@@ -177,7 +177,7 @@ type AcademicWorkloadRowResponse = {
   hours: number;
   targetTeachingRatio?: number | null;
   teachingTargetHours?: number | null;
-  status: "pending" | "approved" | "rejected" | "";
+  status: "initial" | "pending" | "approved" | "rejected" | "";
   confirmation: "confirmed" | "unconfirmed";
   confirmationTime?: string | null;
   supervisorNote?: string | null;
@@ -250,7 +250,7 @@ function mapAcademicRowToItem(row: AcademicWorkloadRowResponse): AcademicItem {
     hours: Number(row.hours ?? 0),
     targetTeachingRatio: row.targetTeachingRatio ?? undefined,
     teachingTargetHours: row.teachingTargetHours ?? undefined,
-    status: row.status || "",
+    status: row.status === "initial" ? "" : row.status || "",
     confirmation: row.confirmation || "unconfirmed",
     confirmationTime: row.confirmationTime ?? undefined,
     supervisorNote: row.supervisorNote ?? "",
@@ -288,7 +288,15 @@ function mapAcademicDetailToItem(detail: AcademicWorkloadDetailResponse): Academ
       actualTeachingRatioOutOfRange: teachingRatioOutOfRange || bandMismatch,
       showActualTeachingRatioBandWarning: bandMismatch && !teachingRatioOutOfRange,
       actualRatioHoverText: v?.reason || "",
-      totalHoursDisplay: String(detail.hours ?? base.hours),
+      totalHoursDisplay: (() => {
+        const hrs = detail.hours ?? base.hours;
+        if (v?.expectedMinHours != null && v?.expectedMaxHours != null) {
+          const minDays = Math.ceil(v.expectedMinHours / 8);
+          const maxDays = Math.ceil(v.expectedMaxHours / 8);
+          return `${hrs} (>${minDays} & <=${maxDays} working days)`;
+        }
+        return String(hrs);
+      })(),
       adminModalHoursAbnormal: hoursOutOfRange,
       totalHoursTooltipText: hoursOutOfRange ? hoursHint : "",
       employmentType: detail.employmentType ?? "—",
@@ -1291,7 +1299,7 @@ export default function Academic() {
                             <span
                               className={`inline-flex justify-center ${rowCancelled ? "grayscale opacity-70" : ""}`}
                             >
-                              <StatusPill status={item.status} variant="academic" />
+                              <StatusPill status={item.status as "pending" | "approved" | "rejected"} variant="academic" />
                             </span>
                           ) : (
                             <span className="text-sm font-semibold text-slate-500">-</span>
