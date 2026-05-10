@@ -12,6 +12,22 @@ const BASE_URL = `${API_ROOT}/api`;
 
 export const ACCESS_TOKEN_KEY = "access_token";
 export const REFRESH_TOKEN_KEY = "refresh_token";
+const AUTH_STORAGE_KEYS = [
+  ACCESS_TOKEN_KEY,
+  REFRESH_TOKEN_KEY,
+  "access",
+  "refresh",
+  "token",
+  "user",
+];
+
+export function clearAuthStorage() {
+  if (typeof window === "undefined") return;
+  AUTH_STORAGE_KEYS.forEach((key) => {
+    window.localStorage.removeItem(key);
+    window.sessionStorage.removeItem(key);
+  });
+}
 
 export const apiClient: AxiosInstance = axios.create({
   baseURL: BASE_URL,
@@ -32,8 +48,7 @@ apiClient.interceptors.response.use(
   (err: AxiosError) => {
     if (err.response?.status === 401) {
       // token missing / expired — clear and let caller redirect to login
-      localStorage.removeItem(ACCESS_TOKEN_KEY);
-      localStorage.removeItem(REFRESH_TOKEN_KEY);
+      clearAuthStorage();
     }
     return Promise.reject(err);
   }

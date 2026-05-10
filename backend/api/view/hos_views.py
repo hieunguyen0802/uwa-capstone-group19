@@ -14,8 +14,8 @@ from rest_framework.decorators import api_view, permission_classes
 from rest_framework.permissions import IsAuthenticated
 from rest_framework.response import Response
 
-from api.decorators import require_role
 from api.models import AuditLog, Department, Staff, WorkloadReport
+from api.permissions import IsHoSOrSchoolOps
 from api.services.audit_service import compute_diffs, write_audit
 from api.services.workload_service import (
     _filter_reports_by_range,
@@ -186,8 +186,7 @@ def _parse_hos_year_range(request):
 
 
 @api_view(['GET'])
-@permission_classes([IsAuthenticated])
-@require_role('HOS', 'SCHOOL_OPS')
+@permission_classes([IsAuthenticated, IsHoSOrSchoolOps])
 def hos_staff_list(request):
     """GET /api/headofschool/staff/"""
     qs = Staff.objects.select_related('user', 'department').order_by('staff_number')
@@ -232,8 +231,7 @@ def hos_staff_list(request):
 
 
 @api_view(['PATCH'])
-@permission_classes([IsAuthenticated])
-@require_role('HOS', 'SCHOOL_OPS')
+@permission_classes([IsAuthenticated, IsHoSOrSchoolOps])
 @transaction.atomic
 def hos_staff_update(request, staff_id):
     """PATCH /api/headofschool/staff/{staff_id}/"""
@@ -336,8 +334,7 @@ def hos_staff_update(request, staff_id):
 
 
 @api_view(['GET'])
-@permission_classes([IsAuthenticated])
-@require_role('HOS', 'SCHOOL_OPS')
+@permission_classes([IsAuthenticated, IsHoSOrSchoolOps])
 def hos_staff_import_template(request):
     """GET /api/headofschool/staff/import-template/"""
     return Response(
@@ -353,8 +350,7 @@ def hos_staff_import_template(request):
 
 
 @api_view(['POST'])
-@permission_classes([IsAuthenticated])
-@require_role('HOS', 'SCHOOL_OPS')
+@permission_classes([IsAuthenticated, IsHoSOrSchoolOps])
 @transaction.atomic
 def hos_staff_import(request):
     """POST /api/headofschool/staff/import/"""
@@ -438,16 +434,14 @@ def hos_staff_import(request):
 
 
 @api_view(['GET'])
-@permission_classes([IsAuthenticated])
-@require_role('HOS', 'SCHOOL_OPS')
+@permission_classes([IsAuthenticated, IsHoSOrSchoolOps])
 def hos_role_assignments(request):
     """GET /api/headofschool/role-assignments/"""
     return _build_role_assignments_response()
 
 
 @api_view(['GET', 'POST'])
-@permission_classes([IsAuthenticated])
-@require_role('HOS', 'SCHOOL_OPS')
+@permission_classes([IsAuthenticated, IsHoSOrSchoolOps])
 def hos_role_assignments_collection(request):
     if request.method == 'GET':
         return _build_role_assignments_response()
@@ -455,8 +449,7 @@ def hos_role_assignments_collection(request):
 
 
 @api_view(['POST'])
-@permission_classes([IsAuthenticated])
-@require_role('HOS', 'SCHOOL_OPS')
+@permission_classes([IsAuthenticated, IsHoSOrSchoolOps])
 @transaction.atomic
 def hos_create_role_assignment(request):
     """POST /api/headofschool/role-assignments/"""
@@ -464,8 +457,7 @@ def hos_create_role_assignment(request):
 
 
 @api_view(['POST'])
-@permission_classes([IsAuthenticated])
-@require_role('HOS', 'SCHOOL_OPS')
+@permission_classes([IsAuthenticated, IsHoSOrSchoolOps])
 @transaction.atomic
 def hos_disable_role_assignment(request, id):
     """POST /api/headofschool/role-assignments/{id}/disable/"""
@@ -502,8 +494,7 @@ def hos_disable_role_assignment(request, id):
 
 
 @api_view(['GET'])
-@permission_classes([IsAuthenticated])
-@require_role('HOS', 'SCHOOL_OPS')
+@permission_classes([IsAuthenticated, IsHoSOrSchoolOps])
 def hos_visualization(request):
     """GET /api/headofschool/visualization/"""
     year_from, year_to = _parse_hos_year_range(request)
@@ -599,8 +590,7 @@ def hos_visualization(request):
 
 
 @api_view(['GET'])
-@permission_classes([IsAuthenticated])
-@require_role('HOS', 'SCHOOL_OPS')
+@permission_classes([IsAuthenticated, IsHoSOrSchoolOps])
 def hos_export(request):
     """GET /api/headofschool/export/"""
     try:

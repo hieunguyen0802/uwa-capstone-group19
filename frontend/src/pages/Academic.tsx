@@ -153,7 +153,6 @@ const LEGACY_ACADEMIC_STORAGE_KEYS = [
   OPS_ACADEMIC_NOTIFICATION_KEY,
   OPS_ACADEMIC_DISTRIBUTED_KEY,
 ] as const;
-
 type AcademicNotification = {
   id: string;
   recipientStaffId: string;
@@ -238,13 +237,13 @@ function normalizeAcademicBreakdown(
   };
 }
 
-function mapAcademicRowToItem(row: AcademicWorkloadRowResponse): AcademicItem {
+function mapAcademicRowToItem(row: AcademicWorkloadRowResponse, userDepartment = ""): AcademicItem {
   return {
     id: Date.now() + Math.random(),
     backendId: row.id,
     name: row.name,
     employeeId: row.employeeId,
-    department: row.department ?? undefined,
+    department: row.department ?? (userDepartment || undefined),
     title: row.title ?? undefined,
     notes: row.notes ?? "",
     hours: Number(row.hours ?? 0),
@@ -262,8 +261,8 @@ function mapAcademicRowToItem(row: AcademicWorkloadRowResponse): AcademicItem {
   };
 }
 
-function mapAcademicDetailToItem(detail: AcademicWorkloadDetailResponse): AcademicItem {
-  const base = mapAcademicRowToItem(detail);
+function mapAcademicDetailToItem(detail: AcademicWorkloadDetailResponse, userDepartment = ""): AcademicItem {
+  const base = mapAcademicRowToItem(detail, userDepartment);
   const normalizedBreakdown = normalizeAcademicBreakdown(detail.breakdown);
   const actualTeachingRatio = typeof detail.actualTeachingRatio === "number" ? detail.actualTeachingRatio : null;
   const v = detail.validation;
@@ -736,7 +735,7 @@ export default function Academic() {
     setPageError("");
     try {
       const response = await apiJson<AcademicWorkloadListResponse>("/api/academic/workloads/");
-      setItems((response.items ?? []).map(mapAcademicRowToItem));
+      setItems((response.items ?? []).map((row) => mapAcademicRowToItem(row, user.department)));
     } catch (error) {
       if (!isAbortError(error)) {
         setItems([]);

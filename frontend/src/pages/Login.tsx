@@ -7,7 +7,6 @@ import { ACCESS_TOKEN_KEY, REFRESH_TOKEN_KEY } from "../api/client";
 import { useAuth } from "../auth/AuthContext";
 
 const MAX_IDENTIFIER_LENGTH = 254;
-const STAFF_NUMBER_REGEX = /^\d{6,12}$/;
 
 export default function Login() {
   const [identifier, setIdentifier] = useState("");
@@ -28,28 +27,17 @@ export default function Login() {
     return () => window.clearTimeout(timer);
   }, [sendCooldown]);
 
-  /**
-   * Accept either a UWA staff number or an email. The backend's OTP endpoint
-   * keys on email, so a staff-number input is rejected here with a helpful
-   * message; user is asked to use their email. Future enhancement: backend
-   * resolves staff_number → email, and this branch disappears.
-   */
   function resolveEmail(input: string): string | null {
     const trimmed = input.trim();
     if (!trimmed) return null;
     if (trimmed.includes("@")) return trimmed;
-    if (STAFF_NUMBER_REGEX.test(trimmed)) {
-      // UWA student-style: "24140443" → "24140443@student.uwa.edu.au"
-      // Staff-style falls through as invalid; user must enter email.
-      return `${trimmed}@student.uwa.edu.au`;
-    }
     return null;
   }
 
   const handleSendOtp = async () => {
     const email = resolveEmail(identifier);
     if (!email) {
-      setLoginError("Please enter a valid email or 6–12 digit staff/student ID.");
+      setLoginError("Please enter a valid email address.");
       return;
     }
     setBusy(true);
@@ -68,7 +56,7 @@ export default function Login() {
   const handleLogin = async () => {
     const email = resolveEmail(identifier);
     if (!email) {
-      setLoginError("Please enter a valid email or staff/student ID.");
+      setLoginError("Please enter a valid email address.");
       return;
     }
     if (!/^\d{6}$/.test(otpCode.trim())) {
@@ -93,30 +81,23 @@ export default function Login() {
 
   return (
     <AuthLayoutFrame>
-      <div className="mx-auto mt-8 flex max-w-md items-center justify-center gap-3">
-        <img src="/logo512.png" alt="UWA Logo" className="h-20 w-20 object-contain" />
-        <div className="text-left font-['Times_New_Roman',Times,serif] text-[#2f4d9c]">
-          <div className="text-[18px] font-semibold uppercase leading-[1.05] tracking-[0.03em]">
-            THE UNIVERSITY OF
-          </div>
-          <div className="text-[52px] font-semibold uppercase leading-[0.9] tracking-[0.01em]">
-            WESTERN
-          </div>
-          <div className="text-[52px] font-semibold uppercase leading-[0.9] tracking-[0.01em]">
-            AUSTRALIA
-          </div>
-        </div>
+      <div className="mx-auto mt-8 max-w-xl px-4">
+        <img
+          src="/uwa-crest-blue.svg"
+          alt="The University of Western Australia"
+          className="mx-auto h-auto w-full max-w-[560px] object-contain"
+        />
       </div>
 
       <div className="mx-auto mt-8 max-w-md space-y-4 text-left">
         <div>
           <label className="mb-1 block text-sm text-slate-700">
-            Staff ID or Email Address
+            Email Address
           </label>
           <input
             type="text"
             value={identifier}
-            placeholder="e.g. 24140443 or jiaao@uwa.edu.au"
+            placeholder="e.g. jiaao@uwa.edu.au"
             onChange={(e) => setIdentifier(e.target.value)}
             maxLength={MAX_IDENTIFIER_LENGTH}
             className="w-full rounded border border-slate-300 bg-white px-3 py-2 text-sm outline-none focus:border-[#2f4d9c]"

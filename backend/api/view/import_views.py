@@ -1,18 +1,19 @@
 import logging
 
 import openpyxl
-from rest_framework.decorators import api_view
+from rest_framework.decorators import api_view, permission_classes
+from rest_framework.permissions import IsAuthenticated
 from rest_framework.response import Response
 
-from api.decorators import require_role
 from api.models import Staff
+from api.permissions import IsSchoolOps
 from api.services.importer_service import import_workload_excel
 
 logger = logging.getLogger(__name__)
 
 
 @api_view(['POST'])
-@require_role('SCHOOL_OPS')
+@permission_classes([IsAuthenticated, IsSchoolOps])
 def import_workload_view(request):
     """
     Upload and import the unified workload Excel template.

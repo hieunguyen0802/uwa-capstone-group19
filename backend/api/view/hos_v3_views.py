@@ -15,13 +15,14 @@ from django.core.paginator import Paginator
 from django.db import transaction
 from django.db.models import Exists, OuterRef, Q
 from django.shortcuts import get_object_or_404
+from django.utils import timezone
 from rest_framework import status as http_status
 from rest_framework.decorators import api_view, permission_classes
 from rest_framework.permissions import IsAuthenticated
 from rest_framework.response import Response
 
-from api.decorators import require_role
 from api.models import AuditLog, Department, Staff, StaffRoleAssignment, WorkloadItem, WorkloadReport
+from api.permissions import IsHoSOrSchoolOps
 from api.services.workload_service import _filter_reports_by_range, _parse_year_range, stale_report_response_payload
 from api.view.hos_views import (
     ALLOWED_STAFF_DEPARTMENTS,
@@ -68,9 +69,10 @@ def _hos_visible_qs():
 
 ROLE_DEFAULT_PERMISSIONS = {
     'HoD': ['View Workload', 'Approve Workload', 'Update Workload'],
-    'Admin': ['View Workload', 'Import Staff', 'Assign Role'],
+    'Admin': ['Distribute Workload to Departments', 'Edit Employee Information'],
 }
 ROLE_TO_CANONICAL = {'HoD': 'HOD', 'Admin': 'SCHOOL_OPS'}
+SUPERSEDED_ROLE_REASON = 'Superseded by a newer role assignment.'
 
 
 def _serialize_staff_directory_row(staff):
@@ -104,6 +106,22 @@ def _serialize_assignment(assignment):
     }
 
 
+def _current_assignment_queryset(include_disabled=False):
+    queryset = StaffRoleAssignment.objects.select_related('staff__user').order_by('-created_at', '-assignment_id')
+    if include_disabled:
+        return queryset
+    return queryset.filter(status='active')
+
+
+def _dedupe_latest_by_staff(assignments):
+    latest_by_staff = {}
+    for assignment in assignments:
+        if assignment.staff_id in latest_by_staff:
+            continue
+        latest_by_staff[assignment.staff_id] = assignment
+    return list(latest_by_staff.values())
+
+
 def _row_value(row, *keys, default=''):
     for key in keys:
         if key in row and row[key] not in (None, ''):
@@ -116,6 +134,22 @@ def _row_value(row, *keys, default=''):
     return default
 
 
+def _parse_staff_active_status(value):
+    if value in (None, ''):
+        return True, None
+    if isinstance(value, bool):
+        return value, None
+
+    normalized = str(value).strip().lower()
+    if not normalized:
+        return True, None
+    if normalized in ('active', 'true', '1', 'yes', 'y'):
+        return True, None
+    if normalized in ('inactive', 'false', '0', 'no', 'n'):
+        return False, None
+    return True, 'active_status must be Active or Inactive'
+
+
 def _normalize_staff_import_row(row, row_number):
     staff_id = str(_row_value(row, 'staffId', 'staff_id', 'Staff ID', 'Staff Number')).strip()
     first_name = str(_row_value(row, 'firstName', 'first_name', 'First Name')).strip()
@@ -124,19 +158,30 @@ def _normalize_staff_import_row(row, row_number):
     title = str(_row_value(row, 'title', 'Title')).strip()
     department = str(_row_value(row, 'department', 'Department')).strip() or 'Computer Science & Software Engineering'
     active_raw = _row_value(row, 'isActive', 'active_status', 'Active Status', default='Active')
-    is_active = active_raw if isinstance(active_raw, bool) else str(active_raw).strip().lower() in (
-        'true',
-        '1',
-        'yes',
-        'active',
+    is_active, active_message = _parse_staff_active_status(active_raw)
+    is_new_raw = _row_value(row, 'isNewEmployee', 'is_new_employee', 'new_employee', 'New Employee', default='')
+    is_new_employee = (
+        is_new_raw if isinstance(is_new_raw, bool)
+        else str(is_new_raw).strip().lower() in ('true', '1', 'yes', 'y')
     )
+    notes = str(_row_value(row, 'notes', 'Notes')).strip()
     messages = []
-    if not _is_valid_staff_number(staff_id):
-        messages.append('staffId must be 8 characters')
-    if email and '@' not in email:
-        messages.append('email format is invalid')
+    if not staff_id:
+        messages.append('staff_id is required')
+    elif not _is_valid_staff_number(staff_id):
+        messages.append('staff_id must be exactly 8 characters')
+    if not first_name:
+        messages.append('first_name is required')
+    if not last_name:
+        messages.append('last_name is required')
+    if not email:
+        messages.append('email is required')
+    elif '@' not in email:
+        messages.append('email must contain @')
     if department not in ALLOWED_STAFF_DEPARTMENTS:
         messages.append('department is not in allowed values')
+    if active_message:
+        messages.append(active_message)
 
     return {
         'rowNumber': row_number,
@@ -147,8 +192,8 @@ def _normalize_staff_import_row(row, row_number):
         'title': title,
         'department': department,
         'isActive': bool(is_active),
-        'isNewEmployee': False,
-        'notes': '',
+        'isNewEmployee': bool(is_new_employee),
+        'notes': notes,
         'messages': messages,
         'valid': not messages,
     }
@@ -157,8 +202,7 @@ def _normalize_staff_import_row(row, row_number):
 # ─── GET /api/hos/workload-requests/ ────────────────────────────────────────
 
 @api_view(['GET'])
-@permission_classes([IsAuthenticated])
-@require_role('HOS', 'SCHOOL_OPS')
+@permission_classes([IsAuthenticated, IsHoSOrSchoolOps])
 def hos_workload_requests(request):
     base_qs = _hos_visible_qs()
     qs = base_qs.prefetch_related('items')
@@ -222,8 +266,7 @@ def hos_workload_requests(request):
 # ─── GET /api/hos/workload-requests/{id}/ ───────────────────────────────────
 
 @api_view(['GET'])
-@permission_classes([IsAuthenticated])
-@require_role('HOS', 'SCHOOL_OPS')
+@permission_classes([IsAuthenticated, IsHoSOrSchoolOps])
 def hos_workload_request_detail(request, id):
     qs = _hos_visible_qs().prefetch_related('items')
     report = get_object_or_404(qs, report_id=id)
@@ -233,8 +276,7 @@ def hos_workload_request_detail(request, id):
 # ─── POST /api/hos/workload-requests/{id}/decision/ ─────────────────────────
 
 @api_view(['POST'])
-@permission_classes([IsAuthenticated])
-@require_role('HOS', 'SCHOOL_OPS')
+@permission_classes([IsAuthenticated, IsHoSOrSchoolOps])
 @transaction.atomic
 def hos_workload_request_decision(request, id):
     """
@@ -330,8 +372,7 @@ def hos_workload_request_decision(request, id):
 # ─── GET /api/hos/reports/semester-distribution ────────────────────────────
 
 @api_view(['GET'])
-@permission_classes([IsAuthenticated])
-@require_role('HOS', 'SCHOOL_OPS')
+@permission_classes([IsAuthenticated, IsHoSOrSchoolOps])
 def hos_semester_distribution_reports(request):
     department = (request.GET.get('department') or '').strip()
     qs = _filter_period_params(
@@ -371,8 +412,7 @@ def hos_semester_distribution_reports(request):
 # ─── GET /api/hos/reports/semester-distribution/{reportId}/download ────────
 
 @api_view(['GET'])
-@permission_classes([IsAuthenticated])
-@require_role('HOS', 'SCHOOL_OPS')
+@permission_classes([IsAuthenticated, IsHoSOrSchoolOps])
 def hos_semester_distribution_report_download(request, report_id):
     year, semester = _parse_period_report_id(report_id, 'hos-report')
     if year is None or semester is None:
@@ -396,8 +436,7 @@ def hos_semester_distribution_report_download(request, report_id):
 # ─── GET /api/hos/staff-directory ──────────────────────────────────────────
 
 @api_view(['GET'])
-@permission_classes([IsAuthenticated])
-@require_role('HOS', 'SCHOOL_OPS')
+@permission_classes([IsAuthenticated, IsHoSOrSchoolOps])
 def hos_staff_directory(request):
     qs = (
         Staff.objects.select_related('user', 'department')
@@ -442,8 +481,7 @@ def hos_staff_directory(request):
 # ─── POST /api/hos/staff-directory/import ─────────────────────────────────
 
 @api_view(['POST'])
-@permission_classes([IsAuthenticated])
-@require_role('HOS', 'SCHOOL_OPS')
+@permission_classes([IsAuthenticated, IsHoSOrSchoolOps])
 @transaction.atomic
 def hos_staff_directory_import(request):
     upload_file = request.FILES.get('file')
@@ -458,12 +496,36 @@ def hos_staff_directory_import(request):
         return Response({'success': False, 'message': error}, status=http_status.HTTP_400_BAD_REQUEST)
 
     parsed_rows = [_normalize_staff_import_row(row, idx) for idx, row in enumerate(rows, start=2)]
+    if not parsed_rows:
+        return Response(
+            {
+                'success': False,
+                'message': 'No staff rows found in the uploaded file.',
+                'importedCount': 0,
+                'failedCount': 0,
+                'items': [],
+            },
+            status=http_status.HTTP_400_BAD_REQUEST,
+        )
+
+    invalid_rows = [row for row in parsed_rows if not row['valid']]
+    if invalid_rows:
+        for parsed in parsed_rows:
+            parsed['imported'] = False
+        return Response(
+            {
+                'success': False,
+                'message': 'Staff import validation failed. No records were saved.',
+                'importedCount': 0,
+                'failedCount': len(invalid_rows),
+                'items': parsed_rows,
+            },
+            status=http_status.HTTP_400_BAD_REQUEST,
+        )
+
     imported_count = 0
 
     for parsed in parsed_rows:
-        if not parsed['valid']:
-            continue
-
         department, _ = Department.objects.get_or_create(name=parsed['department'])
         existing_staff = Staff.objects.select_related('user').filter(staff_number=parsed['staffId']).first()
         user = existing_staff.user if existing_staff else None
@@ -527,13 +589,16 @@ def hos_staff_directory_import(request):
 # ─── GET/POST /api/hos/role-assignments ────────────────────────────────────
 
 @api_view(['GET', 'POST'])
-@permission_classes([IsAuthenticated])
-@require_role('HOS', 'SCHOOL_OPS')
+@permission_classes([IsAuthenticated, IsHoSOrSchoolOps])
 @transaction.atomic
 def hos_v3_role_assignments(request):
     if request.method == 'GET':
-        queryset = StaffRoleAssignment.objects.select_related('staff__user').order_by('-created_at')
-        return Response({'items': [_serialize_assignment(obj) for obj in queryset[:500]]})
+        include_disabled = str(request.GET.get('includeDisabled') or '').strip().lower() in ('1', 'true', 'yes')
+        queryset = _current_assignment_queryset(include_disabled=include_disabled)
+        assignments = list(queryset[:500])
+        if not include_disabled:
+            assignments = _dedupe_latest_by_staff(assignments)
+        return Response({'items': [_serialize_assignment(obj) for obj in assignments]})
 
     payload = request.data or {}
     staff_id = str(payload.get('staffId') or payload.get('staff_id') or '').strip()
@@ -553,9 +618,18 @@ def hos_v3_role_assignments(request):
         )
 
     staff = get_object_or_404(Staff.objects.select_related('user', 'department'), staff_number=staff_id)
-    resolved = Department.objects.filter(name__iexact=department_name).first()
-    if department_name and resolved is None:
-        resolved = Department.objects.create(name=department_name)
+    if role == 'Admin':
+        resolved = None
+    else:
+        resolved = Department.objects.filter(name__iexact=department_name).first()
+        if department_name and resolved is None:
+            resolved = Department.objects.create(name=department_name)
+
+    StaffRoleAssignment.objects.filter(staff=staff, status='active').update(
+        status='disabled',
+        disable_reason=SUPERSEDED_ROLE_REASON,
+        updated_at=timezone.now(),
+    )
 
     assignment = StaffRoleAssignment.objects.create(
         staff=staff,
@@ -577,8 +651,7 @@ def hos_v3_role_assignments(request):
 # ─── PATCH /api/hos/role-assignments/{assignmentId}/status ─────────────────
 
 @api_view(['PATCH'])
-@permission_classes([IsAuthenticated])
-@require_role('HOS', 'SCHOOL_OPS')
+@permission_classes([IsAuthenticated, IsHoSOrSchoolOps])
 @transaction.atomic
 def hos_v3_role_assignment_status(request, assignment_id):
     desired = str((request.data or {}).get('status') or '').strip().lower()
@@ -593,11 +666,23 @@ def hos_v3_role_assignment_status(request, assignment_id):
     assignment.disable_reason = str((request.data or {}).get('reason') or '')[:500]
     assignment.save(update_fields=['status', 'disable_reason', 'updated_at'])
 
-    if not StaffRoleAssignment.objects.filter(staff=assignment.staff, status='active').exclude(
-        assignment_id=assignment.assignment_id
-    ).exists():
+    latest_active = (
+        StaffRoleAssignment.objects
+        .filter(staff=assignment.staff, status='active')
+        .exclude(assignment_id=assignment.assignment_id)
+        .order_by('-created_at', '-assignment_id')
+        .first()
+    )
+    if latest_active is None:
         assignment.staff.role = 'ACADEMIC'
         assignment.staff.save(update_fields=['role', 'updated_at'])
+    else:
+        assignment.staff.role = ROLE_TO_CANONICAL[latest_active.role_code]
+        if latest_active.resolved_department_id is not None:
+            assignment.staff.department = latest_active.resolved_department
+            assignment.staff.save(update_fields=['role', 'department', 'updated_at'])
+        else:
+            assignment.staff.save(update_fields=['role', 'updated_at'])
 
     return Response({'id': assignment.assignment_id, 'status': assignment.status})
 
@@ -605,8 +690,7 @@ def hos_v3_role_assignment_status(request, assignment_id):
 # ─── GET /api/hos/analytics/workloads ──────────────────────────────────────
 
 @api_view(['GET'])
-@permission_classes([IsAuthenticated])
-@require_role('HOS', 'SCHOOL_OPS')
+@permission_classes([IsAuthenticated, IsHoSOrSchoolOps])
 def hos_workload_analytics(request):
     year_from, year_to = _parse_year_range(request)
     semester_filter = request.GET.get('semester', 'All')
@@ -630,8 +714,7 @@ def hos_workload_analytics(request):
 # ─── GET /api/hos/exports/workloads ────────────────────────────────────────
 
 @api_view(['GET'])
-@permission_classes([IsAuthenticated])
-@require_role('HOS', 'SCHOOL_OPS')
+@permission_classes([IsAuthenticated, IsHoSOrSchoolOps])
 def hos_workload_export(request):
     year_from, year_to = _parse_year_range(request)
     semester_filter = request.GET.get('semester', 'All')

@@ -1,4 +1,5 @@
 import { useEffect, useMemo, useRef, useState, type ChangeEvent } from "react";
+import type { AxiosError } from "axios";
 import {
   Bar,
   BarChart,
@@ -36,6 +37,7 @@ import {
   type HosAnalyticsPayload,
   type HosBreakdown,
   type HosSemesterReport,
+  type HosStaffImportResponse,
   type HosWorkloadDetail,
   type HosWorkloadRow,
 } from "../api/hos";
@@ -199,6 +201,14 @@ const WORKLOAD_SEARCH_DEPARTMENT_OPTIONS = [
   "Mathematics & Statistics",
   "Computer Science & Software Engineering",
 ] as const;
+
+function staffImportErrorLines(payload?: HosStaffImportResponse): string[] {
+  if (!payload?.items?.length) return [];
+  return payload.items
+    .filter((item) => item.messages?.length)
+    .slice(0, 6)
+    .map((item) => `Row ${item.rowNumber}: ${item.messages.join("; ")}`);
+}
 
 export default function HeadofSchool() {
   type AssignRole = "HoD" | "Admin";
@@ -367,6 +377,7 @@ export default function HeadofSchool() {
 
   const [assignablePeople, setAssignablePeople] = useState<AssignablePerson[]>([]);
   const [importMessage, setImportMessage] = useState("");
+  const [importErrors, setImportErrors] = useState<string[]>([]);
   const [staffModalOpen, setStaffModalOpen] = useState(false);
   const [staffDraft, setStaffDraft] = useState<StaffProfileDraft | null>(null);
   const [staffModalError, setStaffModalError] = useState("");
@@ -1009,7 +1020,7 @@ export default function HeadofSchool() {
 
     worksheet.spliceColumns(8, Math.max(0, worksheet.columnCount - 7));
 
-    // Keep only format pick-lists; optional fields may be blank.
+    // Excel gives early feedback, while the server remains the source of truth.
     for (let row = 2; row <= 1000; row += 1) {
       worksheet.getCell(`A${row}`).dataValidation = {
         type: "custom",
@@ -1019,15 +1030,29 @@ export default function HeadofSchool() {
         errorTitle: "Invalid staff_id",
         error: "staff_id must be exactly 8 characters.",
       };
+      worksheet.getCell(`B${row}`).dataValidation = {
+        type: "custom",
+        allowBlank: false,
+        formulae: [`LEN(TRIM(B${row}&""))>0`],
+        showErrorMessage: true,
+        errorTitle: "Missing first_name",
+        error: "first_name is required.",
+      };
+      worksheet.getCell(`C${row}`).dataValidation = {
+        type: "custom",
+        allowBlank: false,
+        formulae: [`LEN(TRIM(C${row}&""))>0`],
+        showErrorMessage: true,
+        errorTitle: "Missing last_name",
+        error: "last_name is required.",
+      };
       worksheet.getCell(`D${row}`).dataValidation = {
         type: "custom",
-        allowBlank: true,
-        formulae: [
-          `AND(ISNUMBER(SEARCH("@",D${row})),ISNUMBER(SEARCH(".",D${row})),FIND("@",D${row})>1,FIND("@",D${row})<LEN(D${row}))`,
-        ],
+        allowBlank: false,
+        formulae: [`ISNUMBER(SEARCH("@",D${row}))`],
         showErrorMessage: true,
         errorTitle: "Invalid email",
-        error: "Please enter a valid email format.",
+        error: "email is required and must contain @.",
       };
       worksheet.getCell(`F${row}`).dataValidation = {
         type: "list",
@@ -1071,20 +1096,21 @@ export default function HeadofSchool() {
     if (!file) return;
     try {
       setImportMessage("Importing staff records...");
+      setImportErrors([]);
       const result = await importHosStaffDirectory(file);
+      if (result.failedCount > 0) {
+        setImportMessage(result.message || "Import failed. No records were saved.");
+        setImportErrors(staffImportErrorLines(result));
+        return;
+      }
       await refreshStaffAndAssignments();
       setSelectedPerson(null);
-      if (result.failedCount > 0) {
-        const firstFailure = result.items.find((item) => !item.imported);
-        const detail = firstFailure?.messages?.join("; ") || "Some rows failed validation.";
-        setImportMessage(
-          `Imported ${result.importedCount} staff records; ${result.failedCount} failed. ${detail}`
-        );
-      } else {
-        setImportMessage(`Imported ${result.importedCount} staff records into the database.`);
-      }
-    } catch {
-      setImportMessage("Import failed: please upload a valid .xlsx template file.");
+      setImportMessage(`Imported ${result.importedCount} staff records into the database.`);
+    } catch (error) {
+      const axiosError = error as AxiosError<HosStaffImportResponse>;
+      const payload = axiosError.response?.data;
+      setImportMessage(payload?.message || "Import failed: please upload a valid .xlsx template file.");
+      setImportErrors(staffImportErrorLines(payload));
     } finally {
       event.target.value = "";
     }
@@ -2008,7 +2034,24 @@ export default function HeadofSchool() {
                   />
                 }
               />
-              {importMessage && <div className="mt-3 text-sm font-semibold text-[#2f4d9c]">{importMessage}</div>}
+              {importMessage && (
+                <div
+                  className={`mt-3 rounded border px-3 py-2 text-sm font-semibold ${
+                    importErrors.length
+                      ? "border-red-200 bg-red-50 text-red-700"
+                      : "border-blue-100 bg-blue-50 text-[#2f4d9c]"
+                  }`}
+                >
+                  <div>{importMessage}</div>
+                  {importErrors.length ? (
+                    <ul className="mt-2 list-disc space-y-1 pl-5 font-medium">
+                      {importErrors.map((line) => (
+                        <li key={line}>{line}</li>
+                      ))}
+                    </ul>
+                  ) : null}
+                </div>
+              )}
 
               <div className="mt-6 rounded-md border border-slate-200 bg-slate-50 p-4">
                 <FilterFormRow

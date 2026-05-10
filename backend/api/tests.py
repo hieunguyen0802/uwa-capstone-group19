@@ -1,12 +1,24 @@
 from datetime import timedelta
 from decimal import Decimal
+from io import BytesIO
 
-from django.contrib.auth.models import User
+from django.contrib.auth.models import Group, User
+from django.core.files.uploadedfile import SimpleUploadedFile
+from django.core.management import call_command
 from django.utils import timezone
 from rest_framework.test import APITestCase, APIClient
 from rest_framework_simplejwt.tokens import RefreshToken
 
-from .models import AuditLog, Department, OTPToken, Staff, WorkloadItem, WorkloadReport, WorkloadDistributionJob
+from .models import (
+    AuditLog,
+    Department,
+    OTPToken,
+    Staff,
+    StaffRoleAssignment,
+    WorkloadItem,
+    WorkloadReport,
+    WorkloadDistributionJob,
+)
 
 # 1×1 transparent PNG (valid binary for Pillow / ImageField).
 _MINI_PNG = (
@@ -26,6 +38,8 @@ class BaseTestCase(APITestCase):
     """
 
     def setUp(self):
+        call_command('initialize_rbac', verbosity=0)
+
         # Two departments — used to verify HOD cannot cross department boundaries
         self.dept_csse = Department.objects.create(name='CSSE')
         self.dept_physics = Department.objects.create(name='Physics')
@@ -89,6 +103,32 @@ class BaseTestCase(APITestCase):
         client.credentials(HTTP_AUTHORIZATION=f'Bearer {token}')
         return client
 
+    def _item_ids(self, res):
+        """Extract report id list from a paginated workload list response."""
+        return [item['id'] for item in res.data['items']]
+
+    def _submit_report(self, report, staff=None):
+        """Academic submits a WORKLOAD_REQUEST so HOD can act on the report."""
+        actor = staff or self.academic
+        AuditLog.objects.create(
+            report=report,
+            action_by=actor,
+            action_type='COMMENT',
+            comment='Submitting for review.',
+            changes={'kind': 'WORKLOAD_REQUEST', 'status': 'pending'},
+        )
+        report.status = 'PENDING'
+        report.save(update_fields=['status', 'updated_at'])
+
+    def _confirm_report_via_api(self, report, staff=None):
+        """Confirm one report via the public API."""
+        actor = staff or self.academic
+        client = self._auth_client(actor)
+        return client.post(
+            f'/api/academic/workloads/{report.report_id}/confirm/',
+            format='json',
+        )
+
 
 class TestOTPTokenModel(APITestCase):
     """Minimal structural coverage for the OTP persistence layer added in PR #38."""
@@ -135,11 +175,11 @@ class TestOTPTokenModel(APITestCase):
         )
 
 
-# ─── Test: require_role decorator ────────────────────────────────────────────
+# ─── Test: DRF permission classes ────────────────────────────────────────────
 
-class TestRequireRole(BaseTestCase):
+class TestRolePermissions(BaseTestCase):
     """
-    Verifies that the @require_role decorator blocks wrong roles with 403.
+    Verifies that DRF permission classes block wrong roles with 403.
     These are pure permission-boundary tests — no business logic involved.
     """
 
@@ -155,15 +195,27 @@ class TestRequireRole(BaseTestCase):
         self.assertEqual(res.status_code, 200)
 
     def test_unauthenticated_gets_401(self):
-        # No token at all — DRF JWT middleware returns 401 before our decorator runs
+        # No token at all — DRF JWT auth returns 401 before role permissions run.
         res = self.client.get('/api/supervisor/requests/')
         self.assertEqual(res.status_code, 401)
 
-    def test_hod_cannot_access_academic_endpoint(self):
-        # HOD calling an ACADEMIC-only endpoint must get 403
+    def test_hod_can_access_own_academic_endpoint(self):
+        # HOD can act as Academic for their own workload, but must not see
+        # another academic's report through the personal workload endpoint.
+        hod_report = WorkloadReport.objects.create(
+            staff=self.hod_csse,
+            academic_year=2025,
+            semester='S1',
+            snapshot_fte=self.hod_csse.fte,
+            snapshot_department=self.hod_csse.department,
+            status='INITIAL',
+        )
         client = self._auth_client(self.hod_csse)
         res = client.get('/api/workloads/my/')
-        self.assertEqual(res.status_code, 403)
+        self.assertEqual(res.status_code, 200)
+        report_ids = [item['report_id'] for item in res.data]
+        self.assertIn(str(hod_report.report_id), report_ids)
+        self.assertNotIn(str(self.report.report_id), report_ids)
 
     def test_academic_can_access_own_workloads(self):
         client = self._auth_client(self.academic)
@@ -347,15 +399,31 @@ class TestAcademicWorkloadAndQuery(BaseTestCase):
         )
         self.assertEqual(res.status_code, 400)
 
-    def test_hod_cannot_submit_query(self):
-        # POST /api/queries/ is ACADEMIC-only
+    def test_hod_can_submit_query_for_own_academic_report(self):
+        hod_report = WorkloadReport.objects.create(
+            staff=self.hod_csse,
+            academic_year=2025,
+            semester='S1',
+            snapshot_fte=self.hod_csse.fte,
+            snapshot_department=self.hod_csse.department,
+            status='INITIAL',
+        )
         client = self._auth_client(self.hod_csse)
         res = client.post(
             '/api/queries/',
-            data={'workload_report_id': str(self.report.report_id), 'comment': 'test'},
+            data={'workload_report_id': str(hod_report.report_id), 'comment': 'test'},
             format='json'
         )
-        self.assertEqual(res.status_code, 403)
+        self.assertEqual(res.status_code, 201)
+
+    def test_hod_cannot_submit_query_for_other_academic_report(self):
+        client = self._auth_client(self.hod_csse)
+        res = client.post(
+            '/api/queries/',
+            data={'workload_report_id': str(self.report.report_id), 'comment': 'Not mine.'},
+            format='json'
+        )
+        self.assertEqual(res.status_code, 404)
 
     def test_academic_cannot_query_other_academic_report(self):
         # Academic2 tries to query Academic1's report — should get 404
@@ -456,10 +524,14 @@ class TestAcademicContractEndpoints(BaseTestCase):
         )
         self.assertEqual(res.status_code, 400)
 
-    def test_hod_forbidden_on_academic_contract_endpoints(self):
+    def test_hod_can_access_academic_workloads_as_own_self(self):
+        # UserGuides section 2.1: HOD can act as Academic and view their own
+        # workload page, but not another academic's personal report.
         client = self._auth_client(self.hod_csse)
         res = client.get('/api/academic/workloads/')
-        self.assertEqual(res.status_code, 403)
+        self.assertEqual(res.status_code, 200)
+        returned_ids = [item['id'] for item in res.data.get('items', [])]
+        self.assertNotIn(str(self.report.report_id), returned_ids)
 
 
 # ─── Test: academic workload list filters ─────────────────────────────────────
@@ -552,7 +624,7 @@ class TestAcademicOwnership(BaseTestCase):
     via the new /api/academic/* endpoints.
 
     This is the RBAC boundary test for the academic role.
-    get_workload_queryset filters by staff=request.staff for ACADEMIC role,
+    The academic endpoints filter by staff=request.staff for Academic/HOD users,
     so any attempt to access another academic's report should return 404
     (not 403 — the record simply doesn't exist in their queryset).
     """
@@ -712,10 +784,11 @@ class TestAcademicVisualization(BaseTestCase):
         res = client.get('/api/academic/visualization/?semester=S1')
         self.assertEqual(res.status_code, 200)
 
-    def test_hod_forbidden_on_visualization(self):
+    def test_hod_can_access_visualization_as_own_self(self):
+        # UserGuides section 2.1: HOD acting as Academic can view their own visualization.
         client = self._auth_client(self.hod_csse)
         res = client.get('/api/academic/visualization/')
-        self.assertEqual(res.status_code, 403)
+        self.assertEqual(res.status_code, 200)
 
     def test_unauthenticated_gets_401_on_visualization(self):
         res = self.client.get('/api/academic/visualization/')
@@ -765,10 +838,11 @@ class TestAcademicExport(BaseTestCase):
         # File must still be a valid xlsx (non-empty bytes)
         self.assertGreater(len(res.content), 0)
 
-    def test_hod_forbidden_on_export(self):
+    def test_hod_can_export_own_academic_data(self):
+        # UserGuides section 2.1: HOD acting as Academic can export their own workload.
         client = self._auth_client(self.hod_csse)
         res = client.get('/api/academic/export/')
-        self.assertEqual(res.status_code, 403)
+        self.assertEqual(res.status_code, 200)
 
     def test_unauthenticated_gets_401_on_export(self):
         res = self.client.get('/api/academic/export/')
@@ -1082,6 +1156,86 @@ class TestHoSContractEndpoints(BaseTestCase):
         self.academic.refresh_from_db()
         self.assertEqual(self.academic.role, 'ACADEMIC')
 
+    def test_hos_v3_role_assignment_replaces_previous_active_role(self):
+        client = self._auth_client(self.hos)
+        first = client.post(
+            '/api/hos/role-assignments',
+            data={
+                'staffId': self.academic.staff_number,
+                'role': 'HoD',
+                'department': 'Physics',
+                'permissions': ['View Workload'],
+            },
+            format='json',
+        )
+        self.assertEqual(first.status_code, 201)
+
+        second = client.post(
+            '/api/hos/role-assignments',
+            data={
+                'staffId': self.academic.staff_number,
+                'role': 'Admin',
+                'department': 'Senior School Coordinator',
+                'permissions': ['Distribute Workload to Departments'],
+            },
+            format='json',
+        )
+        self.assertEqual(second.status_code, 201)
+
+        first_assignment = StaffRoleAssignment.objects.get(assignment_id=first.data['id'])
+        self.assertEqual(first_assignment.status, 'disabled')
+
+        self.academic.refresh_from_db()
+        self.assertEqual(self.academic.role, 'SCHOOL_OPS')
+        self.assertEqual(self.academic.department.name, 'Physics')
+        self.assertFalse(Department.objects.filter(name='Senior School Coordinator').exists())
+
+        listing = client.get('/api/hos/role-assignments')
+        self.assertEqual(listing.status_code, 200)
+        rows = [row for row in listing.data['items'] if row['staffId'] == self.academic.staff_number]
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[0]['role'], 'Admin')
+        self.assertEqual(rows[0]['status'], 'active')
+
+    def test_hos_v3_admin_assignment_grants_ops_group_and_permission(self):
+        hos_client = self._auth_client(self.hos)
+        create = hos_client.post(
+            '/api/hos/role-assignments',
+            data={
+                'staffId': self.academic.staff_number,
+                'role': 'Admin',
+                'department': 'Senior School Coordinator',
+                'permissions': ['Distribute Workload to Departments'],
+            },
+            format='json',
+        )
+        self.assertEqual(create.status_code, 201)
+
+        self.academic.refresh_from_db()
+        self.academic.user = User.objects.get(pk=self.academic.user_id)
+        self.assertEqual(self.academic.role, 'SCHOOL_OPS')
+        self.assertTrue(self.academic.user.groups.filter(name='SCHOOL_OPS').exists())
+        self.assertTrue(self.academic.user.has_perm('api.access_school_ops_api'))
+
+        assigned_client = self._auth_client(self.academic)
+        ops_res = assigned_client.get('/api/admin/workload-requests/')
+        self.assertEqual(ops_res.status_code, 200)
+
+        disable = hos_client.patch(
+            f"/api/hos/role-assignments/{create.data['id']}/status",
+            data={'status': 'disabled', 'reason': 'Permission no longer required'},
+            format='json',
+        )
+        self.assertEqual(disable.status_code, 200)
+
+        self.academic.refresh_from_db()
+        self.academic.user = User.objects.get(pk=self.academic.user_id)
+        self.assertEqual(self.academic.role, 'ACADEMIC')
+        self.assertFalse(self.academic.user.groups.filter(name='SCHOOL_OPS').exists())
+        self.assertFalse(self.academic.user.has_perm('api.access_school_ops_api'))
+        denied = assigned_client.get('/api/admin/workload-requests/')
+        self.assertEqual(denied.status_code, 403)
+
     def test_hos_visualization_contract_shape(self):
         client = self._auth_client(self.hos)
         res = client.get('/api/headofschool/visualization/?from_year=2024&to_year=2026&semester=All')
@@ -1264,6 +1418,14 @@ class TestAdminOpsContract(BaseTestCase):
         res = client.get('/api/admin/workload-requests/')
         self.assertEqual(res.status_code, 403)
 
+    def test_admin_scope_requires_django_permission(self):
+        group = Group.objects.get(name='SCHOOL_OPS')
+        group.permissions.remove(*group.permissions.filter(codename='access_school_ops_api'))
+
+        client = self._auth_client(self.ops)
+        res = client.get('/api/admin/workload-requests/')
+        self.assertEqual(res.status_code, 403)
+
     def test_distribute_creates_job_record(self):
         client = self._auth_client(self.ops)
         before = WorkloadDistributionJob.objects.count()
@@ -1296,6 +1458,83 @@ class TestAdminOpsContract(BaseTestCase):
         self.assertEqual(disabled.status_code, 200)
         self.assertEqual(disabled.data['data']['status'], 'disabled')
 
+        active_listing = client.get('/api/admin/role-assignments/')
+        self.assertEqual(active_listing.status_code, 200)
+        active_ids = {row['id'] for row in active_listing.data['data']['items']}
+        self.assertNotIn(assignment_id, active_ids)
+
+        history_listing = client.get('/api/admin/role-assignments/?includeDisabled=true')
+        self.assertEqual(history_listing.status_code, 200)
+        history_ids = {row['id'] for row in history_listing.data['data']['items']}
+        self.assertIn(assignment_id, history_ids)
+
+    def test_admin_role_assignment_replaces_previous_active_role(self):
+        client = self._auth_client(self.ops)
+        first = client.post('/api/admin/role-assignments/', {
+            'staff_id': self.academic.staff_number,
+            'role': 'HoD',
+            'department': self.dept_physics.name,
+            'permissions': ['View Workload'],
+        }, format='json')
+        self.assertEqual(first.status_code, 201)
+        self.academic.refresh_from_db()
+        self.assertEqual(self.academic.role, 'HOD')
+        self.assertEqual(self.academic.department, self.dept_physics)
+
+        second = client.post('/api/admin/role-assignments/', {
+            'staff_id': self.academic.staff_number,
+            'role': 'Admin',
+            'department': 'Senior School Coordinator',
+            'permissions': ['Distribute Workload to Departments'],
+        }, format='json')
+        self.assertEqual(second.status_code, 201)
+
+        first_assignment = StaffRoleAssignment.objects.get(assignment_id=first.data['data']['id'])
+        self.assertEqual(first_assignment.status, 'disabled')
+        self.assertEqual(first_assignment.disable_reason, 'Superseded by a newer role assignment.')
+
+        active = StaffRoleAssignment.objects.filter(staff=self.academic, status='active')
+        self.assertEqual(active.count(), 1)
+        self.assertEqual(active.get().assignment_id, second.data['data']['id'])
+
+        self.academic.refresh_from_db()
+        self.assertEqual(self.academic.role, 'SCHOOL_OPS')
+        self.assertTrue(self.academic.user.groups.filter(name='SCHOOL_OPS').exists())
+
+        listing = client.get('/api/admin/role-assignments/')
+        self.assertEqual(listing.status_code, 200)
+        rows = [row for row in listing.data['data']['items'] if row['staff_id'] == self.academic.staff_number]
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[0]['id'], second.data['data']['id'])
+
+    def test_admin_role_assignment_disable_unknown_latest_role_resyncs_group(self):
+        client = self._auth_client(self.ops)
+        self.academic.role = 'HOD'
+        self.academic.save(update_fields=['role', 'updated_at'])
+        self.academic.user.groups.clear()
+
+        StaffRoleAssignment.objects.create(
+            staff=self.academic,
+            role_code='Legacy',
+            department_scope=self.dept_csse.name,
+            permissions=[],
+            status='active',
+        )
+        current = StaffRoleAssignment.objects.create(
+            staff=self.academic,
+            role_code='Admin',
+            department_scope='Senior School Coordinator',
+            permissions=[],
+            status='active',
+        )
+
+        disabled = client.post(f'/api/admin/role-assignments/{current.assignment_id}/disable/', {}, format='json')
+        self.assertEqual(disabled.status_code, 200)
+
+        self.academic.refresh_from_db()
+        self.assertEqual(self.academic.role, 'HOD')
+        self.assertTrue(self.academic.user.groups.filter(name='HOD').exists())
+
     def test_admin_export_manifest_and_download_roundtrip(self):
         client = self._auth_client(self.ops)
         manifest = client.get('/api/admin/export/')
@@ -1327,8 +1566,7 @@ class TestCodexAuditFixes(BaseTestCase):
         self.assertEqual(res.status_code, 401)
 
     def test_p1_report_history_authenticated_authorized_returns_200(self):
-        # Missing @require_role previously crashed with AttributeError for any
-        # authenticated caller. An authenticated HoD on their own department must now succeed.
+        # Authenticated HoD on their own department must succeed.
         client = self._auth_client(self.hod_csse)
         res = client.get(f'/api/reports/{self.report.report_id}/history/')
         self.assertEqual(res.status_code, 200)
@@ -1409,4 +1647,127 @@ class TestCodexAuditFixes(BaseTestCase):
         self.assertIn('APPROVE', action_types)
         self.assertIn('MODIFIED_BY_REIMPORT', action_types)
         self.assertIn('IMPORTED', action_types)
+
+
+class TestHoSStaffDirectoryImport(BaseTestCase):
+    def _staff_import_file(self, rows):
+        import openpyxl
+
+        workbook = openpyxl.Workbook()
+        worksheet = workbook.active
+        worksheet.append([
+            'staff_id',
+            'first_name',
+            'last_name',
+            'email',
+            'title',
+            'department',
+            'active_status',
+        ])
+        for row in rows:
+            worksheet.append(row)
+
+        stream = BytesIO()
+        workbook.save(stream)
+        return SimpleUploadedFile(
+            'staff.xlsx',
+            stream.getvalue(),
+            content_type='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+        )
+
+    def test_invalid_staff_import_rejects_whole_file_without_saving(self):
+        client = self._auth_client(self.hos)
+        upload = self._staff_import_file([
+            ['87654321', 'Jane', 'Doe', 'jane.doe@uwa.edu.au', 'Lecturer', 'Physics', 'Active'],
+            ['87654322', 'Bad', 'Email', 'bad-email', 'Lecturer', 'Physics', 'Active'],
+        ])
+
+        res = client.post('/api/hos/staff-directory/import', {'file': upload}, format='multipart')
+
+        self.assertEqual(res.status_code, 400)
+        self.assertFalse(res.data['success'])
+        self.assertEqual(res.data['importedCount'], 0)
+        self.assertEqual(res.data['failedCount'], 1)
+        self.assertFalse(Staff.objects.filter(staff_number='87654321').exists())
+        row_messages = res.data['items'][1]['messages']
+        self.assertIn('email must contain @', row_messages)
+
+    def test_staff_import_defaults_blank_active_status_to_active(self):
+        client = self._auth_client(self.hos)
+        upload = self._staff_import_file([
+            ['87654323', 'Active', 'Default', 'active.default@uwa.edu.au', 'Lecturer', 'Physics', ''],
+        ])
+
+        res = client.post('/api/hos/staff-directory/import', {'file': upload}, format='multipart')
+
+        self.assertEqual(res.status_code, 200)
+        self.assertTrue(res.data['success'])
+        staff = Staff.objects.get(staff_number='87654323')
+        self.assertTrue(staff.is_active)
+        self.assertEqual(staff.user.email, 'active.default@uwa.edu.au')
+
+
+class _PermissionRequest:
+    def __init__(self, user, staff):
+        self.user = user
+        self._cached_staff = staff
+
+
+class TestNativePermissionClasses(BaseTestCase):
+    def _check_permission(self, permission_cls, staff, expected):
+        from rest_framework.exceptions import PermissionDenied
+
+        request = _PermissionRequest(staff.user, staff)
+        try:
+            allowed = permission_cls().has_permission(request, view=None)
+        except PermissionDenied:
+            allowed = False
+        self.assertEqual(allowed, expected)
+
+    def test_role_permissions_match_current_contract(self):
+        from api.permissions import (
+            CanAccessSchoolOpsApi,
+            IsAcademicOrHoD,
+            IsApprover,
+            IsHoD,
+            IsHoS,
+            IsHoSOrSchoolOps,
+            IsSchoolOps,
+        )
+
+        self._check_permission(IsHoS, self.hos, True)
+        self._check_permission(IsHoS, self.ops, False)
+        self._check_permission(IsHoD, self.hod_csse, True)
+        self._check_permission(IsSchoolOps, self.ops, True)
+        self._check_permission(IsHoSOrSchoolOps, self.hos, True)
+        self._check_permission(IsHoSOrSchoolOps, self.ops, True)
+        self._check_permission(IsApprover, self.hod_csse, True)
+        self._check_permission(IsApprover, self.academic, False)
+        self._check_permission(IsAcademicOrHoD, self.academic, True)
+        self._check_permission(IsAcademicOrHoD, self.hod_csse, True)
+        self._check_permission(IsAcademicOrHoD, self.hos, False)
+        self._check_permission(CanAccessSchoolOpsApi, self.ops, True)
+        self._check_permission(CanAccessSchoolOpsApi, self.hos, True)
+        self._check_permission(CanAccessSchoolOpsApi, self.academic, False)
+
+    def test_native_permissions_preserve_inactive_code(self):
+        from rest_framework.exceptions import PermissionDenied
+        from api.permissions import IsHoS
+
+        self.hos.is_active = False
+        self.hos.save(update_fields=['is_active'])
+        request = _PermissionRequest(self.hos.user, self.hos)
+        with self.assertRaises(PermissionDenied) as cm:
+            IsHoS().has_permission(request, view=None)
+        self.assertEqual(cm.exception.detail.get('code'), 'ACCOUNT_INACTIVE')
+
+    def test_native_permissions_do_not_fallback_to_staff_role(self):
+        from rest_framework.exceptions import PermissionDenied
+        from api.permissions import IsHoD
+
+        self.hod_csse.user.groups.clear()
+        request = _PermissionRequest(self.hod_csse.user, self.hod_csse)
+        with self.assertRaises(PermissionDenied) as cm:
+            IsHoD().has_permission(request, view=None)
+        self.assertEqual(cm.exception.detail.get('code'), 'FORBIDDEN')
 
