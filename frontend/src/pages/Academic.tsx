@@ -456,6 +456,8 @@ function AcademicDetailModal({
   const hodReviewRequiresSubmission = String(item.hodReview ?? "")
     .trim()
     .toLowerCase() === "yes";
+  // Blocks confirm only while waiting for HoD — once approved the academic can self-confirm.
+  const hodReviewBlocksConfirm = hodReviewRequiresSubmission && item.status !== "approved";
 
   const fields: WorkloadDetailField[] = [
     { label: "Name", value: item.name },
@@ -481,9 +483,11 @@ function AcademicDetailModal({
     {
       label: "HoD Review",
       value: item.hodReview || "-",
-      inputClassName: hodReviewRequiresSubmission
+      inputClassName: hodReviewBlocksConfirm
         ? "border-red-400 bg-red-100 font-semibold text-red-800"
-        : "",
+        : hodReviewRequiresSubmission
+          ? "border-green-400 bg-green-100 font-semibold text-green-800"
+          : "",
     },
   ];
 
@@ -518,11 +522,11 @@ function AcademicDetailModal({
           <button
             type="button"
             onClick={onConfirm}
-            disabled={item.status === "pending" || hodReviewRequiresSubmission}
+            disabled={item.status === "pending" || hodReviewBlocksConfirm}
             className={`rounded-md px-6 py-2 text-sm font-semibold ${
               item.confirmation === "confirmed"
                 ? "bg-[#16a34a] text-white"
-                : item.status === "pending" || hodReviewRequiresSubmission
+                : item.status === "pending" || hodReviewBlocksConfirm
                   ? "cursor-not-allowed bg-slate-400 text-white"
                   : "bg-[#2f4d9c] text-white hover:bg-[#29458c]"
             }`}
