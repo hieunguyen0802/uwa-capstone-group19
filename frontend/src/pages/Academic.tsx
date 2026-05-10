@@ -301,7 +301,10 @@ function formatLocalDateTime(d: Date) {
 
 function academicConfirmationTimeCell(item: AcademicItem): string {
   if (item.confirmation !== "confirmed") return "";
-  return item.confirmationTime ?? "";
+  const raw = item.confirmationTime?.trim();
+  if (!raw) return "";
+  const d = new Date(raw);
+  return Number.isNaN(d.getTime()) ? raw : formatLocalDateTime(d);
 }
 
 function academicAssignedBy(item: AcademicItem) {

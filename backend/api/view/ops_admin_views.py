@@ -312,10 +312,10 @@ def _coerce_import_bool(value, default=None):
 
 
 def _get_distributed_time(report):
-    """Return the local-timezone timestamp when this report was distributed."""
+    """Return UTC ISO timestamp for distribution; the frontend converts to local timezone."""
     if not report.distributed_at:
         return ''
-    return timezone.localtime(report.distributed_at).strftime('%Y-%m-%d %H:%M')
+    return report.distributed_at.isoformat()
 
 
 def _get_operated_by_actor(report):
@@ -399,7 +399,7 @@ def _serialize_workload_row(report, items):
         'rate': int(float(report.snapshot_fte) * 100),
         'status': report.status.lower(),
         'confirmation': report.confirmation_status.lower(),
-        'confirmationTime': report.confirmation_at.strftime('%Y-%m-%d %H:%M') if report.confirmation_at else '',
+        'confirmationTime': report.confirmation_at.isoformat() if report.confirmation_at else '',
         'hours': total_hours,
         'supervisorNote': _get_supervisor_note(report),
         'operatedBy': actor_name,

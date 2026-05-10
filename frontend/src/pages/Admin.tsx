@@ -3853,7 +3853,7 @@ export default function SchoolofOperations() {
                               {statusFilter !== "all" && (
                                 <td className="px-3 py-3 text-right tabular-nums font-sans font-semibold text-slate-800">
                                   {statusFilter === "distributed"
-                                    ? (item.distributedTime || itemDisplayTime(item))
+                                    ? (item.distributedTime ? formatLocalDateTime(item.distributedTime) : itemDisplayTime(item))
                                     : itemDisplayTime(item)}
                                 </td>
                               )}

@@ -63,7 +63,7 @@ def _get_report_confirmation(report):
 def _get_confirmation_time(report):
     if not report.confirmation_at:
         return None
-    return report.confirmation_at.strftime('%Y-%m-%d %H:%M')
+    return report.confirmation_at.isoformat()
 
 
 def _build_department_conflict_keys(reports):
@@ -127,9 +127,9 @@ def _get_assigned_by(report):
 
 
 def _get_pushed_at(report) -> str:
-    """Return local-timezone formatted distribution timestamp; falls back to created_at."""
+    """Return UTC ISO timestamp for distribution; the frontend converts to local timezone."""
     if report.distributed_at:
-        return timezone.localtime(report.distributed_at).strftime('%Y-%m-%d %H:%M')
+        return report.distributed_at.isoformat()
     # Fallback for records distributed before the distributed_at field existed
     log = AuditLog.objects.filter(
         report=report,
@@ -138,7 +138,7 @@ def _get_pushed_at(report) -> str:
     dt = log.created_at if log else report.created_at
     if not dt:
         return ''
-    return timezone.localtime(dt).strftime('%Y-%m-%d %H:%M')
+    return dt.isoformat()
 
 
 def _calc_target_teaching_hours(report) -> float:
