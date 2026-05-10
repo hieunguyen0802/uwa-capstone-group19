@@ -284,11 +284,13 @@ def _coerce_import_bool(value, default=None):
 
 
 def _get_distributed_time(report):
-    """Return the timestamp when this report was distributed (status set to APPROVED)."""
+    """Return the local-timezone timestamp when this report was distributed."""
     log = AuditLog.objects.filter(
         report=report, action_type__in=['APPROVE', 'APPROVED']
     ).order_by('-created_at').first()
-    return log.created_at.strftime('%Y-%m-%d %H:%M') if log else ''
+    if not log:
+        return ''
+    return timezone.localtime(log.created_at).strftime('%Y-%m-%d %H:%M')
 
 
 def _get_operated_by_actor(report):

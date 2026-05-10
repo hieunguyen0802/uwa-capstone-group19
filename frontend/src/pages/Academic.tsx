@@ -48,6 +48,8 @@ type AcademicItem = {
   /** Admin (or delegate) who assigned this workload task to the staff member. */
   assignedBy?: string;
   pushedAt?: string;
+  academicYear?: number;
+  semester?: string;
   /** Display-only field for Academic detail modal (mirrors School Ops detail layout). */
   employmentType?: "Full-time" | "Part-time" | string;
   /** Display-only field for Academic detail modal (mirrors School Ops detail layout). */
@@ -181,6 +183,8 @@ type AcademicWorkloadRowResponse = {
   supervisorNote?: string | null;
   assignedBy?: string | null;
   pushedAt?: string | null;
+  academicYear?: number | null;
+  semester?: string | null;
   cancelled?: boolean;
 };
 
@@ -247,6 +251,8 @@ function mapAcademicRowToItem(row: AcademicWorkloadRowResponse): AcademicItem {
     supervisorNote: row.supervisorNote ?? "",
     assignedBy: row.assignedBy ?? "",
     pushedAt: row.pushedAt ?? "",
+    academicYear: row.academicYear ?? undefined,
+    semester: row.semester ?? undefined,
     cancelled: Boolean(row.cancelled),
   };
 }
@@ -748,7 +754,8 @@ export default function Academic() {
   async function loadAcademicWorkloadDetail(id: number, backendId: string) {
     const detail = await apiJson<AcademicWorkloadDetailResponse>(`/api/academic/workloads/${backendId}/`);
     const mapped = mapAcademicDetailToItem(detail);
-    setItems((prev) => prev.map((item) => (item.id === id ? { ...item, ...mapped } : item)));
+    // Preserve the original local `id` so detailId still resolves after the spread.
+    setItems((prev) => prev.map((item) => (item.id === id ? { ...item, ...mapped, id } : item)));
     return mapped;
   }
 
@@ -831,6 +838,17 @@ export default function Academic() {
     () => visualizationData.reportingPeriodLabel || "N/A",
     [visualizationData]
   );
+
+  // Dynamic title driven by the first loaded item's year/semester (or current date fallback).
+  const workloadReportTitle = useMemo(() => {
+    const first = items[0];
+    if (first?.academicYear && first?.semester) {
+      return `Workload Report ${first.academicYear}-${first.semester}`;
+    }
+    const y = new Date().getFullYear();
+    const sem = new Date().getMonth() < 6 ? "S1" : "S2";
+    return `Workload Report ${y}-${sem}`;
+  }, [items]);
 
   function toggleRow(id: number) {
     setSelectedIds((prev) => {
@@ -1183,7 +1201,7 @@ export default function Academic() {
             <SearchButton onClick={handleSearch} />
           </div>
 
-          <div className="mt-10 text-4xl font-semibold text-slate-700">Workload Report Sem 1 - 2025</div>
+          <div className="mt-10 text-4xl font-semibold text-slate-700">{workloadReportTitle}</div>
 
           <div className="mt-6 rounded-md bg-[#eef3fb] p-4 ring-1 ring-slate-200">
             <div className="overflow-x-auto">

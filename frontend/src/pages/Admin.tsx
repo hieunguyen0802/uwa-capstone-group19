@@ -103,6 +103,8 @@ type MockRequest = {
   hodReview?: "yes" | "no";
   /** ISO timestamp set at the moment of workload import (local machine time). */
   importedAt?: string;
+  /** Local-timezone timestamp when this workload was distributed (APPROVED). */
+  distributedTime?: string;
   /** UUID from backend WorkloadReport — present when record was loaded from the API. */
   backendId?: string;
   /** Snapshot copied to Academic detail modal (keeps Ops/Academic detail consistent). */
@@ -1028,6 +1030,7 @@ export default function SchoolofOperations() {
         workloadNewStaff: Boolean(row.workloadNewStaff),
         hodReview: row.hodReview === "yes" ? "yes" : "no",
         importedAt: row.createdAt ?? undefined,
+        distributedTime: row.distributedTime ?? undefined,
       }));
       setPending(mapped);
       if (persistQuery) {
@@ -1665,7 +1668,6 @@ export default function SchoolofOperations() {
 
   function displayStatusForOpsRow(row: MockRequest): "pending" | "approved" | "rejected" | "-" {
     if (row.cancelled) return row.status;
-    if (row.importedFromTemplate && row.status === "pending") return "-";
     return row.status;
   }
 
@@ -3724,8 +3726,16 @@ export default function SchoolofOperations() {
                         <th className="px-3 py-2 text-center">STATUS</th>
                         <th className="px-3 py-2 text-center whitespace-nowrap">TOTAL WORK HOURS</th>
                         <th className="px-3 py-2">CONFIRMATION</th>
-                        <th className="px-3 py-2 text-right whitespace-nowrap">CREATE TIME</th>
-                        <th className="px-3 py-2 whitespace-nowrap">CREATED BY</th>
+                        {statusFilter !== "all" && (
+                          <th className="px-3 py-2 text-right whitespace-nowrap">
+                            {statusFilter === "distributed" ? "DISTRIBUTED TIME" : "CREATE TIME"}
+                          </th>
+                        )}
+                        {statusFilter !== "all" && (
+                          <th className="px-3 py-2 whitespace-nowrap">
+                            {statusFilter === "distributed" ? "DISTRIBUTED BY" : "CREATED BY"}
+                          </th>
+                        )}
                       </tr>
                     </thead>
                     <tbody className="divide-y divide-slate-200 bg-white">
@@ -3816,19 +3826,25 @@ export default function SchoolofOperations() {
                                   </span>
                                 )}
                               </td>
-                              <td className="px-3 py-3 text-right tabular-nums font-sans font-semibold text-slate-800">
-                                {itemDisplayTime(item)}
-                              </td>
-                              <td className="px-3 py-3 text-sm text-slate-700">
-                                {hasOperator(item) ? (
-                                  <div className="space-y-1">
-                                    <div className="text-slate-700">{item.operatedBy}</div>
-                                    <div className="text-xs text-slate-400">{item.operatedByStaffId}</div>
-                                  </div>
-                                ) : (
-                                  "—"
-                                )}
-                              </td>
+                              {statusFilter !== "all" && (
+                                <td className="px-3 py-3 text-right tabular-nums font-sans font-semibold text-slate-800">
+                                  {statusFilter === "distributed"
+                                    ? (item.distributedTime || itemDisplayTime(item))
+                                    : itemDisplayTime(item)}
+                                </td>
+                              )}
+                              {statusFilter !== "all" && (
+                                <td className="px-3 py-3 text-sm text-slate-700">
+                                  {hasOperator(item) ? (
+                                    <div className="space-y-1">
+                                      <div className="text-slate-700">{item.operatedBy}</div>
+                                      <div className="text-xs text-slate-400">{item.operatedByStaffId}</div>
+                                    </div>
+                                  ) : (
+                                    "—"
+                                  )}
+                                </td>
+                              )}
                             </tr>
                           );
                         })}

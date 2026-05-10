@@ -97,6 +97,18 @@ def _get_assigned_by(report):
     return log.action_by.user.get_full_name().strip() or log.action_by.user.username
 
 
+def _get_pushed_at(report) -> str:
+    """Return local-timezone formatted APPROVED timestamp; falls back to created_at."""
+    log = AuditLog.objects.filter(
+        report=report,
+        action_type__in=['APPROVE', 'APPROVED'],
+    ).order_by('-created_at').first()
+    dt = log.created_at if log else report.created_at
+    if not dt:
+        return ''
+    return timezone.localtime(dt).strftime('%Y-%m-%d %H:%M')
+
+
 def _calc_target_teaching_hours(report) -> float:
     """Derive target teaching hours from target_teaching_pct × FTE × 1725 hrs/year."""
     if report.target_teaching_pct is None or report.snapshot_fte is None:
@@ -119,10 +131,14 @@ def _serialize_workload_row(report, confirmation, anomaly_result=None, report_it
     staff_user = report.staff.user
     full_name = staff_user.get_full_name().strip() or staff_user.username
     items = report_items if report_items is not None else list(report.items.all())
-    total_hours = sum((item.allocated_hours for item in items), Decimal('0.00'))
+    items_hours = sum((item.allocated_hours for item in items), Decimal('0.00'))
 
     if anomaly_result is None:
         anomaly_result = evaluate_mvp_anomaly(report)
+
+    # Include research residual so total matches the 5-tab breakdown in School Ops
+    research_hrs = round(float(anomaly_result['metrics']['research_pts']) * 17.25, 2)
+    total_hours = round(_to_decimal_hours(items_hours) + research_hrs, 2)
 
     return {
         'id': str(report.report_id),
@@ -131,7 +147,9 @@ def _serialize_workload_row(report, confirmation, anomaly_result=None, report_it
         'department': report.snapshot_department.name if report.snapshot_department_id else None,
         'title': report.staff.title or '',
         'notes': _get_supervisor_note(report),
-        'hours': _to_decimal_hours(total_hours),
+        'hours': total_hours,
+        'academicYear': report.academic_year,
+        'semester': report.semester,
         'targetTeachingRatio': float(report.target_teaching_pct) if report.target_teaching_pct is not None else None,
         'teachingTargetHours': _calc_target_teaching_hours(report),
         'status': report.status.lower(),
@@ -139,7 +157,7 @@ def _serialize_workload_row(report, confirmation, anomaly_result=None, report_it
         'confirmationTime': _get_confirmation_time(report),
         'supervisorNote': _get_supervisor_note(report),
         'assignedBy': _get_assigned_by(report),
-        'pushedAt': report.created_at.strftime('%Y-%m-%d %H:%M') if report.created_at else '',
+        'pushedAt': _get_pushed_at(report),
         'cancelled': report.status == 'REJECTED',
         'isAbnormal': anomaly_result['is_anomaly'],
         'anomalyReasons': anomaly_result['reasons'],
@@ -239,8 +257,15 @@ def academic_workload_detail(request, id):
     report_items = list(report.items.all())
     anomaly_result = evaluate_mvp_anomaly(report, department_conflict=_is_department_conflict(report))
     confirmation = _get_report_confirmation(report)
-    total_hours = sum((i.allocated_hours for i in report_items), Decimal('0.00'))
+    items_hours = sum((i.allocated_hours for i in report_items), Decimal('0.00'))
     staff_user = report.staff.user
+
+    research_hrs = round(float(anomaly_result['metrics']['research_pts']) * 17.25, 2)
+    total_hours = round(_to_decimal_hours(items_hours) + research_hrs, 2)
+
+    breakdown = _serialize_breakdown(report_items)
+    if research_hrs > 0:
+        breakdown['Research (residual)'] = [{'name': 'Research (residual)', 'hours': research_hrs}]
 
     return Response({
         'id': str(report.report_id),
@@ -248,7 +273,9 @@ def academic_workload_detail(request, id):
         'employeeId': report.staff.staff_number,
         'title': '',
         'notes': _get_supervisor_note(report),
-        'hours': _to_decimal_hours(total_hours),
+        'hours': total_hours,
+        'academicYear': report.academic_year,
+        'semester': report.semester,
         'targetTeachingRatio': float(report.target_teaching_pct) if report.target_teaching_pct is not None else None,
         'teachingTargetHours': _calc_target_teaching_hours(report),
         'actualTeachingRatio': _calc_actual_teaching_ratio(report_items),
@@ -257,13 +284,13 @@ def academic_workload_detail(request, id):
         'confirmationTime': _get_confirmation_time(report),
         'supervisorNote': _get_supervisor_note(report),
         'assignedBy': _get_assigned_by(report),
-        'pushedAt': report.created_at.strftime('%Y-%m-%d %H:%M') if report.created_at else '',
+        'pushedAt': _get_pushed_at(report),
         'cancelled': report.status == 'REJECTED',
         'validation': {
             'isAbnormal': anomaly_result['is_anomaly'],
             'reason': ', '.join(anomaly_result['reasons']),
         },
-        'breakdown': _serialize_breakdown(report_items),
+        'breakdown': breakdown,
     })
 
 
