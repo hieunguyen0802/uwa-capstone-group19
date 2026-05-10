@@ -34,7 +34,9 @@ from api.models import (
     Department,
     Staff,
     StaffRoleAssignment,
+    SystemConfig,
     WorkloadItem,
+    WorkloadDistributionJob,
     WorkloadReport,
 )
 from api.services.workload_service import (
@@ -61,6 +63,10 @@ ACADEMIC_IMPORT_DEPARTMENTS = (
 MAX_EXCEL_UPLOAD_BYTES = 5 * 1024 * 1024
 EXPORT_MEDIA_SUBDIR = 'exports'
 TEMPLATE_MEDIA_SUBDIR = 'templates'
+OPS_CURRENT_YEAR_CONFIG_KEY = 'OPS_CURRENT_WORKLOAD_YEAR'
+OPS_CURRENT_SEMESTER_CONFIG_KEY = 'OPS_CURRENT_WORKLOAD_SEMESTER'
+OPS_CURRENT_YEAR_DESCRIPTION = 'Active School Ops workload cycle year shown by default in the workload management tab.'
+OPS_CURRENT_SEMESTER_DESCRIPTION = 'Active School Ops workload cycle semester shown by default in the workload management tab.'
 
 
 class AdminImportThrottle(UserRateThrottle):
@@ -108,6 +114,136 @@ def _distribution_year_bounds(year_int: int) -> bool:
     return 2000 <= year_int <= 2100
 
 
+def _ops_calendar_cycle(now=None):
+    """
+    Return the calendar-driven School Ops cycle.
+
+    S1: 01 Jan – 30 Jun
+    S2: 01 Jul – 31 Dec
+    """
+    current = timezone.localtime(now or timezone.now())
+    if current.month >= 7:
+        return current.year, 'S2'
+    return current.year, 'S1'
+
+
+def _ops_cycle_rank(year_int: int, semester: str):
+    semester_rank = {'S1': 1, 'S2': 2, 'FULL_YEAR': 3}.get(semester, 0)
+    return year_int, semester_rank
+
+
+def _ops_period_label(year_int: int | None, semester: str | None):
+    if year_int is None:
+        return ''
+    if not semester or semester == 'ALL':
+        return str(year_int)
+    return f'{year_int}-{semester}'
+
+
+def _set_system_config_value(config_key: str, config_value: str, value_type: str, description: str, staff=None):
+    SystemConfig.objects.update_or_create(
+        config_key=config_key,
+        defaults={
+            'config_value': str(config_value),
+            'value_type': value_type,
+            'description': description,
+            'updated_by': staff,
+        },
+    )
+
+
+def _persist_ops_cycle(year_int: int, semester: str, staff=None, source='manual'):
+    _set_system_config_value(
+        OPS_CURRENT_YEAR_CONFIG_KEY,
+        str(year_int),
+        'INT',
+        OPS_CURRENT_YEAR_DESCRIPTION,
+        staff,
+    )
+    _set_system_config_value(
+        OPS_CURRENT_SEMESTER_CONFIG_KEY,
+        semester,
+        'STR',
+        OPS_CURRENT_SEMESTER_DESCRIPTION,
+        staff,
+    )
+    if staff is not None:
+        AuditLog.objects.create(
+            report=None,
+            action_by=staff,
+            action_type='CONFIG_CHANGE',
+            comment=f'School Ops cycle set to {year_int}-{semester}',
+            changes={
+                'config_scope': 'OPS_CURRENT_CYCLE',
+                'year': year_int,
+                'semester': semester,
+                'source': source,
+            },
+        )
+
+
+def _ensure_ops_active_cycle(staff=None):
+    calendar_year, calendar_semester = _ops_calendar_cycle()
+
+    year_config = SystemConfig.objects.filter(config_key=OPS_CURRENT_YEAR_CONFIG_KEY).first()
+    semester_config = SystemConfig.objects.filter(config_key=OPS_CURRENT_SEMESTER_CONFIG_KEY).first()
+
+    if not year_config or not semester_config:
+        _persist_ops_cycle(calendar_year, calendar_semester, staff, source='calendar-init')
+        return calendar_year, calendar_semester
+
+    try:
+        stored_year = int(year_config.config_value)
+    except (TypeError, ValueError):
+        stored_year = calendar_year
+
+    stored_semester = (semester_config.config_value or '').strip().upper()
+    if stored_semester not in {'S1', 'S2'}:
+        stored_semester = calendar_semester
+
+    if _ops_cycle_rank(stored_year, stored_semester) < _ops_cycle_rank(calendar_year, calendar_semester):
+        _persist_ops_cycle(calendar_year, calendar_semester, staff, source='calendar-rollover')
+        return calendar_year, calendar_semester
+
+    return stored_year, stored_semester
+
+
+def _resolve_ops_period(request, staff):
+    active_year, active_semester = _ensure_ops_active_cycle(staff)
+    raw_year = (request.GET.get('year') or '').strip()
+    raw_semester = (request.GET.get('semester') or '').strip().upper()
+
+    explicit_year = None
+    if raw_year:
+        try:
+            explicit_year = int(raw_year)
+        except (TypeError, ValueError):
+            explicit_year = None
+
+    if raw_semester not in {'', 'ALL', 'S1', 'S2', 'FULL_YEAR'}:
+        raw_semester = ''
+
+    if explicit_year is None and raw_semester in {'S1', 'S2', 'FULL_YEAR'}:
+        explicit_year = active_year
+
+    effective_year = explicit_year if explicit_year is not None else active_year
+    if explicit_year is None and raw_semester in {'', 'ALL'}:
+        effective_semester = active_semester
+    elif raw_semester in {'', 'ALL'}:
+        effective_semester = None
+    else:
+        effective_semester = raw_semester
+
+    return {
+        'active_year': active_year,
+        'active_semester': active_semester,
+        'effective_year': effective_year,
+        'effective_semester': effective_semester,
+        'active_label': _ops_period_label(active_year, active_semester),
+        'effective_label': _ops_period_label(effective_year, effective_semester),
+    }
+
+
 def _normalize_front_status(value: str):
     cleaned = (value or '').strip().lower()
     if cleaned in {'initial', 'pending', 'approved', 'rejected'}:
@@ -149,29 +285,50 @@ def _coerce_import_bool(value, default=None):
 
 def _get_distributed_time(report):
     """Return the timestamp when this report was distributed (status set to APPROVED)."""
-    log = AuditLog.objects.filter(report=report, action_type='APPROVE').order_by('-created_at').first()
+    log = AuditLog.objects.filter(
+        report=report, action_type__in=['APPROVE', 'APPROVED']
+    ).order_by('-created_at').first()
     return log.created_at.strftime('%Y-%m-%d %H:%M') if log else ''
 
 
-def _get_operated_by(report):
-    """Return the name of the staff who last approved/rejected this report."""
-    log = AuditLog.objects.filter(
-        report=report, action_type__in=['APPROVE', 'REJECT']
-    ).select_related('action_by__user').order_by('-created_at').first()
-    if not log or not log.action_by:
-        return ''
-    return log.action_by.user.get_full_name().strip() or log.action_by.user.username
+def _get_operated_by_actor(report):
+    """
+    Return the staff member responsible for the current row state.
+
+    - APPROVED / REJECTED rows: last approver/rejector
+    - INITIAL rows (Pending Distribution): importer / re-importer
+    """
+    if report.status == 'INITIAL':
+        action_types = ['IMPORTED', 'MODIFIED_BY_REIMPORT']
+    elif report.status == 'REJECTED':
+        action_types = ['REJECT', 'REJECTED']
+    else:
+        action_types = ['APPROVE', 'APPROVED']
+
+    return (
+        AuditLog.objects.filter(report=report, action_type__in=action_types)
+        .select_related('action_by__user')
+        .order_by('-created_at')
+        .first()
+    )
 
 
 def _serialize_workload_row(report, items):
     """Serialize a WorkloadReport to the school-operations contract list shape."""
     staff_user = report.staff.user
     full_name = staff_user.get_full_name().strip() or staff_user.username
+    actor_log = _get_operated_by_actor(report)
+    actor = actor_log.action_by if actor_log else None
+    actor_name = ''
+    actor_staff_number = ''
+    if actor:
+        actor_name = actor.user.get_full_name().strip() or actor.user.username
+        actor_staff_number = actor.staff_number
     items_hours = sum((i.allocated_hours for i in items), Decimal('0.00'))
     first_teaching = next((i for i in items if i.category == 'TEACHING' and i.unit_code), None)
-    sem = report.semester
-    sem_label = f"Sem{sem[-1]}" if sem.startswith('S') else sem
-    period_label = f"{report.academic_year}-{sem[-1]}" if sem.startswith('S') else str(report.academic_year)
+    sem = report.semester or ''
+    sem_label = sem
+    period_label = _ops_period_label(report.academic_year, sem)
 
     # Include research residual in total so list badge matches the 5-tab detail sum.
     anomaly_result = evaluate_mvp_anomaly(report)
@@ -191,9 +348,12 @@ def _serialize_workload_row(report, items):
         'department': report.snapshot_department.name,
         'rate': int(float(report.snapshot_fte) * 100),
         'status': report.status.lower(),
+        'confirmation': report.confirmation_status.lower(),
+        'confirmationTime': report.confirmation_at.strftime('%Y-%m-%d %H:%M') if report.confirmation_at else '',
         'hours': total_hours,
         'supervisorNote': _get_supervisor_note(report),
-        'operatedBy': _get_operated_by(report),
+        'operatedBy': actor_name,
+        'operatedByStaffId': actor_staff_number,
         'targetTeachingRatio': float(report.target_teaching_pct) if report.target_teaching_pct is not None else None,
         'teachingTargetHours': None,
         'cancelled': False,
@@ -395,9 +555,13 @@ def _staff_from_body_or_path(request, lookup_id: str):
 @require_role(*ADMIN_ROLES)
 def admin_workload_requests(request):
     """GET /api/school-operations/workloads  (also /api/admin/workload-requests/)"""
+    cycle = _resolve_ops_period(request, request.staff)
     base_qs = _admin_reports_qs(request.staff).prefetch_related('items').select_related(
         'staff__user', 'staff__department', 'snapshot_department'
     )
+    base_qs = base_qs.filter(academic_year=cycle['effective_year'])
+    if cycle['effective_semester']:
+        base_qs = base_qs.filter(semester=cycle['effective_semester'])
 
     qs = base_qs
 
@@ -434,14 +598,6 @@ def admin_workload_requests(request):
     if dept_name:
         qs = qs.filter(snapshot_department__name=dept_name)
 
-    year = request.GET.get('year', '').strip()
-    if year:
-        qs = qs.filter(academic_year=year)
-
-    semester = request.GET.get('semester', '').strip()
-    if semester and semester.upper() != 'ALL':
-        qs = qs.filter(semester=semester.upper())
-
     qs = qs.order_by('created_at')
 
     counts = {
@@ -476,6 +632,16 @@ def admin_workload_requests(request):
                 'totalPages': paginator.num_pages,
             },
             'counts': counts,
+            'currentPeriod': {
+                'year': cycle['active_year'],
+                'semester': cycle['active_semester'],
+                'label': cycle['active_label'],
+            },
+            'effectivePeriod': {
+                'year': cycle['effective_year'],
+                'semester': cycle['effective_semester'] or 'ALL',
+                'label': cycle['effective_label'],
+            },
         },
     })
 
@@ -790,6 +956,19 @@ def admin_distribute_workloads(request):
 
     for report in reports:
         try:
+            if report.academic_year != year_int or report.semester != semester:
+                failed.append({
+                    'workloadId': str(report.report_id),
+                    'staffId': report.staff.staff_number,
+                    'name': report.staff.user.get_full_name(),
+                    'error': (
+                        f'Workload period is {report.academic_year}-{report.semester}, '
+                        f'but the selected cycle is {year_int}-{semester}'
+                    ),
+                    'errorCode': 'PERIOD_MISMATCH',
+                })
+                continue
+
             # ── Check 3: must be Pending Distribution (INITIAL) ────────────────
             if report.status != 'INITIAL':
                 failed.append({
@@ -891,6 +1070,26 @@ def admin_distribute_workloads(request):
                 'errorCode': 'UNKNOWN_ERROR',
             })
 
+    cycle_advanced = False
+    if succeeded:
+        active_year, active_semester = _ensure_ops_active_cycle(request.staff)
+        cycle_advanced = _ops_cycle_rank(year_int, semester) != _ops_cycle_rank(active_year, active_semester)
+        _persist_ops_cycle(
+            year_int,
+            semester,
+            request.staff,
+            source='manual-distribution',
+        )
+        WorkloadDistributionJob.objects.create(
+            academic_year=year_int,
+            semester=semester,
+            triggered_by=request.staff,
+            notes=(
+                f'Processed {len(succeeded)} workload(s); '
+                f'failed {len(failed)}; active cycle set to {year_int}-{semester}.'
+            ),
+        )
+
     return Response({
         'success': True,
         'data': {
@@ -898,8 +1097,17 @@ def admin_distribute_workloads(request):
             'failedCount': len(failed),
             'items': succeeded,
             'failed': failed,
+            'currentPeriod': {
+                'year': year_int if succeeded else _ensure_ops_active_cycle(request.staff)[0],
+                'semester': semester if succeeded else _ensure_ops_active_cycle(request.staff)[1],
+                'label': _ops_period_label(
+                    year_int if succeeded else _ensure_ops_active_cycle(request.staff)[0],
+                    semester if succeeded else _ensure_ops_active_cycle(request.staff)[1],
+                ),
+            },
+            'cycleAdvanced': cycle_advanced,
         },
-    }, status=http_status.HTTP_200_OK)
+    }, status=http_status.HTTP_201_CREATED)
 
 
 def _write_workbook(headers, rows):
@@ -1021,6 +1229,12 @@ def admin_workload_import(request):
     updated_count = 0
     failed_count = 0
     failures = []
+    active_year, active_semester = _ensure_ops_active_cycle(request.staff)
+    requested_year = body.get('academicYear') or body.get('year')
+    try:
+        default_year = int(requested_year) if requested_year not in (None, '') else active_year
+    except (TypeError, ValueError):
+        default_year = active_year
 
     for sheet in sheets:
         sheet_name = sheet.get('sheetName', '')
@@ -1031,7 +1245,7 @@ def admin_workload_import(request):
         elif '2' in sem_raw:
             semester = 'S2'
         else:
-            semester = 'S1'
+            semester = active_semester
 
         anomaly_metrics = sheet.get('anomalyMetricsByStaffId') or {}
         teaching_lines = sheet.get('teachingLinesByStaffId') or {}
@@ -1055,11 +1269,7 @@ def admin_workload_import(request):
         # Collect all staff IDs from this sheet
         all_staff_ids = set(anomaly_metrics.keys()) | set(teaching_lines.keys())
 
-        year_val = body.get('importedAtIso', '')[:4]
-        try:
-            year_int = int(year_val)
-        except (ValueError, TypeError):
-            year_int = timezone.now().year
+        year_int = default_year
 
         for staff_number in all_staff_ids:
             # Skip internal placeholder keys used by the frontend parser

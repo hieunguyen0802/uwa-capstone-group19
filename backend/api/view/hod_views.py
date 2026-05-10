@@ -174,11 +174,6 @@ def _hod_visible_qs(staff):
       PENDING / APPROVED / REJECTED always visible;
       INITIAL visible only when academic has already confirmed (read-only).
     """
-    confirmed_subq = AuditLog.objects.filter(
-        report=OuterRef('pk'),
-        changes__kind='CONFIRMATION',
-        changes__confirmation='confirmed',
-    )
     self_submit_subq = AuditLog.objects.filter(
         report=OuterRef('pk'),
         changes__kind='HOD_SELF_WORKLOAD_REQUEST',
@@ -186,11 +181,10 @@ def _hod_visible_qs(staff):
     return (
         get_workload_queryset(staff)
         .filter(is_current=True)
-        .annotate(is_confirmed=Exists(confirmed_subq))
         .annotate(is_hod_self_submission=Exists(self_submit_subq))
         .filter(
             Q(status__in=['PENDING', 'APPROVED', 'REJECTED'])
-            | Q(status='INITIAL', is_confirmed=True)
+            | Q(status='INITIAL', confirmation_status='CONFIRMED')
         )
         .exclude(staff=staff, is_hod_self_submission=True)
     )

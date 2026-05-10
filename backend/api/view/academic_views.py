@@ -6,6 +6,7 @@ from django.core.paginator import Paginator
 from django.db import transaction
 from django.http import HttpResponse
 from django.shortcuts import get_object_or_404
+from django.utils import timezone
 from rest_framework import status
 from rest_framework.decorators import api_view, permission_classes
 from rest_framework.permissions import IsAuthenticated
@@ -37,40 +38,20 @@ def _to_decimal_hours(value: Decimal) -> float:
 def _get_confirmation_map(report_ids):
     if not report_ids:
         return {}
-
-    logs = AuditLog.objects.filter(
-        report_id__in=report_ids,
-        changes__kind='CONFIRMATION',
-    ).order_by('-created_at')
-
-    confirmation_map = {}
-    for log in logs:
-        rid = str(log.report_id)
-        if rid in confirmation_map:
-            continue
-        confirmation_map[rid] = log.changes.get('confirmation', 'unconfirmed')
-    return confirmation_map
+    return {
+        str(report.report_id): report.confirmation_status.lower()
+        for report in WorkloadReport.objects.filter(report_id__in=report_ids).only('report_id', 'confirmation_status')
+    }
 
 
 def _get_report_confirmation(report):
-    log = AuditLog.objects.filter(
-        report=report,
-        changes__kind='CONFIRMATION',
-    ).order_by('-created_at').first()
-    if not log:
-        return 'unconfirmed'
-    return log.changes.get('confirmation', 'unconfirmed')
+    return (report.confirmation_status or 'UNCONFIRMED').lower()
 
 
 def _get_confirmation_time(report):
-    log = AuditLog.objects.filter(
-        report=report,
-        changes__kind='CONFIRMATION',
-        changes__confirmation='confirmed',
-    ).order_by('-created_at').first()
-    if not log:
+    if not report.confirmation_at:
         return None
-    return log.created_at.strftime('%Y-%m-%d %H:%M')
+    return report.confirmation_at.strftime('%Y-%m-%d %H:%M')
 
 
 def _build_department_conflict_keys(reports):
@@ -303,17 +284,14 @@ def academic_confirm_workload(request, id):
             status=status.HTTP_409_CONFLICT,
         )
 
-    already_confirmed = AuditLog.objects.filter(
-        report=report,
-        changes__kind='CONFIRMATION',
-        changes__confirmation='confirmed',
-    ).exists()
-
-    if not already_confirmed:
+    if report.confirmation_status != 'CONFIRMED':
+        report.confirmation_status = 'CONFIRMED'
+        report.confirmation_at = timezone.now()
+        report.save(update_fields=['confirmation_status', 'confirmation_at', 'updated_at'])
         AuditLog.objects.create(
             report=report,
             action_by=request.staff,
-            action_type='COMMENT',
+            action_type='CONFIRMATION',
             comment='Academic confirmed workload.',
             changes={'kind': 'CONFIRMATION', 'confirmation': 'confirmed'},
         )
@@ -391,8 +369,7 @@ def academic_submit_workload_requests(request):
         )
 
     # Academic must confirm before submit.
-    confirmation_map = _get_confirmation_map([str(r.report_id) for r in reports])
-    unconfirmed = [str(r.report_id) for r in reports if confirmation_map.get(str(r.report_id), 'unconfirmed') != 'confirmed']
+    unconfirmed = [str(r.report_id) for r in reports if r.confirmation_status != 'CONFIRMED']
     if unconfirmed:
         return Response(
             {

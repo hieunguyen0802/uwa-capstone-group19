@@ -51,11 +51,6 @@ def _hos_visible_qs():
     Same status gate as HoD (INITIAL only when confirmed), but starts from the
     full WorkloadReport set rather than the caller's department scope.
     """
-    confirmed_subq = AuditLog.objects.filter(
-        report=OuterRef('pk'),
-        changes__kind='CONFIRMATION',
-        changes__confirmation='confirmed',
-    )
     hod_self_subq = AuditLog.objects.filter(
         report=OuterRef('pk'),
         changes__kind='HOD_SELF_WORKLOAD_REQUEST',
@@ -63,11 +58,10 @@ def _hos_visible_qs():
     return (
         WorkloadReport.objects.filter(is_current=True)
         .select_related('staff__user', 'staff__department', 'snapshot_department')
-        .annotate(is_confirmed=Exists(confirmed_subq))
         .annotate(is_hod_self_submission=Exists(hod_self_subq))
         .filter(
             Q(status__in=['PENDING', 'APPROVED', 'REJECTED'])
-            | Q(status='INITIAL', is_confirmed=True)
+            | Q(status='INITIAL', confirmation_status='CONFIRMED')
         )
     )
 

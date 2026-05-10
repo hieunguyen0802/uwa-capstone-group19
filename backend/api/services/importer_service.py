@@ -116,7 +116,7 @@ def _str(value) -> str:
 
 
 def _is_confirmed(report: WorkloadReport) -> bool:
-    return report.audit_logs.filter(action_type='CONFIRMATION').exists()
+    return report.confirmation_status == 'CONFIRMED'
 
 
 def _parse_name(raw: str):

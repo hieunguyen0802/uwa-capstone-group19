@@ -510,17 +510,11 @@ def hos_visualization(request):
     semester = request.GET.get('semester', 'All')
     department_filter = (request.GET.get('department') or 'All Departments').strip()
 
-    confirmed_subq = AuditLog.objects.filter(
-        report=OuterRef('pk'),
-        changes__kind='CONFIRMATION',
-        changes__confirmation='confirmed',
-    )
     base_qs = (
         WorkloadReport.objects.filter(is_current=True)
         .select_related('snapshot_department')
         .prefetch_related('items')
-        .annotate(is_confirmed=Exists(confirmed_subq))
-        .filter(Q(status__in=['PENDING', 'APPROVED', 'REJECTED']) | Q(status='INITIAL', is_confirmed=True))
+        .filter(Q(status__in=['PENDING', 'APPROVED', 'REJECTED']) | Q(status='INITIAL', confirmation_status='CONFIRMED'))
     )
     base_qs = _filter_reports_by_range(base_qs, year_from, year_to, semester)
     if department_filter and department_filter != 'All Departments':

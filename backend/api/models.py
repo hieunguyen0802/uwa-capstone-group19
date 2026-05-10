@@ -238,6 +238,17 @@ class WorkloadReport(models.Model):
     ]
     status = models.CharField(max_length=20, choices=STATUS_CHOICES, default='INITIAL')
 
+    CONFIRMATION_CHOICES = [
+        ('UNCONFIRMED', 'Unconfirmed'),
+        ('CONFIRMED', 'Confirmed'),
+    ]
+    confirmation_status = models.CharField(
+        max_length=20,
+        choices=CONFIRMATION_CHOICES,
+        default='UNCONFIRMED',
+    )
+    confirmation_at = models.DateTimeField(null=True, blank=True)
+
     # ── Re-import tracking fields ─────────────────────────────────────────────
     #
     # Problem: Daniela finds that Cai's data was entered incorrectly and re-uploads

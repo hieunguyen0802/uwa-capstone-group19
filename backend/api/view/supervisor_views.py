@@ -158,17 +158,11 @@ def _hod_visible_qs(staff):
       - INITIAL + academic has confirmed: visible (read-only, HOD cannot act)
       - INITIAL + not yet confirmed: NOT visible
     """
-    confirmed_subq = AuditLog.objects.filter(
-        report=OuterRef('pk'),
-        changes__kind='CONFIRMATION',
-        changes__confirmation='confirmed',
-    )
     return (
         get_workload_queryset(staff)
-        .annotate(is_confirmed=Exists(confirmed_subq))
         .filter(
             Q(status__in=['PENDING', 'APPROVED', 'REJECTED']) |
-            Q(status='INITIAL', is_confirmed=True)
+            Q(status='INITIAL', confirmation_status='CONFIRMED')
         )
     )
 

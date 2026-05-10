@@ -79,10 +79,14 @@ type MockRequest = {
   department: string;
   rate: number;
   status: "pending" | "approved" | "rejected";
+  confirmation?: "confirmed" | "unconfirmed";
+  confirmationTime?: string;
   hours: number;
   supervisorNote?: string;
   /** School Ops user shown in DISTRIBUTED BY (approve, reject, distribute, etc.). */
   operatedBy?: string;
+  /** Staff number of the School Ops / approver shown under DISTRIBUTED BY. */
+  operatedByStaffId?: string;
   /** Target teaching share of total workload (0–100), for validation in the detail modal. */
   targetTeachingRatio?: number;
   /** Minimum teaching hours expected in the breakdown (optional). */
@@ -103,6 +107,20 @@ type MockRequest = {
   backendId?: string;
   /** Snapshot copied to Academic detail modal (keeps Ops/Academic detail consistent). */
   detailSnapshot?: WorkloadDetailSnapshot;
+};
+
+type WorkloadListQuery = {
+  employeeId: string;
+  name: string;
+  department: string;
+  year: string;
+  semester: "" | "S1" | "S2";
+};
+
+type OpsPeriodInfo = {
+  year: number | null;
+  semester: "" | "S1" | "S2" | "FULL_YEAR" | "ALL";
+  label: string;
 };
 
 type BreakdownCategory = "Teaching" | "Assigned Roles" | "HDR" | "Service" | "Research (residual)";
@@ -171,7 +189,13 @@ const ACADEMIC_IMPORT_DEPARTMENTS = [
 ] as const;
 const SEMESTER_EXPECTED_MIN_HOURS = 856;
 const SEMESTER_EXPECTED_MAX_HOURS = 864;
-const WORKLOAD_REPORT_SEMESTER_LABEL = "2025-S1";
+const EMPTY_WORKLOAD_LIST_QUERY: WorkloadListQuery = {
+  employeeId: "",
+  name: "",
+  department: "",
+  year: "",
+  semester: "",
+};
 const LEGACY_SCHOOL_OPS_STORAGE_KEYS = [
   OPS_ACADEMIC_NOTIFICATION_KEY,
   OPS_ACADEMIC_DISTRIBUTED_KEY,
@@ -220,6 +244,34 @@ function formatLocalDateTime(iso: string): string {
 
 function itemDisplayTime(item: MockRequest): string {
   return item.importedAt ? formatLocalDateTime(item.importedAt) : submittedTimeById(item.id);
+}
+
+function hasOperator(item: MockRequest): boolean {
+  return Boolean(item.operatedBy?.trim());
+}
+
+function operatorDisplayLabel(item: MockRequest): string {
+  if (!hasOperator(item)) return "—";
+  return item.operatedByStaffId?.trim()
+    ? `${item.operatedBy}\n${item.operatedByStaffId}`
+    : item.operatedBy ?? "—";
+}
+
+function buildWorkloadListQueryString(query: WorkloadListQuery): string {
+  const params = new URLSearchParams({
+    page_size: "200",
+    status_filter: "all",
+  });
+  if (query.employeeId.trim()) params.set("staff_id", query.employeeId.trim());
+  if (query.name.trim()) params.set("name", query.name.trim());
+  if (query.department.trim()) params.set("department", query.department.trim());
+  if (query.year.trim()) params.set("year", query.year.trim());
+  if (query.semester.trim()) params.set("semester", query.semester.trim());
+  return params.toString();
+}
+
+function confirmationLabel(confirmation?: MockRequest["confirmation"]): "Confirmed" | "Unconfirmed" {
+  return confirmation === "confirmed" ? "Confirmed" : "Unconfirmed";
 }
 
 function emptyBreakdown(): BreakdownData {
@@ -845,9 +897,23 @@ export default function SchoolofOperations() {
     { key: "export", label: "Export Excel" },
   ];
   const currentYear = useMemo(() => new Date().getFullYear(), []);
+  const currentSemester: "S1" | "S2" = new Date().getMonth() < 6 ? "S1" : "S2";
 
   const [loading] = useState(false);
   const [pending, setPending] = useState<MockRequest[]>([]);
+  const [workloadQuery, setWorkloadQuery] = useState<WorkloadListQuery>(EMPTY_WORKLOAD_LIST_QUERY);
+  const [workloadActivePeriod, setWorkloadActivePeriod] = useState<OpsPeriodInfo>({
+    year: null,
+    semester: "",
+    label: "",
+  });
+  const [workloadEffectivePeriod, setWorkloadEffectivePeriod] = useState<OpsPeriodInfo>({
+    year: null,
+    semester: "",
+    label: "",
+  });
+  const displayedWorkloadPeriodLabel =
+    workloadEffectivePeriod.label || workloadActivePeriod.label || `${currentYear}-${currentSemester}`;
 
   useEffect(() => {
     clearLegacySchoolOpsMockStorage();
@@ -906,7 +972,7 @@ export default function SchoolofOperations() {
     });
   }, []);
 
-  async function fetchWorkloadList() {
+  async function fetchWorkloadList(query: WorkloadListQuery = workloadQuery, persistQuery = false) {
     try {
       const resp = await apiJson<{
         success: boolean;
@@ -914,13 +980,23 @@ export default function SchoolofOperations() {
           items: Array<{
             id: string; studentId: string; semesterLabel: string; periodLabel: string;
             name: string; unit: string; notes?: string; title: string; department: string;
-            rate: number; status: string; hours: number; supervisorNote?: string;
-            operatedBy?: string; targetTeachingRatio?: number | null; targetBand?: string | null;
+            rate: number; status: string; confirmation?: "confirmed" | "unconfirmed"; confirmationTime?: string; hours: number; supervisorNote?: string;
+            operatedBy?: string; operatedByStaffId?: string; targetTeachingRatio?: number | null; targetBand?: string | null;
             cancelled?: boolean; importedFromTemplate?: boolean; workloadNewStaff?: boolean;
             hodReview?: string; createdAt?: string; distributedTime?: string; fte?: number;
           }>;
+          currentPeriod?: {
+            year: number;
+            semester: "S1" | "S2";
+            label: string;
+          };
+          effectivePeriod?: {
+            year: number;
+            semester: "S1" | "S2" | "FULL_YEAR" | "ALL";
+            label: string;
+          };
         };
-      }>("/api/school-operations/workloads?page_size=200&status_filter=all");
+      }>(`/api/school-operations/workloads?${buildWorkloadListQueryString(query)}`);
       if (!resp.success) return;
       let counter = Date.now();
       const mapped: MockRequest[] = resp.data.items.map((row) => ({
@@ -939,9 +1015,12 @@ export default function SchoolofOperations() {
           : row.status === "approved" ? "approved"
           : row.status === "rejected" ? "rejected"
           : "pending",
+        confirmation: row.confirmation ?? "unconfirmed",
+        confirmationTime: row.confirmationTime ?? undefined,
         hours: typeof row.hours === "number" ? row.hours : 0,
         supervisorNote: row.supervisorNote ?? "",
         operatedBy: row.operatedBy ?? "—",
+        operatedByStaffId: row.operatedByStaffId ?? "",
         targetTeachingRatio: row.targetTeachingRatio ?? undefined,
         targetBand: row.targetBand ?? undefined,
         cancelled: Boolean(row.cancelled),
@@ -951,6 +1030,25 @@ export default function SchoolofOperations() {
         importedAt: row.createdAt ?? undefined,
       }));
       setPending(mapped);
+      if (persistQuery) {
+        setWorkloadQuery(query);
+      }
+      const nextCurrentPeriod = resp.data.currentPeriod;
+      if (nextCurrentPeriod) {
+        setWorkloadActivePeriod({
+          year: nextCurrentPeriod.year,
+          semester: nextCurrentPeriod.semester,
+          label: nextCurrentPeriod.label,
+        });
+      }
+      const nextEffectivePeriod = resp.data.effectivePeriod;
+      if (nextEffectivePeriod) {
+        setWorkloadEffectivePeriod({
+          year: nextEffectivePeriod.year,
+          semester: nextEffectivePeriod.semester,
+          label: nextEffectivePeriod.label,
+        });
+      }
       // Pre-populate fte so isImportedRowHoursOutOfBand works correctly for part-time staff
       // without requiring the detail modal to be opened first.
       setWorkloadAnomalyImportByStaffId((prev) => {
@@ -981,6 +1079,35 @@ export default function SchoolofOperations() {
     void fetchWorkloadList();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
+
+  useEffect(() => {
+    if (activeSection !== "approval") return;
+    const intervalId = window.setInterval(() => {
+      void fetchWorkloadList(workloadQuery);
+    }, 60_000);
+    return () => window.clearInterval(intervalId);
+  }, [activeSection, workloadQuery]);
+
+  useEffect(() => {
+    if (activeSection !== "approval") return;
+
+    const syncCurrentCycle = () => {
+      void fetchWorkloadList(workloadQuery);
+    };
+
+    const handleVisibilityChange = () => {
+      if (document.visibilityState === "visible") {
+        syncCurrentCycle();
+      }
+    };
+
+    window.addEventListener("focus", syncCurrentCycle);
+    document.addEventListener("visibilitychange", handleVisibilityChange);
+    return () => {
+      window.removeEventListener("focus", syncCurrentCycle);
+      document.removeEventListener("visibilitychange", handleVisibilityChange);
+    };
+  }, [activeSection, workloadQuery]);
 
   useEffect(() => {
     const total = Math.max(1, Math.ceil(opsSemesterReports.length / 10));
@@ -1068,7 +1195,7 @@ export default function SchoolofOperations() {
   const [noteTargetId, setNoteTargetId] = useState<number | null>(null);
   const [distributeModalOpen, setDistributeModalOpen] = useState(false);
   const [distributeYearInput, setDistributeYearInput] = useState(String(currentYear));
-  const [distributeSemesterInput, setDistributeSemesterInput] = useState<"S1" | "S2">("S1");
+  const [distributeSemesterInput, setDistributeSemesterInput] = useState<"S1" | "S2">(currentSemester);
   const [distributeError, setDistributeError] = useState("");
   const [changeHistoryOpen, setChangeHistoryOpen] = useState(false);
   const [changeHistoryPage, setChangeHistoryPage] = useState(1);
@@ -1080,13 +1207,6 @@ export default function SchoolofOperations() {
   const [searchDepartmentInput, setSearchDepartmentInput] = useState("");
   const [searchYearInput, setSearchYearInput] = useState("");
   const [searchSemesterInput, setSearchSemesterInput] = useState<"" | "S1" | "S2">("");
-  const [searchFilters, setSearchFilters] = useState({
-    employeeId: "",
-    name: "",
-    department: "",
-    year: "",
-    semester: "",
-  });
   const [adminSearchFirstNameInput, setAdminSearchFirstNameInput] = useState("");
   const [adminSearchLastNameInput, setAdminSearchLastNameInput] = useState("");
   const [adminSearchStaffIdInput, setAdminSearchStaffIdInput] = useState("");
@@ -1112,7 +1232,6 @@ export default function SchoolofOperations() {
   const isRoleLocked = bindingSource === "department";
   const isDepartmentLocked = bindingSource === "role";
   const adminBoundDepartment: AssignDepartment = "Senior School Coordinator";
-  const currentSemester: "S1" | "S2" = new Date().getMonth() < 6 ? "S1" : "S2";
   const defaultVisualFromYear = currentYear - 2;
   const [visualYearFromInput, setVisualYearFromInput] = useState(String(defaultVisualFromYear));
   const [visualYearToInput, setVisualYearToInput] = useState(String(currentYear));
@@ -1533,59 +1652,10 @@ export default function SchoolofOperations() {
       }
       return true;
     });
-
-    const hasSearchFilter = Object.values(searchFilters).some((value) => value);
-    if (!hasSearchFilter) return byStatus;
-
-    return byStatus.filter((it) => {
-      if (!it.name.trim()) return false;
-
-      if (
-        searchFilters.employeeId &&
-        !it.studentId.toLowerCase().includes(searchFilters.employeeId)
-      ) {
-        return false;
-      }
-
-      if (searchFilters.name && !workloadNameSearchMatches(it.name, searchFilters.name)) {
-        return false;
-      }
-
-      if (searchFilters.department) {
-        const departmentText = it.department.toLowerCase();
-        const normalizedSearch = searchFilters.department.replace("school", "").trim();
-        if (!departmentText.includes(searchFilters.department) && (!normalizedSearch || !departmentText.includes(normalizedSearch))) {
-          return false;
-        }
-      }
-
-      const submittedText = itemDisplayTime(it);
-      const submittedDate = new Date(it.importedAt ?? submittedText.replace(" ", "T"));
-      const hasValidSubmittedDate = !Number.isNaN(submittedDate.getTime());
-      const selectedYear = Number(searchFilters.year);
-
-      if (searchFilters.year && Number.isFinite(selectedYear) && hasValidSubmittedDate) {
-        if (searchFilters.semester === "s1") {
-          // S1: [YYYY-01-01, YYYY-07-01)
-          const s1Start = new Date(selectedYear, 0, 1);
-          const s1End = new Date(selectedYear, 6, 1);
-          if (!(submittedDate >= s1Start && submittedDate < s1End)) return false;
-        } else if (searchFilters.semester === "s2") {
-          // S2: [YYYY-07-01, YYYY+1-01-01)
-          const s2Start = new Date(selectedYear, 6, 1);
-          const s2End = new Date(selectedYear + 1, 0, 1);
-          if (!(submittedDate >= s2Start && submittedDate < s2End)) return false;
-        } else if (submittedDate.getFullYear() !== selectedYear) {
-          return false;
-        }
-      }
-
-      return true;
-    });
+    return byStatus;
   }, [
     pending,
     statusFilter,
-    searchFilters,
     workloadAnomalyImportByStaffId,
     workloadAssignedRoleImportByStaffId,
     workloadTeachingImportLinesByStaffId,
@@ -1714,10 +1784,10 @@ export default function SchoolofOperations() {
       Name: it.name,
       "Staff Number": it.studentId,
       Status: displayStatusForOpsRow(it),
-      Confirmation: displayStatusForOpsRow(it) === "approved" ? "Confirmed" : "Unconfirmed",
+      Confirmation: confirmationLabel(it.confirmation),
       "Total work hours": roundToOneDecimal(it.hours),
       "Distributed time": itemDisplayTime(it),
-      "Distributed by": it.operatedBy?.trim() ? it.operatedBy : "—",
+      "Distributed by": operatorDisplayLabel(it),
       Unit: it.unit,
       Department: it.department,
       Notes: (it.notes ?? "").trim(),
@@ -2101,24 +2171,34 @@ export default function SchoolofOperations() {
   }
 
   function handleSearch() {
-    setSearchFilters({
-      employeeId: searchEmployeeIdInput.trim().toLowerCase(),
-      name: searchNameInput.trim().toLowerCase(),
-      department: searchDepartmentInput.trim().toLowerCase(),
-      year: searchYearInput.trim().toLowerCase(),
-      semester: searchSemesterInput.trim().toLowerCase(),
-    });
+    const nextQuery: WorkloadListQuery = {
+      employeeId: searchEmployeeIdInput.trim(),
+      name: searchNameInput.trim(),
+      department: searchDepartmentInput.trim(),
+      year: searchYearInput.trim(),
+      semester: searchSemesterInput,
+    };
     setPage(1);
     setSelectedIds(new Set());
     setDetailsOpen(false);
     setDetailsItem(null);
     setDetailsBreakdown(null);
+    void fetchWorkloadList(nextQuery, true);
   }
 
   function openDistributeModal() {
     if (!hasSelectedPendingForDistribution) return;
-    setDistributeYearInput(String(currentYear));
-    setDistributeSemesterInput("S1");
+    const modalYear = workloadEffectivePeriod.year ?? workloadActivePeriod.year ?? currentYear;
+    const modalSemester =
+      workloadEffectivePeriod.semester === "S2"
+        ? "S2"
+        : workloadEffectivePeriod.semester === "S1"
+          ? "S1"
+          : workloadActivePeriod.semester === "S2"
+            ? "S2"
+            : "S1";
+    setDistributeYearInput(String(modalYear));
+    setDistributeSemesterInput(modalSemester);
     setDistributeError("");
     setDistributeModalOpen(true);
   }
@@ -2160,6 +2240,8 @@ export default function SchoolofOperations() {
         failedCount: number;
         items: Array<{ workloadId: string; staffId: string; distributedTime: string; operatedBy: string }>;
         failed: Array<{ workloadId: string; staffId: string; name: string; error: string; errorCode: string }>;
+        currentPeriod?: { year: number; semester: "S1" | "S2"; label: string };
+        cycleAdvanced?: boolean;
       };
     }>("/api/school-operations/workloads/distribute", {
       method: "POST",
@@ -2174,10 +2256,27 @@ export default function SchoolofOperations() {
           setDistributeError(resp.message ?? "Distribution failed. Please try again.");
           return;
         }
-        // Re-fetch from backend so list reflects actual DB state
-        void fetchWorkloadList();
+        const nextCurrentPeriod = resp.data?.currentPeriod;
+        if (nextCurrentPeriod) {
+          const nextPeriodState: OpsPeriodInfo = {
+            year: nextCurrentPeriod.year,
+            semester: nextCurrentPeriod.semester,
+            label: nextCurrentPeriod.label,
+          };
+          setWorkloadActivePeriod(nextPeriodState);
+          setWorkloadEffectivePeriod(nextPeriodState);
+        }
+        const resetQuery = { ...EMPTY_WORKLOAD_LIST_QUERY };
+        setWorkloadQuery(resetQuery);
+        setSearchEmployeeIdInput("");
+        setSearchNameInput("");
+        setSearchDepartmentInput("");
+        setSearchYearInput("");
+        setSearchSemesterInput("");
+        // Re-fetch from backend so list reflects the active cycle after distribution.
+        void fetchWorkloadList(resetQuery);
         setSelectedIds(new Set());
-        setStatusFilter("distributed");
+        setStatusFilter("all");
         setDistributeModalOpen(false);
         const ok = resp.data?.processedCount ?? 0;
         const bad = resp.data?.failedCount ?? 0;
@@ -2728,61 +2827,6 @@ export default function SchoolofOperations() {
       const importedSuccess = Math.max(0, importedTotal - importedFailed);
       const failedRows = Array.from(failedRowSet).sort((a, b) => a - b);
 
-      setPending((prev) => {
-        const byStaffId = new Map<string, MockRequest>();
-        for (const row of prev) {
-          byStaffId.set(row.studentId.trim(), row);
-        }
-        let nextId = prev.reduce((maxId, row) => Math.max(maxId, row.id), 0) + 1;
-        const importTimestamp = new Date().toISOString();
-        importRowsByStaff.forEach((imported, staffId) => {
-          if (ineligibleStaffIds.has(staffId)) return;
-          const importStatus = importStatusByStaffId.get(staffId) ?? "pending";
-          const existing = byStaffId.get(staffId);
-          const matchedEmployee = employeeByStaffId.get(staffId);
-          if (existing) {
-            byStaffId.set(staffId, {
-              ...existing,
-              name: imported.name || existing.name,
-              unit: imported.unit || existing.unit,
-              hours: imported.totalHours,
-              targetTeachingRatio: imported.targetTeachingRatio,
-              targetBand: imported.targetBand,
-              notes: imported.notesFromTemplate || existing.notes || "",
-              workloadNewStaff: imported.workloadNewStaff ?? existing.workloadNewStaff,
-              hodReview: imported.hodReview ?? existing.hodReview,
-              title: matchedEmployee?.title?.trim() || existing.title,
-              department: matchedEmployee?.currentDepartment?.trim() || existing.department,
-              status: importStatus,
-              importedFromTemplate: true,
-              importedAt: importTimestamp,
-            });
-          } else {
-            byStaffId.set(staffId, {
-              id: nextId++,
-              studentId: staffId,
-              semesterLabel: "Sem1",
-              periodLabel: `${new Date().getFullYear()}-1`,
-              name: imported.name,
-              unit: imported.unit,
-              notes: imported.notesFromTemplate,
-              title: matchedEmployee?.title?.trim() || "",
-              department: matchedEmployee?.currentDepartment?.trim() || "",
-              rate: 0,
-              status: importStatus,
-              hours: imported.totalHours,
-              operatedBy: "—",
-              targetTeachingRatio: imported.targetTeachingRatio,
-              targetBand: imported.targetBand,
-              workloadNewStaff: imported.workloadNewStaff,
-              hodReview: imported.hodReview,
-              importedFromTemplate: true,
-              importedAt: importTimestamp,
-            });
-          }
-        });
-        return Array.from(byStaffId.values());
-      });
       setStatusFilter("all");
       setSelectedIds(new Set());
       setPage(1);
@@ -2790,8 +2834,8 @@ export default function SchoolofOperations() {
       setDetailsItem(null);
       setInvalidRecordsOpen(false);
       setInvalidRecordsPage(1);
-      // Refresh list from backend so DB state is authoritative after import.
-      void fetchWorkloadList();
+      // Refresh list from backend so DB period selection and rows stay backend-authoritative.
+      void fetchWorkloadList(workloadQuery);
       setPopup({
         open: true,
         title: "Import Completed Summary",
@@ -3569,7 +3613,7 @@ export default function SchoolofOperations() {
               </div>
 
               <div className="mt-6 flex items-center justify-between gap-3">
-                <div className="text-lg font-semibold text-slate-700">{`Workload Report ${WORKLOAD_REPORT_SEMESTER_LABEL}`}</div>
+                <div className="text-lg font-semibold text-slate-700">{`Workload Report ${displayedWorkloadPeriodLabel}`}</div>
                 <div className="flex items-center gap-3">
                   <button
                     type="button"
@@ -3680,8 +3724,8 @@ export default function SchoolofOperations() {
                         <th className="px-3 py-2 text-center">STATUS</th>
                         <th className="px-3 py-2 text-center whitespace-nowrap">TOTAL WORK HOURS</th>
                         <th className="px-3 py-2">CONFIRMATION</th>
-                        <th className="px-3 py-2 text-right whitespace-nowrap">DISTRIBUTED TIME</th>
-                        <th className="px-3 py-2 text-right whitespace-nowrap">DISTRIBUTED BY</th>
+                        <th className="px-3 py-2 text-right whitespace-nowrap">CREATE TIME</th>
+                        <th className="px-3 py-2 whitespace-nowrap">CREATED BY</th>
                       </tr>
                     </thead>
                     <tbody className="divide-y divide-slate-200 bg-white">
@@ -3756,7 +3800,7 @@ export default function SchoolofOperations() {
                                 <WorkHoursBadge hours={roundToOneDecimal(item.hours)} />
                               </td>
                               <td className="px-3 py-3">
-                                {opsDisplayStatus === "approved" ? (
+                                {item.confirmation === "confirmed" ? (
                                   <span className="inline-flex items-center gap-2 text-xs font-semibold text-[#15803d]">
                                     <span className="inline-flex h-4 w-4 items-center justify-center rounded-full border border-[#15803d] bg-[#15803d] text-[10px] text-white">
                                       ✓
@@ -3775,8 +3819,15 @@ export default function SchoolofOperations() {
                               <td className="px-3 py-3 text-right tabular-nums font-sans font-semibold text-slate-800">
                                 {itemDisplayTime(item)}
                               </td>
-                              <td className="px-3 py-3 text-right text-sm text-slate-700">
-                                {item.operatedBy?.trim() ? item.operatedBy : "—"}
+                              <td className="px-3 py-3 text-sm text-slate-700">
+                                {hasOperator(item) ? (
+                                  <div className="space-y-1">
+                                    <div className="text-slate-700">{item.operatedBy}</div>
+                                    <div className="text-xs text-slate-400">{item.operatedByStaffId}</div>
+                                  </div>
+                                ) : (
+                                  "—"
+                                )}
                               </td>
                             </tr>
                           );
