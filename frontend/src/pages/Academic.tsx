@@ -1254,7 +1254,12 @@ export default function Academic() {
                             rowCancelled ? "text-slate-500" : "text-slate-800"
                           }`}
                         >
-                          {academicPushedAt(item) || "—"}
+                          {(() => {
+                            const raw = academicPushedAt(item);
+                            if (!raw) return "—";
+                            const d = parseDateTime(raw);
+                            return Number.isNaN(d.getTime()) ? raw : formatLocalDateTime(d);
+                          })()}
                         </td>
                       </tr>
                     );
