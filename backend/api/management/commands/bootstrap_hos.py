@@ -1,5 +1,5 @@
 """
-bootstrap_hos — create / update the Head of School account for Jiaao Li.
+bootstrap_hos — create / update the Head of School account for Mark Reynolds.
 
 Idempotent: re-running syncs the fields to whatever this file says. Meant to
 bring up a fresh env to a usable state for end-to-end login testing.
@@ -22,10 +22,10 @@ from api.models import Department, Staff
 
 HOS_STAFF_NUMBER = "24140443"
 HOS_EMAIL = "24140443@student.uwa.edu.au"
-HOS_FIRST_NAME = "Jiaao"
-HOS_LAST_NAME = "Li"
+HOS_FIRST_NAME = "Mark"
+HOS_LAST_NAME = "Reynolds"
 HOS_USERNAME = HOS_STAFF_NUMBER  # username = staff_number keeps mental model simple
-HOS_DEFAULT_DEPT = "School of Physics, Mathematics and Computing"
+HOS_DEFAULT_DEPT = "Head of School"
 
 
 class Command(BaseCommand):
@@ -59,12 +59,8 @@ class Command(BaseCommand):
                 "user": user,
                 "role": "HOS",
                 "department": dept,
-                "fte": Decimal("1.00"),
-                "employment_type": "FULL_TIME",
-                "academic_title": "",
                 "title": "",
                 "is_active": True,
-                "is_new_employee": False,
             },
         )
         # Staff.save() hook syncs Group membership → HoS group after this point.

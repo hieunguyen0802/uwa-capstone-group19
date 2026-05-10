@@ -6,6 +6,7 @@ from django.core.paginator import Paginator
 from django.db import transaction
 from django.http import HttpResponse
 from django.shortcuts import get_object_or_404
+from django.utils import timezone
 from rest_framework import status
 from rest_framework.decorators import api_view, permission_classes
 from rest_framework.permissions import IsAuthenticated
@@ -15,7 +16,6 @@ from api.models import AuditLog, WorkloadReport
 from api.permissions import IsAcademicOrHoD
 from api.services.workload_service import (
     evaluate_mvp_anomaly,
-    persist_report_anomaly,
     _parse_year_range,
     _filter_reports_by_range,
     _build_semester_label,
@@ -45,40 +45,20 @@ def _to_decimal_hours(value: Decimal) -> float:
 def _get_confirmation_map(report_ids):
     if not report_ids:
         return {}
-
-    logs = AuditLog.objects.filter(
-        report_id__in=report_ids,
-        changes__kind='CONFIRMATION',
-    ).order_by('-created_at')
-
-    confirmation_map = {}
-    for log in logs:
-        rid = str(log.report_id)
-        if rid in confirmation_map:
-            continue
-        confirmation_map[rid] = log.changes.get('confirmation', 'unconfirmed')
-    return confirmation_map
+    return {
+        str(report.report_id): report.confirmation_status.lower()
+        for report in WorkloadReport.objects.filter(report_id__in=report_ids).only('report_id', 'confirmation_status')
+    }
 
 
 def _get_report_confirmation(report):
-    log = AuditLog.objects.filter(
-        report=report,
-        changes__kind='CONFIRMATION',
-    ).order_by('-created_at').first()
-    if not log:
-        return 'unconfirmed'
-    return log.changes.get('confirmation', 'unconfirmed')
+    return (report.confirmation_status or 'UNCONFIRMED').lower()
 
 
 def _get_confirmation_time(report):
-    log = AuditLog.objects.filter(
-        report=report,
-        changes__kind='CONFIRMATION',
-        changes__confirmation='confirmed',
-    ).order_by('-created_at').first()
-    if not log:
+    if not report.confirmation_at:
         return None
-    return log.created_at.strftime('%Y-%m-%d %H:%M')
+    return report.confirmation_at.strftime('%Y-%m-%d %H:%M')
 
 
 def _build_department_conflict_keys(reports):
@@ -124,6 +104,21 @@ def _get_assigned_by(report):
     return log.action_by.user.get_full_name().strip() or log.action_by.user.username
 
 
+def _get_pushed_at(report) -> str:
+    """Return local-timezone formatted distribution timestamp; falls back to created_at."""
+    if report.distributed_at:
+        return timezone.localtime(report.distributed_at).strftime('%Y-%m-%d %H:%M')
+    # Fallback for records distributed before the distributed_at field existed
+    log = AuditLog.objects.filter(
+        report=report,
+        action_type__in=['DISTRIBUTE', 'DISTRIBUTED', 'APPROVE', 'APPROVED'],
+    ).order_by('-created_at').first()
+    dt = log.created_at if log else report.created_at
+    if not dt:
+        return ''
+    return timezone.localtime(dt).strftime('%Y-%m-%d %H:%M')
+
+
 def _calc_target_teaching_hours(report) -> float:
     """Derive target teaching hours from target_teaching_pct × FTE × 1725 hrs/year."""
     if report.target_teaching_pct is None or report.snapshot_fte is None:
@@ -132,32 +127,31 @@ def _calc_target_teaching_hours(report) -> float:
     return round(annual_hrs * float(report.target_teaching_pct) / 100, 2)
 
 
-def _calc_actual_teaching_ratio(report_items) -> float:
-    """Actual teaching hours / total hours, as a percentage."""
-    total = sum(i.allocated_hours for i in report_items)
-    if not total:
-        return 0.0
-    teaching = sum(i.allocated_hours for i in report_items if i.category == 'TEACHING')
-    return round(float(teaching / total) * 100, 1)
-
 
 def _serialize_workload_row(report, confirmation, anomaly_result=None, report_items=None):
     """Serialize a WorkloadReport to the v3 list-item shape."""
     staff_user = report.staff.user
     full_name = staff_user.get_full_name().strip() or staff_user.username
     items = report_items if report_items is not None else list(report.items.all())
-    total_hours = sum((item.allocated_hours for item in items), Decimal('0.00'))
+    items_hours = sum((item.allocated_hours for item in items), Decimal('0.00'))
 
     if anomaly_result is None:
-        anomaly_result = {'is_anomaly': report.is_anomaly, 'reasons': []}
+        anomaly_result = evaluate_mvp_anomaly(report)
+
+    # Include research residual so total matches the 5-tab breakdown in School Ops
+    research_hrs = round(float(anomaly_result['metrics']['research_pts']) * 17.25, 2)
+    total_hours = round(_to_decimal_hours(items_hours) + research_hrs, 2)
 
     return {
         'id': str(report.report_id),
         'name': full_name,
         'employeeId': report.staff.staff_number,
-        'title': '',
+        'department': report.snapshot_department.name if report.snapshot_department_id else None,
+        'title': report.staff.title or '',
         'notes': _get_supervisor_note(report),
-        'hours': _to_decimal_hours(total_hours),
+        'hours': total_hours,
+        'academicYear': report.academic_year,
+        'semester': report.semester,
         'targetTeachingRatio': float(report.target_teaching_pct) if report.target_teaching_pct is not None else None,
         'teachingTargetHours': _calc_target_teaching_hours(report),
         'status': report.status.lower(),
@@ -165,7 +159,7 @@ def _serialize_workload_row(report, confirmation, anomaly_result=None, report_it
         'confirmationTime': _get_confirmation_time(report),
         'supervisorNote': _get_supervisor_note(report),
         'assignedBy': _get_assigned_by(report),
-        'pushedAt': report.created_at.strftime('%Y-%m-%d %H:%M') if report.created_at else '',
+        'pushedAt': _get_pushed_at(report),
         'cancelled': report.status == 'REJECTED',
         'isAbnormal': anomaly_result['is_anomaly'],
         'anomalyReasons': anomaly_result['reasons'],
@@ -263,31 +257,57 @@ def academic_workload_detail(request, id):
     report_items = list(report.items.all())
     anomaly_result = evaluate_mvp_anomaly(report, department_conflict=_is_department_conflict(report))
     confirmation = _get_report_confirmation(report)
-    total_hours = sum((i.allocated_hours for i in report_items), Decimal('0.00'))
+    items_hours = sum((i.allocated_hours for i in report_items), Decimal('0.00'))
     staff_user = report.staff.user
+
+    metrics = anomaly_result['metrics']
+    research_hrs = round(float(metrics['research_pts']) * 17.25, 2)
+    total_hours = round(_to_decimal_hours(items_hours) + research_hrs, 2)
+
+    breakdown = _serialize_breakdown(report_items)
+    if research_hrs > 0:
+        breakdown['Research (residual)'] = [{'name': 'Research (residual)', 'hours': research_hrs}]
+
+    fte = float(report.snapshot_fte or 0)
+    calc_tr = float(metrics['calc_tr'])
+    calculated_band = metrics['calculated_band']
+    target_band = report.target_band
+
+    employment_type = 'Part-time' if fte < 1.0 else 'Full-time'
 
     return Response({
         'id': str(report.report_id),
         'name': staff_user.get_full_name().strip() or staff_user.username,
         'employeeId': report.staff.staff_number,
+        'department': report.snapshot_department.name if report.snapshot_department_id else None,
         'title': '',
         'notes': _get_supervisor_note(report),
-        'hours': _to_decimal_hours(total_hours),
+        'hours': total_hours,
+        'academicYear': report.academic_year,
+        'semester': report.semester,
         'targetTeachingRatio': float(report.target_teaching_pct) if report.target_teaching_pct is not None else None,
         'teachingTargetHours': _calc_target_teaching_hours(report),
-        'actualTeachingRatio': _calc_actual_teaching_ratio(report_items),
+        'actualTeachingRatio': round(calc_tr * 100, 1),
+        'employmentType': employment_type,
+        'isNewStaff': bool(report.new_staff),
+        'hodReviewRequired': report.hod_review == 'yes',
         'status': report.status.lower(),
         'confirmation': confirmation,
         'confirmationTime': _get_confirmation_time(report),
         'supervisorNote': _get_supervisor_note(report),
         'assignedBy': _get_assigned_by(report),
-        'pushedAt': report.created_at.strftime('%Y-%m-%d %H:%M') if report.created_at else '',
+        'pushedAt': _get_pushed_at(report),
         'cancelled': report.status == 'REJECTED',
         'validation': {
             'isAbnormal': anomaly_result['is_anomaly'],
             'reason': ', '.join(anomaly_result['reasons']),
+            'teachingRatioOutOfRange': calc_tr < 0 or calc_tr > 1,
+            'bandMismatch': target_band is not None and target_band != calculated_band,
+            'hoursOutOfRange': (total_hours <= 856 * fte or total_hours > 864 * fte) if fte > 0 else False,
+            'expectedMinHours': round(856 * fte, 2),
+            'expectedMaxHours': round(864 * fte, 2),
         },
-        'breakdown': _serialize_breakdown(report_items),
+        'breakdown': breakdown,
     })
 
 
@@ -297,7 +317,10 @@ def academic_workload_detail(request, id):
 def academic_confirm_workload(request, id):
     """POST /api/academic/workloads/{id}/confirm/  — no request body required."""
     report = get_object_or_404(_own_reports_qs(request.staff), report_id=id)
-    anomaly_result = persist_report_anomaly(report, department_conflict=_is_department_conflict(report))
+    anomaly_result = evaluate_mvp_anomaly(
+        report,
+        department_conflict=_is_department_conflict(report),
+    )
     if anomaly_result['is_anomaly']:
         return Response(
             {
@@ -307,17 +330,14 @@ def academic_confirm_workload(request, id):
             status=status.HTTP_409_CONFLICT,
         )
 
-    already_confirmed = AuditLog.objects.filter(
-        report=report,
-        changes__kind='CONFIRMATION',
-        changes__confirmation='confirmed',
-    ).exists()
-
-    if not already_confirmed:
+    if report.confirmation_status != 'CONFIRMED':
+        report.confirmation_status = 'CONFIRMED'
+        report.confirmation_at = timezone.now()
+        report.save(update_fields=['confirmation_status', 'confirmation_at', 'updated_at'])
         AuditLog.objects.create(
             report=report,
             action_by=request.staff,
-            action_type='COMMENT',
+            action_type='CONFIRMATION',
             comment='Academic confirmed workload.',
             changes={'kind': 'CONFIRMATION', 'confirmation': 'confirmed'},
         )
@@ -394,8 +414,7 @@ def academic_submit_workload_requests(request):
         )
 
     # Academic must confirm before submit.
-    confirmation_map = _get_confirmation_map([str(r.report_id) for r in reports])
-    unconfirmed = [str(r.report_id) for r in reports if confirmation_map.get(str(r.report_id), 'unconfirmed') != 'confirmed']
+    unconfirmed = [str(r.report_id) for r in reports if r.confirmation_status != 'CONFIRMED']
     if unconfirmed:
         return Response(
             {
@@ -408,7 +427,7 @@ def academic_submit_workload_requests(request):
     # Re-evaluate anomaly on submit to prevent bypassing the confirm endpoint.
     anomaly_map = {}
     for report in reports:
-        anomaly_result = persist_report_anomaly(report, department_conflict=_is_department_conflict(report))
+        anomaly_result = evaluate_mvp_anomaly(report, department_conflict=_is_department_conflict(report))
         if anomaly_result['is_anomaly']:
             anomaly_map[str(report.report_id)] = anomaly_result['reasons']
 
@@ -634,7 +653,6 @@ def get_my_workloads(request):
             'academic_year': r.academic_year,
             'semester': r.semester,
             'status': r.status,
-            'is_anomaly': r.is_anomaly,
             'snapshot_fte': str(r.snapshot_fte),
             'created_at': r.created_at.strftime('%Y-%m-%d %H:%M'),
         }

@@ -70,7 +70,6 @@ class Staff(models.Model):
     Usage:
         staff = Staff.objects.get(user=request.user)  # get staff from logged-in user
         staff.role          # 'ACADEMIC'
-        staff.fte           # Decimal('1.00')
         staff.department.name  # 'Computer Science'
     """
 
@@ -105,27 +104,6 @@ class Staff(models.Model):
         related_name='staff_members'  # reverse: dept.staff_members.all()
     )
 
-    # Full-Time Equivalent. 1.0 = full-time, 0.5 = half-time.
-    # Business rule: FTE × 100 = total annual workload points for this staff member.
-    # e.g. FTE=0.5 → 50 pts = 862.5 hours/year.
-    fte = models.DecimalField(
-        max_digits=4,
-        decimal_places=2,
-        default=Decimal('1.00'),
-        validators=[MinValueValidator(Decimal('0.00'))]  # FTE cannot be negative
-    )
-
-    # Used to identify Casual staff for separate reporting (pending Daniela Q5 confirmation).
-    EMPLOYMENT_CHOICES = [
-        ('FULL_TIME', 'Full-time'),
-        ('PART_TIME', 'Part-time'),
-        ('CASUAL', 'Casual'),
-    ]
-    employment_type = models.CharField(max_length=20, choices=EMPLOYMENT_CHOICES, default='FULL_TIME')
-
-    # Optional display title (e.g. "Professor") for shared profile API (contract §11.2).
-    academic_title = models.CharField(max_length=120, blank=True, default='')
-
     # Profile photo; validated extensions only (see FileExtensionValidator).
     avatar = models.ImageField(
         upload_to=staff_avatar_upload_to,
@@ -141,12 +119,6 @@ class Staff(models.Model):
 
     # Academic title (e.g. "Lecturer", "Associate Professor") — display only, not used for RBAC.
     title = models.CharField(max_length=100, blank=True, default='')
-
-    # True for staff in their first year; affects workload band calculation.
-    is_new_employee = models.BooleanField(default=False)
-
-    # Free-text notes visible to School Ops only.
-    notes = models.TextField(blank=True, default='')
 
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)  # auto-updated on every save()
@@ -267,17 +239,21 @@ class WorkloadReport(models.Model):
     ]
     status = models.CharField(max_length=20, choices=STATUS_CHOICES, default='INITIAL')
 
-    # Set to True at import time if the staff member's T:R ratio does not match
-    # their contract type (e.g. contract says T&R 50/50 but actual teaching is 90%).
-    is_anomaly = models.BooleanField(default=False)
-
-    # Target band and teaching percentage from the Excel template (columns F and G).
-    # Required to enable teaching_mismatch and tr_discrepancy anomaly checks.
-    # Null until populated by importer; workload_service uses getattr fallback in the interim.
-    target_band = models.CharField(max_length=50, blank=True, null=True)
-    target_teaching_pct = models.DecimalField(
-        max_digits=5, decimal_places=2, blank=True, null=True
+    CONFIRMATION_CHOICES = [
+        ('UNCONFIRMED', 'Unconfirmed'),
+        ('CONFIRMED', 'Confirmed'),
+    ]
+    confirmation_status = models.CharField(
+        max_length=20,
+        choices=CONFIRMATION_CHOICES,
+        default='UNCONFIRMED',
     )
+    confirmation_at = models.DateTimeField(null=True, blank=True)
+
+    # Set by the School Ops distribute action; NULL means not yet distributed.
+    # Kept separate from status so that the academic→HoD workflow status
+    # (INITIAL / PENDING / APPROVED / REJECTED) is never mutated by distribution.
+    distributed_at = models.DateTimeField(null=True, blank=True)
 
     # ── Re-import tracking fields ─────────────────────────────────────────────
     #
@@ -317,6 +293,12 @@ class WorkloadReport(models.Model):
     target_band = models.CharField(max_length=50, null=True, blank=True)
     target_teaching_pct = models.DecimalField(max_digits=5, decimal_places=2, null=True, blank=True)
 
+    # Excel column F — HoD Review flag imported from the workload template.
+    hod_review = models.CharField(max_length=3, choices=[('yes', 'Yes'), ('no', 'No')], default='no')
+
+    # Excel column D — New Staff flag imported from the workload template.
+    new_staff = models.BooleanField(default=False)
+
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
 
@@ -324,7 +306,6 @@ class WorkloadReport(models.Model):
         db_table = 'workload_reports'
         indexes = [
             models.Index(fields=['status']),                    # filter all PENDING reports
-            models.Index(fields=['is_anomaly']),                # filter anomalous reports
             models.Index(fields=['academic_year', 'semester']), # query by year + semester
             models.Index(fields=['import_batch_id']),           # query all records from one import
             models.Index(fields=['is_current']),                # filter active records
@@ -348,7 +329,7 @@ class WorkloadItem(models.Model):
 
     Note: there is NO 'RESEARCH' category.
     Research is a remainder, calculated on the fly — never stored:
-        research_pts = staff.fte * 100 - teaching_pts - hdr_pts - role_pts - service_pts
+        research_pts = report.snapshot_fte * 100 - teaching_pts - hdr_pts - role_pts - service_pts
     """
 
     item_id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)

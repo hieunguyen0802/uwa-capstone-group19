@@ -15,6 +15,7 @@ from decimal import Decimal
 from pathlib import Path
 
 from django.conf import settings
+from django.contrib.auth.models import User
 from django.core.cache import cache
 from django.core.paginator import Paginator
 from django.db import models, transaction
@@ -32,8 +33,9 @@ from api.models import (
     Department,
     Staff,
     StaffRoleAssignment,
-    WorkloadDistributionJob,
+    SystemConfig,
     WorkloadItem,
+    WorkloadDistributionJob,
     WorkloadReport,
 )
 from api.permissions import CanAccessSchoolOpsApi
@@ -41,7 +43,6 @@ from api.services.workload_service import (
     get_workload_queryset,
     _filter_reports_by_range,
     _parse_year_range,
-    persist_report_anomaly,
     evaluate_mvp_anomaly,
     stale_report_response_payload,
 )
@@ -53,10 +54,19 @@ from api.view.supervisor_views import (
     _to_decimal_hours,
 )
 
+ACADEMIC_IMPORT_DEPARTMENTS = (
+    'Physics',
+    'Mathematics & Statistics',
+    'Computer Science & Software Engineering',
+)
 SUPERSEDED_ROLE_REASON = 'Superseded by a newer role assignment.'
 MAX_EXCEL_UPLOAD_BYTES = 5 * 1024 * 1024
 EXPORT_MEDIA_SUBDIR = 'exports'
 TEMPLATE_MEDIA_SUBDIR = 'templates'
+OPS_CURRENT_YEAR_CONFIG_KEY = 'OPS_CURRENT_WORKLOAD_YEAR'
+OPS_CURRENT_SEMESTER_CONFIG_KEY = 'OPS_CURRENT_WORKLOAD_SEMESTER'
+OPS_CURRENT_YEAR_DESCRIPTION = 'Active School Ops workload cycle year shown by default in the workload management tab.'
+OPS_CURRENT_SEMESTER_DESCRIPTION = 'Active School Ops workload cycle semester shown by default in the workload management tab.'
 
 
 class AdminImportThrottle(UserRateThrottle):
@@ -104,6 +114,136 @@ def _distribution_year_bounds(year_int: int) -> bool:
     return 2000 <= year_int <= 2100
 
 
+def _ops_calendar_cycle(now=None):
+    """
+    Return the calendar-driven School Ops cycle.
+
+    S1: 01 Jan – 30 Jun
+    S2: 01 Jul – 31 Dec
+    """
+    current = timezone.localtime(now or timezone.now())
+    if current.month >= 7:
+        return current.year, 'S2'
+    return current.year, 'S1'
+
+
+def _ops_cycle_rank(year_int: int, semester: str):
+    semester_rank = {'S1': 1, 'S2': 2, 'FULL_YEAR': 3}.get(semester, 0)
+    return year_int, semester_rank
+
+
+def _ops_period_label(year_int: int | None, semester: str | None):
+    if year_int is None:
+        return ''
+    if not semester or semester == 'ALL':
+        return str(year_int)
+    return f'{year_int}-{semester}'
+
+
+def _set_system_config_value(config_key: str, config_value: str, value_type: str, description: str, staff=None):
+    SystemConfig.objects.update_or_create(
+        config_key=config_key,
+        defaults={
+            'config_value': str(config_value),
+            'value_type': value_type,
+            'description': description,
+            'updated_by': staff,
+        },
+    )
+
+
+def _persist_ops_cycle(year_int: int, semester: str, staff=None, source='manual'):
+    _set_system_config_value(
+        OPS_CURRENT_YEAR_CONFIG_KEY,
+        str(year_int),
+        'INT',
+        OPS_CURRENT_YEAR_DESCRIPTION,
+        staff,
+    )
+    _set_system_config_value(
+        OPS_CURRENT_SEMESTER_CONFIG_KEY,
+        semester,
+        'STR',
+        OPS_CURRENT_SEMESTER_DESCRIPTION,
+        staff,
+    )
+    if staff is not None:
+        AuditLog.objects.create(
+            report=None,
+            action_by=staff,
+            action_type='CONFIG_CHANGE',
+            comment=f'School Ops cycle set to {year_int}-{semester}',
+            changes={
+                'config_scope': 'OPS_CURRENT_CYCLE',
+                'year': year_int,
+                'semester': semester,
+                'source': source,
+            },
+        )
+
+
+def _ensure_ops_active_cycle(staff=None):
+    calendar_year, calendar_semester = _ops_calendar_cycle()
+
+    year_config = SystemConfig.objects.filter(config_key=OPS_CURRENT_YEAR_CONFIG_KEY).first()
+    semester_config = SystemConfig.objects.filter(config_key=OPS_CURRENT_SEMESTER_CONFIG_KEY).first()
+
+    if not year_config or not semester_config:
+        _persist_ops_cycle(calendar_year, calendar_semester, staff, source='calendar-init')
+        return calendar_year, calendar_semester
+
+    try:
+        stored_year = int(year_config.config_value)
+    except (TypeError, ValueError):
+        stored_year = calendar_year
+
+    stored_semester = (semester_config.config_value or '').strip().upper()
+    if stored_semester not in {'S1', 'S2'}:
+        stored_semester = calendar_semester
+
+    if _ops_cycle_rank(stored_year, stored_semester) < _ops_cycle_rank(calendar_year, calendar_semester):
+        _persist_ops_cycle(calendar_year, calendar_semester, staff, source='calendar-rollover')
+        return calendar_year, calendar_semester
+
+    return stored_year, stored_semester
+
+
+def _resolve_ops_period(request, staff):
+    active_year, active_semester = _ensure_ops_active_cycle(staff)
+    raw_year = (request.GET.get('year') or '').strip()
+    raw_semester = (request.GET.get('semester') or '').strip().upper()
+
+    explicit_year = None
+    if raw_year:
+        try:
+            explicit_year = int(raw_year)
+        except (TypeError, ValueError):
+            explicit_year = None
+
+    if raw_semester not in {'', 'ALL', 'S1', 'S2', 'FULL_YEAR'}:
+        raw_semester = ''
+
+    if explicit_year is None and raw_semester in {'S1', 'S2', 'FULL_YEAR'}:
+        explicit_year = active_year
+
+    effective_year = explicit_year if explicit_year is not None else active_year
+    if explicit_year is None and raw_semester in {'', 'ALL'}:
+        effective_semester = active_semester
+    elif raw_semester in {'', 'ALL'}:
+        effective_semester = None
+    else:
+        effective_semester = raw_semester
+
+    return {
+        'active_year': active_year,
+        'active_semester': active_semester,
+        'effective_year': effective_year,
+        'effective_semester': effective_semester,
+        'active_label': _ops_period_label(active_year, active_semester),
+        'effective_label': _ops_period_label(effective_year, effective_semester),
+    }
+
+
 def _normalize_front_status(value: str):
     cleaned = (value or '').strip().lower()
     if cleaned in {'initial', 'pending', 'approved', 'rejected'}:
@@ -120,39 +260,82 @@ def _serialize_staff_row(staff_row: Staff):
         'lastName': user_obj.last_name or '',
         'email': user_obj.email or '',
         'title': staff_row.title or '',
-        'currentDepartment': staff_row.department.name,
+        'currentDepartment': staff_row.department.name if staff_row.department_id else '',
         'isActive': staff_row.is_active,
-        'isNewEmployee': staff_row.is_new_employee,
-        'notes': staff_row.notes or '',
+        'isNewEmployee': False,
+        'notes': '',
         'updatedAt': staff_row.updated_at.strftime('%Y-%m-%d %H:%M'),
     }
 
 
+def _coerce_import_bool(value, default=None):
+    if value is None:
+        return default
+    if isinstance(value, bool):
+        return value
+    normalized = str(value).strip().lower()
+    if not normalized:
+        return default
+    if normalized in {'active', 'yes', 'true', '1', 'y'}:
+        return True
+    if normalized in {'inactive', 'no', 'false', '0', 'n'}:
+        return False
+    return default
+
+
 def _get_distributed_time(report):
-    """Return the timestamp when this report was distributed (status set to APPROVED)."""
-    log = AuditLog.objects.filter(report=report, action_type='APPROVE').order_by('-created_at').first()
-    return log.created_at.strftime('%Y-%m-%d %H:%M') if log else ''
-
-
-def _get_operated_by(report):
-    """Return the name of the staff who last approved/rejected this report."""
-    log = AuditLog.objects.filter(
-        report=report, action_type__in=['APPROVE', 'REJECT']
-    ).select_related('action_by__user').order_by('-created_at').first()
-    if not log or not log.action_by:
+    """Return the local-timezone timestamp when this report was distributed."""
+    if not report.distributed_at:
         return ''
-    return log.action_by.user.get_full_name().strip() or log.action_by.user.username
+    return timezone.localtime(report.distributed_at).strftime('%Y-%m-%d %H:%M')
+
+
+def _get_operated_by_actor(report):
+    """
+    Return the staff member responsible for the current row state.
+
+    - Distributed rows (distributed_at set): the person who ran distribute
+    - APPROVED / REJECTED rows (HoD decision): last approver/rejector
+    - INITIAL rows (Pending Distribution): importer / re-importer
+    """
+    if report.distributed_at:
+        action_types = ['DISTRIBUTED']
+    elif report.status == 'INITIAL':
+        action_types = ['IMPORTED', 'MODIFIED_BY_REIMPORT']
+    elif report.status == 'REJECTED':
+        action_types = ['REJECT', 'REJECTED']
+    else:
+        action_types = ['APPROVE', 'APPROVED']
+
+    return (
+        AuditLog.objects.filter(report=report, action_type__in=action_types)
+        .select_related('action_by__user')
+        .order_by('-created_at')
+        .first()
+    )
 
 
 def _serialize_workload_row(report, items):
     """Serialize a WorkloadReport to the school-operations contract list shape."""
     staff_user = report.staff.user
     full_name = staff_user.get_full_name().strip() or staff_user.username
-    total_hours = sum((i.allocated_hours for i in items), Decimal('0.00'))
+    actor_log = _get_operated_by_actor(report)
+    actor = actor_log.action_by if actor_log else None
+    actor_name = ''
+    actor_staff_number = ''
+    if actor:
+        actor_name = actor.user.get_full_name().strip() or actor.user.username
+        actor_staff_number = actor.staff_number
+    items_hours = sum((i.allocated_hours for i in items), Decimal('0.00'))
     first_teaching = next((i for i in items if i.category == 'TEACHING' and i.unit_code), None)
-    sem = report.semester
-    sem_label = f"Sem{sem[-1]}" if sem.startswith('S') else sem
-    period_label = f"{report.academic_year}-{sem[-1]}" if sem.startswith('S') else str(report.academic_year)
+    sem = report.semester or ''
+    sem_label = sem
+    period_label = _ops_period_label(report.academic_year, sem)
+
+    # Include research residual in total so list badge matches the 5-tab detail sum.
+    anomaly_result = evaluate_mvp_anomaly(report)
+    research_hrs = round(float(anomaly_result['metrics']['research_pts']) * 17.25, 2)
+    total_hours = round(_to_decimal_hours(items_hours) + research_hrs, 2)
 
     return {
         'id': str(report.report_id),
@@ -167,17 +350,22 @@ def _serialize_workload_row(report, items):
         'department': report.snapshot_department.name,
         'rate': int(float(report.snapshot_fte) * 100),
         'status': report.status.lower(),
-        'hours': _to_decimal_hours(total_hours),
+        'confirmation': report.confirmation_status.lower(),
+        'confirmationTime': report.confirmation_at.strftime('%Y-%m-%d %H:%M') if report.confirmation_at else '',
+        'hours': total_hours,
         'supervisorNote': _get_supervisor_note(report),
-        'operatedBy': _get_operated_by(report),
-        'targetTeachingRatio': None,
+        'operatedBy': actor_name,
+        'operatedByStaffId': actor_staff_number,
+        'targetTeachingRatio': float(report.target_teaching_pct) if report.target_teaching_pct is not None else None,
         'teachingTargetHours': None,
         'cancelled': False,
         'importedFromTemplate': report.import_batch_id is not None,
-        'targetBand': None,
-        'workloadNewStaff': report.staff.is_new_employee,
-        'hodReview': 'no',
+        'targetBand': report.target_band,
+        'workloadNewStaff': report.new_staff,
+        'hodReview': report.hod_review,
+        'fte': float(report.snapshot_fte),
         'distributedTime': _get_distributed_time(report),
+        'createdAt': report.created_at.isoformat(),
     }
 
 
@@ -208,33 +396,47 @@ def _serialize_workload_detail(report, items):
                 'hours': _to_decimal_hours(item.allocated_hours),
             })
 
-    research_hrs = float(metrics['research_pts']) * 17.25
+    research_hrs = round(float(metrics['research_pts']) * 17.25, 2)
     if research_hrs > 0:
         breakdown['Research (residual)'].append({
             'name': 'Research (residual)',
-            'hours': round(research_hrs, 2),
+            'hours': research_hrs,
         })
 
+    # Total = all 5 tabs (Teaching + HDR + Service + Roles + Research residual)
+    total_with_research = round(_to_decimal_hours(total_hours) + research_hrs, 2)
+
+    fte = float(report.snapshot_fte or 0)
     failed_reasons = anomaly_result['reasons']
+    target_band = report.target_band
+
+    # Backend-computed visual indicator flags (frontend only displays, never computes)
+    teaching_ratio_out_of_range = calc_tr < 0 or calc_tr > 1
+    band_mismatch = (target_band is not None and target_band != calculated_band)
+    hours_out_of_range = (total_with_research <= 856 * fte or total_with_research > 864 * fte) if fte > 0 else False
+
     return {
         'id': str(report.report_id),
         'studentId': report.staff.staff_number,
         'name': full_name,
         'department': report.snapshot_department.name,
         'status': report.status.lower(),
-        'hours': _to_decimal_hours(total_hours),
-        'targetTeachingRatio': None,
+        'hours': total_with_research,
+        'targetTeachingRatio': float(report.target_teaching_pct) if report.target_teaching_pct is not None else None,
         'actualTeachingRatio': round(calc_tr * 100, 1),
-        'targetBand': None,
+        'targetBand': target_band,
         'calculatedBand': calculated_band,
-        'fte': float(report.snapshot_fte),
-        'workloadNewStaff': report.staff.is_new_employee,
-        'hodReview': 'no',
+        'fte': fte,
+        'workloadNewStaff': report.new_staff,
+        'hodReview': report.hod_review,
         'cancelled': False,
         'notes': _get_request_reason(report),
         'validation': {
-            'hoursAbnormal': report.is_anomaly,
-            'teachingRatioWarning': 'tr_discrepancy' in failed_reasons,
+            'teachingRatioOutOfRange': teaching_ratio_out_of_range,
+            'bandMismatch': band_mismatch,
+            'hoursOutOfRange': hours_out_of_range,
+            'expectedMinHours': round(856 * fte, 2),
+            'expectedMaxHours': round(864 * fte, 2),
             'failedReasons': failed_reasons,
         },
         'breakdown': breakdown,
@@ -363,9 +565,13 @@ def _staff_from_body_or_path(request, lookup_id: str):
 @permission_classes([IsAuthenticated, CanAccessSchoolOpsApi])
 def admin_workload_requests(request):
     """GET /api/school-operations/workloads  (also /api/admin/workload-requests/)"""
+    cycle = _resolve_ops_period(request, request.staff)
     base_qs = _admin_reports_qs(request.staff).prefetch_related('items').select_related(
         'staff__user', 'staff__department', 'snapshot_department'
     )
+    base_qs = base_qs.filter(academic_year=cycle['effective_year'])
+    if cycle['effective_semester']:
+        base_qs = base_qs.filter(semester=cycle['effective_semester'])
 
     qs = base_qs
 
@@ -374,7 +580,7 @@ def admin_workload_requests(request):
     if status_filter == 'pending':
         qs = qs.filter(status='PENDING')
     elif status_filter == 'distributed':
-        qs = qs.filter(status='APPROVED')
+        qs = qs.filter(distributed_at__isnull=False)
     elif status_filter == 'failed':
         qs = qs.filter(status='REJECTED')
     elif status_filter == 'superseded':
@@ -383,7 +589,8 @@ def admin_workload_requests(request):
             'staff__user', 'staff__department', 'snapshot_department'
         )
     elif status_filter == 'initial':
-        qs = qs.filter(status='INITIAL')
+        # Pending Distribution = INITIAL status AND not yet distributed
+        qs = qs.filter(status='INITIAL', distributed_at__isnull=True)
     # 'all' → no additional filter
 
     # New contract query params
@@ -402,19 +609,11 @@ def admin_workload_requests(request):
     if dept_name:
         qs = qs.filter(snapshot_department__name=dept_name)
 
-    year = request.GET.get('year', '').strip()
-    if year:
-        qs = qs.filter(academic_year=year)
-
-    semester = request.GET.get('semester', '').strip()
-    if semester and semester.upper() != 'ALL':
-        qs = qs.filter(semester=semester.upper())
-
-    qs = qs.order_by('-updated_at')
+    qs = qs.order_by('created_at')
 
     counts = {
         'pending': base_qs.filter(status='PENDING').count(),
-        'distributed': base_qs.filter(status='APPROVED').count(),
+        'distributed': base_qs.filter(distributed_at__isnull=False).count(),
         'failed': base_qs.filter(status='REJECTED').count(),
         'superseded': get_workload_queryset(request.staff).filter(is_current=False).count(),
     }
@@ -444,6 +643,16 @@ def admin_workload_requests(request):
                 'totalPages': paginator.num_pages,
             },
             'counts': counts,
+            'currentPeriod': {
+                'year': cycle['active_year'],
+                'semester': cycle['active_semester'],
+                'label': cycle['active_label'],
+            },
+            'effectivePeriod': {
+                'year': cycle['effective_year'],
+                'semester': cycle['effective_semester'] or 'ALL',
+                'label': cycle['effective_label'],
+            },
         },
     })
 
@@ -465,6 +674,73 @@ def admin_workload_request_detail(request, id):
         'message': 'Workload detail loaded',
         'data': _serialize_workload_detail(report, items),
     })
+
+
+@api_view(['GET'])
+@permission_classes([IsAuthenticated, CanAccessSchoolOpsApi])
+def admin_workload_history(request, id):
+    """GET /api/school-operations/workloads/{id}/history"""
+    qs = _admin_reports_qs(request.staff)
+    report = get_object_or_404(qs, report_id=id)
+
+    logs = (
+        AuditLog.objects
+        .filter(report=report)
+        .select_related('action_by__user')
+        .order_by('created_at')
+    )
+
+    _ACTION_LABEL = {
+        'IMPORTED': 'Imported',
+        'MODIFIED_BY_REIMPORT': 'Re-imported',
+        'APPROVE': 'Approved',
+        'REJECT': 'Rejected',
+        'WORKLOAD_EDIT': 'Workload edited',
+        'PROFILE_EDIT': 'Profile edited',
+        'SUBMIT_REQUEST': 'Submitted for approval',
+        'CONFIRMATION': 'Confirmed by academic',
+        'CONTACT_STAFF': 'Contacted staff',
+    }
+
+    entries = []
+    for log in logs:
+        actor = log.action_by
+        changed_by = (
+            actor.user.get_full_name().strip() or actor.user.username
+            if actor and actor.user else 'System'
+        )
+        action_label = _ACTION_LABEL.get(log.action_type, log.action_type)
+        changes = log.changes or {}
+        diffs = changes.get('diffs') or []
+        ts = log.created_at.strftime('%Y-%m-%d %H:%M')
+
+        if diffs:
+            for d in diffs:
+                entries.append({
+                    'changeId': f"{log.id}-{d.get('field', '')}",
+                    'reportId': str(report.report_id),
+                    'action': action_label,
+                    'fieldName': d.get('field', ''),
+                    'oldValue': d.get('before', ''),
+                    'newValue': d.get('after', ''),
+                    'changedBy': changed_by,
+                    'changedAt': ts,
+                    'comment': log.comment or '',
+                })
+        else:
+            entries.append({
+                'changeId': str(log.id),
+                'reportId': str(report.report_id),
+                'action': action_label,
+                'fieldName': '',
+                'oldValue': '',
+                'newValue': '',
+                'changedBy': changed_by,
+                'changedAt': ts,
+                'comment': log.comment or '',
+            })
+
+    return Response({'success': True, 'data': entries})
 
 
 @api_view(['POST'])
@@ -623,8 +899,13 @@ def admin_single_decision(request, id):
 @permission_classes([IsAuthenticated, CanAccessSchoolOpsApi])
 @transaction.atomic
 def admin_distribute_workloads(request):
-    """POST /api/school-operations/workloads/distribute  (also /api/admin/workloads/distribute/)"""
-    # New contract: workloadIds + academicYear + semester
+    """POST /api/school-operations/workloads/distribute
+
+    Validates each workload individually and distributes (APPROVED) those that pass.
+    Returns per-item success/failure so the frontend can show both tabs correctly.
+    """
+    # Permission is enforced by the DRF permission class above.
+
     workload_ids = request.data.get('workloadIds') or []
     year = request.data.get('academicYear') or request.data.get('year')
     semester = (request.data.get('semester') or '').strip().upper()
@@ -643,9 +924,9 @@ def admin_distribute_workloads(request):
             status=http_status.HTTP_400_BAD_REQUEST,
         )
 
-    if semester not in {'S1', 'S2'}:
+    if semester not in {'S1', 'S2', 'FULL_YEAR'}:
         return Response(
-            {'success': False, 'message': 'semester must be S1 or S2'},
+            {'success': False, 'message': 'semester must be S1, S2, or FULL_YEAR'},
             status=http_status.HTTP_400_BAD_REQUEST,
         )
 
@@ -661,40 +942,190 @@ def admin_distribute_workloads(request):
             status=http_status.HTTP_400_BAD_REQUEST,
         )
 
-    qs = _admin_reports_qs(request.staff).select_related('staff__user')
+    # ── Check 2: all workloads must exist and be visible to this user ──────────
+    qs = _admin_reports_qs(request.staff).select_related(
+        'staff__user', 'staff__department', 'snapshot_department'
+    ).prefetch_related('items')
     reports = list(qs.filter(report_id__in=workload_ids))
 
     if len(reports) != len(workload_ids):
         return Response(
             {'success': False, 'message': 'One or more workloadIds are invalid or not accessible'},
-            status=http_status.HTTP_400_BAD_REQUEST,
+            status=http_status.HTTP_404_NOT_FOUND,
         )
 
-    job = WorkloadDistributionJob.objects.create(
-        academic_year=year_int,
-        semester=semester,
-        triggered_by=request.staff,
-        notes=f'Distributed {len(reports)} workloads via school-operations portal',
-    )
-
-    now_str = timezone.now().strftime('%Y-%m-%d %H:%M')
+    now = timezone.now()
+    now_str = now.strftime('%Y-%m-%d %H:%M')
     operated_by = request.staff.user.get_full_name().strip() or request.staff.user.username
-    items_out = []
+
+    succeeded = []
+    failed = []
+
     for report in reports:
-        items_out.append({
-            'workloadId': str(report.report_id),
-            'status': report.status.lower(),
-            'distributedTime': now_str,
-            'operatedBy': operated_by,
-        })
+        try:
+            if report.academic_year != year_int or report.semester != semester:
+                failed.append({
+                    'workloadId': str(report.report_id),
+                    'staffId': report.staff.staff_number,
+                    'name': report.staff.user.get_full_name(),
+                    'error': (
+                        f'Workload period is {report.academic_year}-{report.semester}, '
+                        f'but the selected cycle is {year_int}-{semester}'
+                    ),
+                    'errorCode': 'PERIOD_MISMATCH',
+                })
+                continue
+
+            # ── Check 3: must be Pending Distribution (INITIAL, not yet distributed) ─
+            if report.status != 'INITIAL':
+                failed.append({
+                    'workloadId': str(report.report_id),
+                    'staffId': report.staff.staff_number,
+                    'name': report.staff.user.get_full_name(),
+                    'error': f'Workload is not in Pending Distribution state (current: {report.status})',
+                    'errorCode': 'NOT_PENDING',
+                })
+                continue
+
+            if report.distributed_at is not None:
+                failed.append({
+                    'workloadId': str(report.report_id),
+                    'staffId': report.staff.staff_number,
+                    'name': report.staff.user.get_full_name(),
+                    'error': 'Workload has already been distributed',
+                    'errorCode': 'ALREADY_DISTRIBUTED',
+                })
+                continue
+
+            # ── Check 4: staff must be active ──────────────────────────────────
+            if not report.staff.is_active:
+                failed.append({
+                    'workloadId': str(report.report_id),
+                    'staffId': report.staff.staff_number,
+                    'name': report.staff.user.get_full_name(),
+                    'error': 'Staff member is not active',
+                    'errorCode': 'STAFF_INACTIVE',
+                })
+                continue
+
+            # ── Check 5: required fields must be present ────────────────────────
+            if not (report.academic_year and report.semester and
+                    report.snapshot_fte is not None and report.snapshot_department_id):
+                failed.append({
+                    'workloadId': str(report.report_id),
+                    'staffId': report.staff.staff_number,
+                    'name': report.staff.user.get_full_name(),
+                    'error': 'Workload is missing required fields (year, semester, FTE, or department)',
+                    'errorCode': 'MISSING_FIELDS',
+                })
+                continue
+
+            # ── Check 6: total work hours must be within valid range ────────────
+            items = list(report.items.all())
+            anomaly_result = evaluate_mvp_anomaly(report)
+            research_hrs = float(anomaly_result['metrics']['research_pts']) * 17.25
+            items_hours = float(sum((i.allocated_hours for i in items), Decimal('0.00')))
+            total_hours = round(items_hours + research_hrs, 2)
+            fte = float(report.snapshot_fte)
+            if fte > 0 and (total_hours <= 856 * fte or total_hours > 864 * fte):
+                failed.append({
+                    'workloadId': str(report.report_id),
+                    'staffId': report.staff.staff_number,
+                    'name': report.staff.user.get_full_name(),
+                    'error': (
+                        f'Total work hours ({total_hours}h) is outside the valid range '
+                        f'({856 * fte:.2f}h – {864 * fte:.2f}h)'
+                    ),
+                    'errorCode': 'HOURS_OUT_OF_RANGE',
+                })
+                continue
+
+            # ── Check 7: record distribution timestamp, do NOT change status ──
+            # Status (INITIAL→PENDING→APPROVED/REJECTED) belongs to the
+            # academic→HoD workflow.  Distribution is a separate event tracked
+            # via distributed_at so the workflow status is never contaminated.
+            report.distributed_at = now
+            report.save(update_fields=['distributed_at', 'updated_at'])
+            AuditLog.objects.create(
+                report=report,
+                action_by=request.staff,
+                action_type='DISTRIBUTED',
+                changes={
+                    'action': 'distribute',
+                    'distributed_by': operated_by,
+                    'distributed_at': now.isoformat(),
+                },
+            )
+
+            # ── Check 8: send notification message (non-fatal) ─────────────────
+            try:
+                from api.models import Message
+                Message.objects.create(
+                    thread_key=f'{report.staff.staff_number}:admin',
+                    sender=request.staff,
+                    body=(
+                        f'Your workload for {report.academic_year} {report.semester} '
+                        f'has been distributed by {operated_by}.'
+                    ),
+                )
+            except Exception:
+                pass
+
+            succeeded.append({
+                'workloadId': str(report.report_id),
+                'staffId': report.staff.staff_number,
+                'name': report.staff.user.get_full_name(),
+                'status': 'approved',
+                'distributedTime': now_str,
+                'operatedBy': operated_by,
+            })
+
+        except Exception as exc:
+            # ── Check 9: unknown error fallback ────────────────────────────────
+            failed.append({
+                'workloadId': str(report.report_id),
+                'staffId': report.staff.staff_number,
+                'name': report.staff.user.get_full_name(),
+                'error': f'Unexpected error: {exc}',
+                'errorCode': 'UNKNOWN_ERROR',
+            })
+
+    cycle_advanced = False
+    if succeeded:
+        active_year, active_semester = _ensure_ops_active_cycle(request.staff)
+        cycle_advanced = _ops_cycle_rank(year_int, semester) != _ops_cycle_rank(active_year, active_semester)
+        _persist_ops_cycle(
+            year_int,
+            semester,
+            request.staff,
+            source='manual-distribution',
+        )
+        WorkloadDistributionJob.objects.create(
+            academic_year=year_int,
+            semester=semester,
+            triggered_by=request.staff,
+            notes=(
+                f'Processed {len(succeeded)} workload(s); '
+                f'failed {len(failed)}; active cycle set to {year_int}-{semester}.'
+            ),
+        )
 
     return Response({
         'success': True,
-        'message': 'Workload distribution job created',
         'data': {
-            'processedCount': len(reports),
-            'jobId': job.job_id,
-            'items': items_out,
+            'processedCount': len(succeeded),
+            'failedCount': len(failed),
+            'items': succeeded,
+            'failed': failed,
+            'currentPeriod': {
+                'year': year_int if succeeded else _ensure_ops_active_cycle(request.staff)[0],
+                'semester': semester if succeeded else _ensure_ops_active_cycle(request.staff)[1],
+                'label': _ops_period_label(
+                    year_int if succeeded else _ensure_ops_active_cycle(request.staff)[0],
+                    semester if succeeded else _ensure_ops_active_cycle(request.staff)[1],
+                ),
+            },
+            'cycleAdvanced': cycle_advanced,
         },
     }, status=http_status.HTTP_201_CREATED)
 
@@ -813,6 +1244,12 @@ def admin_workload_import(request):
     updated_count = 0
     failed_count = 0
     failures = []
+    active_year, active_semester = _ensure_ops_active_cycle(request.staff)
+    requested_year = body.get('academicYear') or body.get('year')
+    try:
+        default_year = int(requested_year) if requested_year not in (None, '') else active_year
+    except (TypeError, ValueError):
+        default_year = active_year
 
     for sheet in sheets:
         sheet_name = sheet.get('sheetName', '')
@@ -823,7 +1260,7 @@ def admin_workload_import(request):
         elif '2' in sem_raw:
             semester = 'S2'
         else:
-            semester = 'S1'
+            semester = active_semester
 
         anomaly_metrics = sheet.get('anomalyMetricsByStaffId') or {}
         teaching_lines = sheet.get('teachingLinesByStaffId') or {}
@@ -831,10 +1268,29 @@ def admin_workload_import(request):
         service_metrics = sheet.get('serviceMetricsByStaffId') or {}
         role_metrics = sheet.get('roleMetricsByStaffId') or {}
 
+        # Build a per-staff map of column-J (targetTeachingPct) and column-F (hodReview)
+        # from the first row for each staff (rows carry raw cellsByColumn).
+        row_meta_by_staff: dict = {}
+        for raw_row in (sheet.get('rows') or []):
+            cells = raw_row.get('cellsByColumn') or {}
+            sid = str(cells.get('C') or '').strip()
+            if sid and sid not in row_meta_by_staff:
+                row_meta_by_staff[sid] = {
+                    'targetTeachingPct': cells.get('J'),
+                    'hodReview': str(cells.get('F') or '').strip().lower(),
+                    'newStaff': str(cells.get('D') or '').strip().lower(),
+                }
+
         # Collect all staff IDs from this sheet
         all_staff_ids = set(anomaly_metrics.keys()) | set(teaching_lines.keys())
 
+        year_int = default_year
+
         for staff_number in all_staff_ids:
+            # Skip internal placeholder keys used by the frontend parser
+            if not staff_number or str(staff_number).startswith('__row:'):
+                continue
+
             staff_row = Staff.objects.select_related('department', 'user').filter(
                 staff_number=staff_number
             ).first()
@@ -843,122 +1299,145 @@ def admin_workload_import(request):
                 failed_count += 1
                 continue
 
-            metrics = anomaly_metrics.get(staff_number) or {}
-            year_val = body.get('importedAtIso', '')[:4]
             try:
-                year_int = int(year_val)
-            except (ValueError, TypeError):
-                year_int = timezone.now().year
+                with transaction.atomic():
+                    # Block re-import if a non-INITIAL/REJECTED report already exists
+                    conflicts = WorkloadReport.objects.filter(
+                        staff=staff_row,
+                        academic_year=year_int,
+                        semester=semester,
+                        is_current=True,
+                    ).exclude(status__in=['INITIAL', 'REJECTED'])
+                    if conflicts.exists():
+                        failures.append({'staffId': staff_number, 'sheet': sheet_name, 'message': 'Report locked; rollback required'})
+                        failed_count += 1
+                        continue
 
-            # Block re-import if a non-INITIAL/REJECTED report already exists
-            conflicts = WorkloadReport.objects.filter(
-                staff=staff_row,
-                academic_year=year_int,
-                semester=semester,
-                is_current=True,
-            ).exclude(status__in=['INITIAL', 'REJECTED'])
-            if conflicts.exists():
-                failures.append({'staffId': staff_number, 'sheet': sheet_name, 'message': 'Report locked; rollback required'})
-                failed_count += 1
-                continue
-
-            orphan_reports = list(WorkloadReport.objects.select_for_update().filter(
-                staff=staff_row,
-                academic_year=year_int,
-                semester=semester,
-                is_current=True,
-            ))
-
-            # Always force INITIAL — import must never bypass the approval workflow.
-            report = WorkloadReport.objects.create(
-                staff=staff_row,
-                academic_year=year_int,
-                semester=semester,
-                snapshot_fte=staff_row.fte,
-                snapshot_department=staff_row.department,
-                status='INITIAL',
-                import_batch_id=batch_id,
-                is_anomaly=False,
-                is_current=True,
-            )
-
-            for old in orphan_reports:
-                old.is_current = False
-                old.superseded_by = report
-                old.save(update_fields=['is_current', 'superseded_by', 'updated_at'])
-                AuditLog.objects.create(
-                    report=old,
-                    action_by=request.staff,
-                    action_type='MODIFIED_BY_REIMPORT',
-                    changes={'superseded_by': str(report.report_id), 'batch': str(batch_id)},
-                )
-
-            AuditLog.objects.create(
-                report=report,
-                action_by=request.staff,
-                action_type='IMPORTED',
-                changes={'batch': str(batch_id), 'kind': 'JSON_WORKLOAD_IMPORT',
-                         'superseded': [str(r.report_id) for r in orphan_reports]},
-            )
-
-            # Create WorkloadItems from the parsed sheet data
-            items_to_create = []
-
-            for line in (teaching_lines.get(staff_number) or []):
-                hrs = Decimal(str(line.get('hours', 0) or 0))
-                if hrs < 0:
-                    continue
-                items_to_create.append(WorkloadItem(
-                    report=report,
-                    category='TEACHING',
-                    unit_code=str(line.get('unit', ''))[:50] or None,
-                    description='Teaching',
-                    allocated_hours=hrs,
-                ))
-
-            hdr = hdr_metrics.get(staff_number) or {}
-            hdr_hrs = Decimal(str(hdr.get('totalHrs', 0) or 0))
-            if hdr_hrs > 0:
-                items_to_create.append(WorkloadItem(
-                    report=report,
-                    category='HDR_SUPERVISION',
-                    unit_code=None,
-                    description='HDR Supervision',
-                    allocated_hours=hdr_hrs,
-                ))
-
-            svc = service_metrics.get(staff_number) or {}
-            svc_pts = Decimal(str(svc.get('servicePoints', 0) or 0))
-            svc_hrs = svc_pts * Decimal('17.25')
-            if svc_hrs > 0:
-                items_to_create.append(WorkloadItem(
-                    report=report,
-                    category='SERVICE',
-                    unit_code=None,
-                    description='Service',
-                    allocated_hours=svc_hrs,
-                ))
-
-            for role in (role_metrics.get(staff_number) or {}).get('roles', []):
-                role_hrs = Decimal(str(role.get('hours', 0) or 0))
-                if role_hrs > 0:
-                    items_to_create.append(WorkloadItem(
-                        report=report,
-                        category='ASSIGNED_ROLE',
-                        unit_code=None,
-                        description=str(role.get('name', 'Role'))[:500],
-                        allocated_hours=role_hrs,
+                    orphan_reports = list(WorkloadReport.objects.select_for_update().filter(
+                        staff=staff_row,
+                        academic_year=year_int,
+                        semester=semester,
+                        is_current=True,
                     ))
 
-            if items_to_create:
-                WorkloadItem.objects.bulk_create(items_to_create)
+                    # Read anomaly metrics for this staff (target band, FTE, teaching pct).
+                    am = anomaly_metrics.get(staff_number) or {}
+                    rm = row_meta_by_staff.get(staff_number) or {}
+                    fte_val = am.get('fte')
+                    target_pct = rm.get('targetTeachingPct')
+                    target_band_val = am.get('targetBand')
+                    try:
+                        snapshot_fte = Decimal(str(fte_val)) if fte_val is not None else (staff_row.fte if hasattr(staff_row, 'fte') else Decimal('1.00'))
+                    except Exception:
+                        snapshot_fte = Decimal('1.00')
+                    try:
+                        target_teaching_pct = Decimal(str(target_pct)) if target_pct is not None else None
+                    except Exception:
+                        target_teaching_pct = None
 
-            persist_report_anomaly(report, department_conflict=False)
+                    hod_review_val = rm.get('hodReview') or 'no'
+                    hod_review_val = 'yes' if str(hod_review_val).strip().lower() == 'yes' else 'no'
+                    new_staff_val = str(rm.get('newStaff') or '').strip().lower() in ('yes', 'true', '1', 'y')
 
-            if orphan_reports:
-                updated_count += 1
-            else:
-                created_count += 1
+                    # Always force INITIAL — import must never bypass the approval workflow.
+                    report = WorkloadReport.objects.create(
+                        staff=staff_row,
+                        academic_year=year_int,
+                        semester=semester,
+                        snapshot_fte=snapshot_fte,
+                        snapshot_department=staff_row.department,
+                        status='INITIAL',
+                        import_batch_id=batch_id,
+                        is_current=True,
+                        target_band=str(target_band_val) if target_band_val else None,
+                        target_teaching_pct=target_teaching_pct,
+                        hod_review=hod_review_val,
+                        new_staff=new_staff_val,
+                    )
+
+                    for old in orphan_reports:
+                        old.is_current = False
+                        old.superseded_by = report
+                        old.save(update_fields=['is_current', 'superseded_by', 'updated_at'])
+                        AuditLog.objects.create(
+                            report=old,
+                            action_by=request.staff,
+                            action_type='MODIFIED_BY_REIMPORT',
+                            changes={'superseded_by': str(report.report_id), 'batch': str(batch_id)},
+                        )
+
+                    AuditLog.objects.create(
+                        report=report,
+                        action_by=request.staff,
+                        action_type='IMPORTED',
+                        changes={'batch': str(batch_id), 'kind': 'JSON_WORKLOAD_IMPORT',
+                                 'superseded': [str(r.report_id) for r in orphan_reports]},
+                    )
+
+                    # Create WorkloadItems from the parsed sheet data
+                    items_to_create = []
+
+                    for line in (teaching_lines.get(staff_number) or []):
+                        hrs = Decimal(str(line.get('hours', 0) or 0))
+                        if hrs < 0:
+                            continue
+                        items_to_create.append(WorkloadItem(
+                            report=report,
+                            category='TEACHING',
+                            unit_code=str(line.get('unit', ''))[:50] or None,
+                            description='Teaching',
+                            allocated_hours=hrs,
+                        ))
+
+                    hdr = hdr_metrics.get(staff_number) or {}
+                    hdr_hrs = Decimal(str(hdr.get('totalHrs', 0) or 0))
+                    if hdr_hrs > 0:
+                        items_to_create.append(WorkloadItem(
+                            report=report,
+                            category='HDR_SUPERVISION',
+                            unit_code=None,
+                            description='HDR Supervision',
+                            allocated_hours=hdr_hrs,
+                        ))
+
+                    svc = service_metrics.get(staff_number) or {}
+                    svc_pts = Decimal(str(svc.get('servicePoints', 0) or 0))
+                    svc_hrs = svc_pts * Decimal('17.25')
+                    if svc_hrs > 0:
+                        items_to_create.append(WorkloadItem(
+                            report=report,
+                            category='SERVICE',
+                            unit_code=None,
+                            description='Service',
+                            allocated_hours=svc_hrs,
+                        ))
+
+                    for role in (role_metrics.get(staff_number) or {}).get('roles', []):
+                        role_hrs = Decimal(str(role.get('hours', 0) or 0))
+                        if role_hrs > 0:
+                            items_to_create.append(WorkloadItem(
+                                report=report,
+                                category='ASSIGNED_ROLE',
+                                unit_code=None,
+                                description=str(role.get('name', 'Role'))[:500],
+                                allocated_hours=role_hrs,
+                            ))
+
+                    if items_to_create:
+                        WorkloadItem.objects.bulk_create(items_to_create)
+
+                    if orphan_reports:
+                        updated_count += 1
+                    else:
+                        created_count += 1
+
+            except Exception as exc:
+                failures.append({
+                    'staffId': staff_number,
+                    'sheet': sheet_name,
+                    'message': f'Unexpected error: {exc}',
+                })
+                failed_count += 1
 
     return Response({
         'ok': True,
@@ -978,8 +1457,8 @@ def admin_staff_import(request):
     """POST /api/school-operations/staff/import  (also /api/admin/staff/import/)
 
     Accepts JSON body: { "rows": [ { staffId, firstName, lastName, email, title,
-    department, isActive, isNewEmployee, notes } ] }
-    Updates existing Staff only — never creates phantom users.
+    department, isActive } ] }
+    Creates or updates ACADEMIC staff rows for Ops academic imports.
     """
     body = request.data or {}
     rows = body.get('rows')
@@ -992,103 +1471,94 @@ def admin_staff_import(request):
     created_count = 0
     updated_count = 0
     failures = []
+    allowed_department_map = {name.lower(): name for name in ACADEMIC_IMPORT_DEPARTMENTS}
 
     for idx, row in enumerate(rows):
-        staff_number = str(row.get('staffId', '')).strip()
-        if not staff_number:
-            failures.append({'index': idx, 'message': 'staffId is required'})
+        staff_number = str(row.get('staffId') or row.get('staff_id') or '').strip()
+        if not re.fullmatch(r'\d{8}', staff_number):
+            failures.append({'index': idx, 'staffId': staff_number, 'message': 'staffId must be exactly 8 digits'})
             continue
+
+        first_name = str(row.get('firstName') or row.get('first_name') or '').strip()[:150]
+        last_name = str(row.get('lastName') or row.get('last_name') or '').strip()[:150]
+        email_clean = str(row.get('email') or '').strip().lower()
+        title = str(row.get('title') or '').strip()[:100]
+        dept_raw = str(row.get('department') or '').strip()
+        is_active = _coerce_import_bool(
+            row.get('isActive') if 'isActive' in row else row.get('active_status'),
+            default=True,
+        )
+
+        if not first_name:
+            failures.append({'index': idx, 'staffId': staff_number, 'message': 'firstName is required'})
+            continue
+        if not last_name:
+            failures.append({'index': idx, 'staffId': staff_number, 'message': 'lastName is required'})
+            continue
+        if not email_clean:
+            failures.append({'index': idx, 'staffId': staff_number, 'message': 'email is required'})
+            continue
+        if not re.match(r'^[^@\s]+@[^@\s]+\.[^@\s]+$', email_clean):
+            failures.append({'index': idx, 'staffId': staff_number, 'message': 'invalid email'})
+            continue
+        if not dept_raw:
+            failures.append({'index': idx, 'staffId': staff_number, 'message': 'department is required'})
+            continue
+
+        dept = Department.objects.filter(name__iexact=dept_raw).first()
+        if not dept:
+            canonical_department = allowed_department_map.get(dept_raw.lower())
+            if not canonical_department:
+                failures.append({'index': idx, 'staffId': staff_number, 'message': 'department not found'})
+                continue
+            dept = Department.objects.create(name=canonical_department)
 
         staff_row = Staff.objects.select_related('user', 'department').filter(staff_number=staff_number).first()
-        if not staff_row:
-            failures.append({'index': idx, 'staffId': staff_number, 'message': 'Staff not found'})
-            continue
+        created_this_row = staff_row is None
+        user_obj = staff_row.user if staff_row else None
+        if user_obj is None:
+            user_obj = User.objects.filter(username=staff_number).first()
 
-        user_obj = staff_row.user
-        # Snapshot BEFORE any field write so the diff reflects the caller's intent.
         before_snapshot = {
-            'first_name': user_obj.first_name,
-            'last_name': user_obj.last_name,
-            'email': user_obj.email,
-            'department': staff_row.department.name if staff_row.department_id else '',
-            'title': staff_row.title,
-            'is_active': staff_row.is_active,
-            'is_new_employee': staff_row.is_new_employee,
-            'notes': staff_row.notes,
+            'first_name': user_obj.first_name if user_obj else '',
+            'last_name': user_obj.last_name if user_obj else '',
+            'email': user_obj.email if user_obj else '',
+            'department': staff_row.department.name if staff_row and staff_row.department_id else '',
+            'title': staff_row.title if staff_row else '',
+            'is_active': staff_row.is_active if staff_row else True,
         }
 
-        # Validate every field BEFORE any DB write. A row that fails halfway
-        # through must not leave the user/staff tables partially updated —
-        # and must not drop its audit breadcrumb.
-        row_error = None
-        pending_user_fields = {}
-        pending_staff_fields = {}
-        pending_department = None
-
-        first_name = row.get('firstName')
-        if first_name is not None:
-            pending_user_fields['first_name'] = str(first_name).strip()[:150]
-
-        last_name = row.get('lastName')
-        if last_name is not None:
-            pending_user_fields['last_name'] = str(last_name).strip()[:150]
-
-        email = row.get('email')
-        if email is not None:
-            email_clean = str(email).strip().lower()
-            if email_clean and not re.match(r'^[^@\s]+@[^@\s]+\.[^@\s]+$', email_clean):
-                row_error = 'invalid email'
-            else:
-                pending_user_fields['email'] = email_clean
-
-        if row_error is None:
-            dept_name = row.get('department')
-            if dept_name:
-                dept = Department.objects.filter(name__iexact=str(dept_name).strip()).first()
-                if not dept:
-                    row_error = 'department not found'
-                else:
-                    pending_department = dept
-
-        if row_error is None:
-            title = row.get('title')
-            if title is not None:
-                pending_staff_fields['title'] = str(title).strip()[:100]
-
-            is_active = row.get('isActive')
-            if is_active is not None:
-                pending_staff_fields['is_active'] = bool(is_active)
-
-            is_new = row.get('isNewEmployee')
-            if is_new is not None:
-                pending_staff_fields['is_new_employee'] = bool(is_new)
-
-            notes = row.get('notes')
-            if notes is not None:
-                pending_staff_fields['notes'] = str(notes)
-
-        if row_error is not None:
-            failures.append({'index': idx, 'staffId': staff_number, 'message': row_error})
-            continue
-
-        # All validation passed — apply writes inside a savepoint so a mid-row
-        # exception still rolls back cleanly.
         with transaction.atomic():
-            for field, value in pending_user_fields.items():
-                setattr(user_obj, field, value)
-            if pending_user_fields:
-                user_obj.save(update_fields=list(pending_user_fields.keys()))
+            if user_obj is None:
+                user_obj = User(username=staff_number)
+                user_obj.set_unusable_password()
 
-            staff_update_fields = []
-            if pending_department is not None:
-                staff_row.department = pending_department
-                staff_update_fields.append('department')
-            for field, value in pending_staff_fields.items():
-                setattr(staff_row, field, value)
-                staff_update_fields.append(field)
-            if staff_update_fields:
-                staff_update_fields.append('updated_at')
-                staff_row.save(update_fields=staff_update_fields)
+            user_obj.username = staff_number
+            user_obj.first_name = first_name
+            user_obj.last_name = last_name
+            user_obj.email = email_clean
+            user_obj.is_active = bool(is_active)
+            if user_obj.pk:
+                user_obj.save(update_fields=['username', 'first_name', 'last_name', 'email', 'is_active'])
+            else:
+                user_obj.save()
+
+            if staff_row is None:
+                staff_row = Staff.objects.create(
+                    user=user_obj,
+                    staff_number=staff_number,
+                    department=dept,
+                    role='ACADEMIC',
+                    title=title,
+                    is_active=bool(is_active),
+                )
+            else:
+                staff_row.department = dept
+                staff_row.title = title
+                staff_row.is_active = bool(is_active)
+                if not staff_row.role:
+                    staff_row.role = 'ACADEMIC'
+                staff_row.save()
 
         after_snapshot = {
             'first_name': user_obj.first_name,
@@ -1097,8 +1567,6 @@ def admin_staff_import(request):
             'department': staff_row.department.name if staff_row.department_id else '',
             'title': staff_row.title,
             'is_active': staff_row.is_active,
-            'is_new_employee': staff_row.is_new_employee,
-            'notes': staff_row.notes,
         }
         diffs = compute_diffs(
             before_snapshot,
@@ -1110,8 +1578,6 @@ def admin_staff_import(request):
                 'department': 'Department',
                 'title': 'Title',
                 'is_active': 'Active',
-                'is_new_employee': 'New employee',
-                'notes': 'Notes',
             },
         )
         if diffs:
@@ -1130,7 +1596,10 @@ def admin_staff_import(request):
                 staff_number=staff_row.staff_number,
             )
 
-        updated_count += 1
+        if created_this_row:
+            created_count += 1
+        else:
+            updated_count += 1
 
     return Response({
         'ok': True,
@@ -1144,7 +1613,7 @@ def admin_staff_import(request):
 @permission_classes([IsAuthenticated, CanAccessSchoolOpsApi])
 def admin_staff_list(request):
     """GET /api/school-operations/staff  (also /api/admin/staff/)"""
-    queryset = Staff.objects.select_related('user', 'department').order_by('staff_number')
+    queryset = Staff.objects.select_related('user', 'department').filter(role='ACADEMIC').order_by('staff_number')
 
     # New contract query params
     staff_id = request.GET.get('staff_id', '').strip()
@@ -1217,9 +1686,6 @@ def admin_staff_patch(request, staff_id):
     is_active = payload.get('isActive') if 'isActive' in payload else (
         None if 'active_status' not in payload else (payload.get('active_status', '').lower() != 'inactive')
     )
-    is_new_employee = payload.get('isNewEmployee')
-    notes = payload.get('notes')
-
     user_obj = staff_row.user
     # Snapshot before any mutation so the diff reflects the user's intent, not post-save state.
     before_snapshot = {
@@ -1229,8 +1695,6 @@ def admin_staff_patch(request, staff_id):
         'department': staff_row.department.name if staff_row.department_id else '',
         'title': staff_row.title,
         'is_active': staff_row.is_active,
-        'is_new_employee': staff_row.is_new_employee,
-        'notes': staff_row.notes,
     }
     user_fields = []
 
@@ -1266,14 +1730,6 @@ def admin_staff_patch(request, staff_id):
         staff_row.is_active = bool(is_active)
         staff_fields.append('is_active')
 
-    if is_new_employee is not None:
-        staff_row.is_new_employee = bool(is_new_employee)
-        staff_fields.append('is_new_employee')
-
-    if notes is not None:
-        staff_row.notes = str(notes)
-        staff_fields.append('notes')
-
     if staff_fields:
         staff_fields.append('updated_at')
         staff_row.save(update_fields=staff_fields)
@@ -1285,8 +1741,6 @@ def admin_staff_patch(request, staff_id):
         'department': staff_row.department.name if staff_row.department_id else '',
         'title': staff_row.title,
         'is_active': staff_row.is_active,
-        'is_new_employee': staff_row.is_new_employee,
-        'notes': staff_row.notes,
     }
     diffs = compute_diffs(
         before_snapshot,
@@ -1298,8 +1752,6 @@ def admin_staff_patch(request, staff_id):
             'department': 'Department',
             'title': 'Title',
             'is_active': 'Active',
-            'is_new_employee': 'New employee',
-            'notes': 'Notes',
         },
     )
     if diffs:

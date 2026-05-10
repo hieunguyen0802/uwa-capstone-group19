@@ -107,7 +107,6 @@ def _serialize_report_row(report, items):
         'submitted_time': _get_submitted_time(report),
         'semester_label': sem_label,
         'period_label': period_label,
-        'is_anomaly': report.is_anomaly,
     }
 
 
@@ -159,17 +158,11 @@ def _hod_visible_qs(staff):
       - INITIAL + academic has confirmed: visible (read-only, HOD cannot act)
       - INITIAL + not yet confirmed: NOT visible
     """
-    confirmed_subq = AuditLog.objects.filter(
-        report=OuterRef('pk'),
-        changes__kind='CONFIRMATION',
-        changes__confirmation='confirmed',
-    )
     return (
         get_workload_queryset(staff)
-        .annotate(is_confirmed=Exists(confirmed_subq))
         .filter(
             Q(status__in=['PENDING', 'APPROVED', 'REJECTED']) |
-            Q(status='INITIAL', is_confirmed=True)
+            Q(status='INITIAL', confirmation_status='CONFIRMED')
         )
     )
 
@@ -276,7 +269,6 @@ def supervisor_workload_request_detail(request, id):
             'request_reason': _get_request_reason(report),
             'description': first_desc.description if first_desc else '',
             'supervisor_note': _get_supervisor_note(report),
-            'is_anomaly': report.is_anomaly,
             'breakdown': _serialize_breakdown(items),
         },
     })
@@ -601,7 +593,6 @@ def _serialize_report(r):
         'academic_year': r.academic_year,
         'semester': r.semester,
         'status': r.status,
-        'is_anomaly': r.is_anomaly,
         'created_at': r.created_at.strftime('%Y-%m-%d %H:%M') if r.created_at else None,
     }
 

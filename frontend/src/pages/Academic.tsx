@@ -27,6 +27,8 @@ import { profileFromAuth } from "../auth/profileFromAuth";
 
 type AcademicItem = {
   id: number;
+  /** Original UUID from backend — used for all API calls. */
+  backendId: string;
   name: string;
   employeeId: string;
   department?: string;
@@ -38,7 +40,7 @@ type AcademicItem = {
   teachingTargetHours?: number;
   /** Target teaching share of total workload (0–100), e.g. staff sheet "Target Teaching %". */
   targetTeachingRatio?: number;
-  status: "pending" | "approved" | "rejected" | "";
+  status: "initial" | "pending" | "approved" | "rejected" | "";
   confirmation: "confirmed" | "unconfirmed";
   /** When confirmation is confirmed, time the workload was confirmed (empty in list when unconfirmed). */
   confirmationTime?: string;
@@ -46,6 +48,8 @@ type AcademicItem = {
   /** Admin (or delegate) who assigned this workload task to the staff member. */
   assignedBy?: string;
   pushedAt?: string;
+  academicYear?: number;
+  semester?: string;
   /** Display-only field for Academic detail modal (mirrors School Ops detail layout). */
   employmentType?: "Full-time" | "Part-time" | string;
   /** Display-only field for Academic detail modal (mirrors School Ops detail layout). */
@@ -166,17 +170,20 @@ type AcademicWorkloadRowResponse = {
   id: string;
   name: string;
   employeeId: string;
+  department?: string | null;
   title?: string | null;
   notes?: string | null;
   hours: number;
   targetTeachingRatio?: number | null;
   teachingTargetHours?: number | null;
-  status: "pending" | "approved" | "rejected" | "";
+  status: "initial" | "pending" | "approved" | "rejected" | "";
   confirmation: "confirmed" | "unconfirmed";
   confirmationTime?: string | null;
   supervisorNote?: string | null;
   assignedBy?: string | null;
   pushedAt?: string | null;
+  academicYear?: number | null;
+  semester?: string | null;
   cancelled?: boolean;
 };
 
@@ -201,6 +208,11 @@ type AcademicWorkloadDetailResponse = AcademicWorkloadRowResponse & {
   validation?: {
     isAbnormal?: boolean;
     reason?: string;
+    teachingRatioOutOfRange?: boolean;
+    bandMismatch?: boolean;
+    hoursOutOfRange?: boolean;
+    expectedMinHours?: number;
+    expectedMaxHours?: number;
   };
 };
 
@@ -226,23 +238,25 @@ function normalizeAcademicBreakdown(
 }
 
 function mapAcademicRowToItem(row: AcademicWorkloadRowResponse, userDepartment = ""): AcademicItem {
-  const numericId = Number.parseInt(String(row.id), 10);
   return {
-    id: Number.isFinite(numericId) ? numericId : Date.now(),
+    id: Date.now() + Math.random(),
+    backendId: row.id,
     name: row.name,
     employeeId: row.employeeId,
-    department: userDepartment,
+    department: row.department ?? (userDepartment || undefined),
     title: row.title ?? undefined,
     notes: row.notes ?? "",
     hours: Number(row.hours ?? 0),
     targetTeachingRatio: row.targetTeachingRatio ?? undefined,
     teachingTargetHours: row.teachingTargetHours ?? undefined,
-    status: row.status || "",
+    status: row.status === "initial" ? "" : row.status || "",
     confirmation: row.confirmation || "unconfirmed",
     confirmationTime: row.confirmationTime ?? undefined,
     supervisorNote: row.supervisorNote ?? "",
     assignedBy: row.assignedBy ?? "",
     pushedAt: row.pushedAt ?? "",
+    academicYear: row.academicYear ?? undefined,
+    semester: row.semester ?? undefined,
     cancelled: Boolean(row.cancelled),
   };
 }
@@ -251,21 +265,39 @@ function mapAcademicDetailToItem(detail: AcademicWorkloadDetailResponse, userDep
   const base = mapAcademicRowToItem(detail, userDepartment);
   const normalizedBreakdown = normalizeAcademicBreakdown(detail.breakdown);
   const actualTeachingRatio = typeof detail.actualTeachingRatio === "number" ? detail.actualTeachingRatio : null;
+  const v = detail.validation;
+  const teachingRatioOutOfRange = v?.teachingRatioOutOfRange ?? Boolean(v?.isAbnormal);
+  const hoursOutOfRange = v?.hoursOutOfRange ?? false;
+  const bandMismatch = v?.bandMismatch ?? false;
+  const hoursHint =
+    v?.expectedMinHours != null && v?.expectedMaxHours != null
+      ? `Expected ${v.expectedMinHours}–${v.expectedMaxHours} h`
+      : v?.reason || "";
   return {
     ...base,
+    department: detail.department ?? base.department,
     notes: detail.schoolOperationsNotes ?? detail.notes ?? "",
     newStaff: typeof detail.isNewStaff === "boolean" ? (detail.isNewStaff ? "Yes" : "No") : "—",
     hodReview: typeof detail.hodReviewRequired === "boolean" ? (detail.hodReviewRequired ? "Yes" : "No") : "—",
+    employmentType: detail.employmentType ?? undefined,
     detailSnapshot: {
       breakdown: normalizedBreakdown,
       actualTeachingRatioDisplay:
         actualTeachingRatio == null ? "—" : `${(Math.round(actualTeachingRatio * 10) / 10).toFixed(1)}%`,
-      actualTeachingRatioOutOfRange: Boolean(detail.validation?.isAbnormal),
-      showActualTeachingRatioBandWarning: false,
-      actualRatioHoverText: detail.validation?.reason || "",
-      totalHoursDisplay: String(detail.hours ?? base.hours),
-      adminModalHoursAbnormal: Boolean(detail.validation?.isAbnormal),
-      totalHoursTooltipText: detail.validation?.reason || "",
+      actualTeachingRatioOutOfRange: teachingRatioOutOfRange || bandMismatch,
+      showActualTeachingRatioBandWarning: bandMismatch && !teachingRatioOutOfRange,
+      actualRatioHoverText: v?.reason || "",
+      totalHoursDisplay: (() => {
+        const hrs = detail.hours ?? base.hours;
+        if (v?.expectedMinHours != null && v?.expectedMaxHours != null) {
+          const minDays = Math.ceil(v.expectedMinHours / 8);
+          const maxDays = Math.ceil(v.expectedMaxHours / 8);
+          return `${hrs} (>${minDays} & <=${maxDays} working days)`;
+        }
+        return String(hrs);
+      })(),
+      adminModalHoursAbnormal: hoursOutOfRange,
+      totalHoursTooltipText: hoursOutOfRange ? hoursHint : "",
       employmentType: detail.employmentType ?? "—",
     },
   };
@@ -298,6 +330,9 @@ function parseDateTime(value: string) {
 }
 
 function yearSemesterByItem(item: AcademicItem) {
+  if (item.academicYear && item.semester) {
+    return { year: item.academicYear, semester: item.semester as "S1" | "S2" | "" };
+  }
   const pushedAt = academicPushedAt(item);
   const dt = pushedAt ? parseDateTime(pushedAt) : new Date("");
   if (Number.isNaN(dt.getTime())) return { year: NaN, semester: "" as "" | "S1" | "S2" };
@@ -741,10 +776,11 @@ export default function Academic() {
     }
   }
 
-  async function loadAcademicWorkloadDetail(id: number) {
-    const detail = await apiJson<AcademicWorkloadDetailResponse>(`/api/academic/workloads/${id}/`);
-    const mapped = mapAcademicDetailToItem(detail, user.department);
-    setItems((prev) => prev.map((item) => (item.id === id ? { ...item, ...mapped } : item)));
+  async function loadAcademicWorkloadDetail(id: number, backendId: string) {
+    const detail = await apiJson<AcademicWorkloadDetailResponse>(`/api/academic/workloads/${backendId}/`);
+    const mapped = mapAcademicDetailToItem(detail);
+    // Preserve the original local `id` so detailId still resolves after the spread.
+    setItems((prev) => prev.map((item) => (item.id === id ? { ...item, ...mapped, id } : item)));
     return mapped;
   }
 
@@ -828,6 +864,17 @@ export default function Academic() {
     [visualizationData]
   );
 
+  // Dynamic title driven by the first loaded item's year/semester (or current date fallback).
+  const workloadReportTitle = useMemo(() => {
+    const first = items[0];
+    if (first?.academicYear && first?.semester) {
+      return `Workload Report ${first.academicYear}-${first.semester}`;
+    }
+    const y = new Date().getFullYear();
+    const sem = new Date().getMonth() < 6 ? "S1" : "S2";
+    return `Workload Report ${y}-${sem}`;
+  }, [items]);
+
   function toggleRow(id: number) {
     setSelectedIds((prev) => {
       if (prev.has(id)) return new Set();
@@ -842,7 +889,7 @@ export default function Academic() {
       await apiJson<{ submittedCount?: number }>("/api/academic/workload-requests/", {
         method: "POST",
         body: JSON.stringify({
-          workloadIds: rows.map((row) => String(row.id)),
+          workloadIds: rows.map((row) => row.backendId),
           applicationReason: reason,
         }),
       });
@@ -892,10 +939,10 @@ export default function Academic() {
     event.target.value = "";
   }
 
-  async function handleConfirmFromDetail(id: number) {
+  async function handleConfirmFromDetail(id: number, backendId: string) {
     try {
       const response = await apiJson<{ confirmation: "confirmed"; confirmationTime?: string }>(
-        `/api/academic/workloads/${id}/confirm/`,
+        `/api/academic/workloads/${backendId}/confirm/`,
         { method: "POST" }
       );
       setItems((prev) =>
@@ -1179,7 +1226,7 @@ export default function Academic() {
             <SearchButton onClick={handleSearch} />
           </div>
 
-          <div className="mt-10 text-4xl font-semibold text-slate-700">Workload Report Sem 1 - 2025</div>
+          <div className="mt-10 text-4xl font-semibold text-slate-700">{workloadReportTitle}</div>
 
           <div className="mt-6 rounded-md bg-[#eef3fb] p-4 ring-1 ring-slate-200">
             <div className="overflow-x-auto">
@@ -1211,7 +1258,7 @@ export default function Academic() {
                             setSupersededNoticeOpen(true);
                             return;
                           }
-                          void loadAcademicWorkloadDetail(item.id)
+                          void loadAcademicWorkloadDetail(item.id, item.backendId)
                             .then(() => setDetailId(item.id))
                             .catch((error) => {
                               setRequestInfo(error instanceof Error ? error.message : "Failed to load workload detail.");
@@ -1251,7 +1298,7 @@ export default function Academic() {
                             <span
                               className={`inline-flex justify-center ${rowCancelled ? "grayscale opacity-70" : ""}`}
                             >
-                              <StatusPill status={item.status} variant="academic" />
+                              <StatusPill status={item.status as "pending" | "approved" | "rejected"} variant="academic" />
                             </span>
                           ) : (
                             <span className="text-sm font-semibold text-slate-500">-</span>
@@ -1513,7 +1560,7 @@ export default function Academic() {
           item={detailItem}
           onClose={() => setDetailId(null)}
           onConfirm={async () => {
-            await handleConfirmFromDetail(detailItem.id);
+            await handleConfirmFromDetail(detailItem.id, detailItem.backendId);
             setDetailId(null);
           }}
         />

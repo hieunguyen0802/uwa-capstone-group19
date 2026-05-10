@@ -200,7 +200,7 @@ def profile_me(request):
         'surname': staff.user.last_name or '',
         'first_name': staff.user.first_name or '',
         'employee_id': staff.staff_number,
-        'title': staff.academic_title or '',
+        'title': staff.title or '',
         'department': staff.department.name,
         'avatar_url': avatar_url,
     }

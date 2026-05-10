@@ -52,11 +52,6 @@ def _hos_visible_qs():
     Same status gate as HoD (INITIAL only when confirmed), but starts from the
     full WorkloadReport set rather than the caller's department scope.
     """
-    confirmed_subq = AuditLog.objects.filter(
-        report=OuterRef('pk'),
-        changes__kind='CONFIRMATION',
-        changes__confirmation='confirmed',
-    )
     hod_self_subq = AuditLog.objects.filter(
         report=OuterRef('pk'),
         changes__kind='HOD_SELF_WORKLOAD_REQUEST',
@@ -64,11 +59,10 @@ def _hos_visible_qs():
     return (
         WorkloadReport.objects.filter(is_current=True)
         .select_related('staff__user', 'staff__department', 'snapshot_department')
-        .annotate(is_confirmed=Exists(confirmed_subq))
         .annotate(is_hod_self_submission=Exists(hod_self_subq))
         .filter(
             Q(status__in=['PENDING', 'APPROVED', 'REJECTED'])
-            | Q(status='INITIAL', is_confirmed=True)
+            | Q(status='INITIAL', confirmation_status='CONFIRMED')
         )
     )
 
@@ -91,8 +85,8 @@ def _serialize_staff_directory_row(staff):
         'title': staff.title or '',
         'currentDepartment': staff.department.name,
         'isActive': bool(staff.is_active),
-        'isNewEmployee': bool(staff.is_new_employee),
-        'notes': staff.notes or '',
+        'isNewEmployee': False,
+        'notes': '',
     }
 
 
@@ -171,7 +165,6 @@ def _normalize_staff_import_row(row, row_number):
         else str(is_new_raw).strip().lower() in ('true', '1', 'yes', 'y')
     )
     notes = str(_row_value(row, 'notes', 'Notes')).strip()
-
     messages = []
     if not staff_id:
         messages.append('staff_id is required')
@@ -445,7 +438,12 @@ def hos_semester_distribution_report_download(request, report_id):
 @api_view(['GET'])
 @permission_classes([IsAuthenticated, IsHoSOrSchoolOps])
 def hos_staff_directory(request):
-    qs = Staff.objects.select_related('user', 'department').order_by('staff_number')
+    qs = (
+        Staff.objects.select_related('user', 'department')
+        .exclude(pk=request.staff.pk)
+        .exclude(role='HOS')
+        .order_by('staff_number')
+    )
 
     first_name = (request.GET.get('firstName') or request.GET.get('first_name') or '').strip()
     if first_name:
@@ -558,8 +556,6 @@ def hos_staff_directory_import(request):
                 department=department,
                 is_active=parsed['isActive'],
                 title=parsed['title'],
-                is_new_employee=parsed['isNewEmployee'],
-                notes=parsed['notes'],
             )
         else:
             staff = existing_staff
@@ -567,15 +563,11 @@ def hos_staff_directory_import(request):
             staff.department = department
             staff.is_active = parsed['isActive']
             staff.title = parsed['title']
-            staff.is_new_employee = parsed['isNewEmployee']
-            staff.notes = parsed['notes']
             staff.save(update_fields=[
                 'user',
                 'department',
                 'is_active',
                 'title',
-                'is_new_employee',
-                'notes',
                 'updated_at',
             ])
         parsed['imported'] = True

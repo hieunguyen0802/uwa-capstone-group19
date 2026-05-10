@@ -117,7 +117,7 @@ export async function apiFetch(path: string, init: RequestInit = {}): Promise<Re
   const response = await fetch(buildApiUrl(path), {
     ...init,
     headers,
-    credentials: init.credentials ?? "include",
+    credentials: init.credentials ?? "same-origin",
   });
 
   if (!response.ok) {

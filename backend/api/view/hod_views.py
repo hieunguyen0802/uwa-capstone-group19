@@ -174,11 +174,6 @@ def _hod_visible_qs(staff):
       PENDING / APPROVED / REJECTED always visible;
       INITIAL visible only when academic has already confirmed (read-only).
     """
-    confirmed_subq = AuditLog.objects.filter(
-        report=OuterRef('pk'),
-        changes__kind='CONFIRMATION',
-        changes__confirmation='confirmed',
-    )
     self_submit_subq = AuditLog.objects.filter(
         report=OuterRef('pk'),
         changes__kind='HOD_SELF_WORKLOAD_REQUEST',
@@ -186,11 +181,10 @@ def _hod_visible_qs(staff):
     return (
         get_workload_queryset(staff)
         .filter(is_current=True)
-        .annotate(is_confirmed=Exists(confirmed_subq))
         .annotate(is_hod_self_submission=Exists(self_submit_subq))
         .filter(
             Q(status__in=['PENDING', 'APPROVED', 'REJECTED'])
-            | Q(status='INITIAL', is_confirmed=True)
+            | Q(status='INITIAL', confirmation_status='CONFIRMED')
         )
         .exclude(staff=staff, is_hod_self_submission=True)
     )
@@ -241,7 +235,6 @@ def _serialize_row(report, request_meta_map=None):
         'submittedAt': request_meta['submittedAt'],
         'semesterLabel': _sem_label(report.semester),
         'periodLabel': _period_label(report.academic_year, report.semester),
-        'isAnomaly': report.is_anomaly,
         # Optimistic-lock token placeholder. Current contract uses updated_at ISO;
         # strict ifVersion enforcement can be enabled later without renaming fields.
         'version': report.updated_at.isoformat() if report.updated_at else None,
@@ -270,7 +263,7 @@ def _serialize_detail(report):
         else None
     )
 
-    employment_map = {'FULL_TIME': 'Full-time', 'PART_TIME': 'Part-time', 'CASUAL': 'Casual'}
+    employment_type = 'Part-time' if report.snapshot_fte < Decimal('1.00') else 'Full-time'
 
     return {
         'id': str(report.report_id),
@@ -282,19 +275,18 @@ def _serialize_detail(report):
         'targetTeachingRatio': target_tr,
         'actualTeachingRatio': actual_tr,
         'totalWorkHours': _to_hours(total_hours),
-        'employmentType': employment_map.get(staff.employment_type, staff.employment_type),
-        'isNewStaff': bool(staff.is_new_employee),
+        'employmentType': employment_type,
+        'isNewStaff': False,
         # hodReviewRequired / schoolOperationsNotes are not modelled yet; exposed as defaults
         # so the frontend contract stays stable. Backed by real data once models catch up.
         'hodReviewRequired': False,
-        'schoolOperationsNotes': staff.notes or '',
+        'schoolOperationsNotes': '',
         'applicationReason': _get_request_reason(report),
         'status': report.status.lower(),
         'breakdown': _serialize_breakdown(items, report),
         'canEditBreakdown': report.status == 'PENDING',
         'cancelled': False,
         'reviewerNote': _get_reviewer_note(report),
-        'isAnomaly': report.is_anomaly,
         'version': report.updated_at.isoformat() if report.updated_at else None,
     }
 

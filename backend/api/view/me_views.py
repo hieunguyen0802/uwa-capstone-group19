@@ -49,6 +49,7 @@ def auth_me_view(request):
         "full_name": user.get_full_name(),
         "role": staff.role,
         "department": staff.department.name if staff.department_id else None,
+        "title": staff.title or "",
         "permissions": permissions,
         "menu": menu,
     })

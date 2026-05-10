@@ -116,7 +116,7 @@ def _str(value) -> str:
 
 
 def _is_confirmed(report: WorkloadReport) -> bool:
-    return report.audit_logs.filter(action_type='CONFIRMATION').exists()
+    return report.confirmation_status == 'CONFIRMED'
 
 
 def _parse_name(raw: str):
@@ -154,7 +154,6 @@ def _upsert_staff(row, importing_staff: Staff) -> Staff:
             user.email = email
             user.username = email
         user.save()
-        staff.fte = fte
         # Role is NOT updated on re-import: role changes must go through HoS Permission Assignment.
         # Allowing Excel to overwrite role would let SCHOOL_OPS escalate to HOS.
         staff.department = dept
@@ -174,7 +173,6 @@ def _upsert_staff(row, importing_staff: Staff) -> Staff:
         staff = Staff.objects.create(
             staff_number=staff_number,
             user=user,
-            fte=fte,
             role=role,
             department=dept,
         )
@@ -283,7 +281,7 @@ def import_workload_excel(workbook, importing_staff: Staff) -> dict:
                     staff=staff,
                     academic_year=year,
                     semester=semester,
-                    snapshot_fte=staff.fte,
+                    snapshot_fte=fte,
                     snapshot_department=staff.department,
                     status='INITIAL',
                     import_batch_id=batch_id,
@@ -299,10 +297,9 @@ def import_workload_excel(workbook, importing_staff: Staff) -> dict:
                 # Create WorkloadItems from all rows in this group
                 _create_workload_items(report, group, first_row)
 
-                # Evaluate anomaly after items are created
-                from api.services.workload_service import evaluate_mvp_anomaly, persist_report_anomaly
-                anomaly_result = evaluate_mvp_anomaly(report)
-                persist_report_anomaly(report, anomaly_result)
+                # Evaluate anomaly after items are created (for audit/logging only; not persisted)
+                from api.services.workload_service import evaluate_mvp_anomaly
+                evaluate_mvp_anomaly(report)
 
                 action = 'MODIFIED_BY_REIMPORT' if existing else 'IMPORTED'
                 AuditLog.objects.create(
