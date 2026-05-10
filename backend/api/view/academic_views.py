@@ -330,18 +330,21 @@ def academic_workload_detail(request, id):
 def academic_confirm_workload(request, id):
     """POST /api/academic/workloads/{id}/confirm/  — no request body required."""
     report = get_object_or_404(_own_reports_qs(request.staff), report_id=id)
-    anomaly_result = evaluate_mvp_anomaly(
-        report,
-        department_conflict=_is_department_conflict(report),
-    )
-    if anomaly_result['is_anomaly']:
-        return Response(
-            {
-                'detail': 'Cannot confirm workload with anomaly',
-                'anomaly': anomaly_result['reasons'],
-            },
-            status=status.HTTP_409_CONFLICT,
+    # Skip anomaly check when HoD has already reviewed and approved the report —
+    # the anomaly was examined during HoD review, so the academic may now confirm.
+    if report.status != 'APPROVED':
+        anomaly_result = evaluate_mvp_anomaly(
+            report,
+            department_conflict=_is_department_conflict(report),
         )
+        if anomaly_result['is_anomaly']:
+            return Response(
+                {
+                    'detail': 'Cannot confirm workload with anomaly',
+                    'anomaly': anomaly_result['reasons'],
+                },
+                status=status.HTTP_409_CONFLICT,
+            )
 
     if report.confirmation_status != 'CONFIRMED':
         report.confirmation_status = 'CONFIRMED'
