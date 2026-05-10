@@ -24,7 +24,7 @@ export function readAccessToken(): string {
     window.localStorage.getItem("token");
   if (directToken) return directToken;
 
-  const userRecord = parseStoredJson(window.localStorage.getItem("user"));
+  const userRecord = parseStoredJson(window.sessionStorage.getItem("user") ?? window.localStorage.getItem("user"));
   const nestedToken =
     (typeof userRecord?.access === "string" && userRecord.access) ||
     (typeof userRecord?.token === "string" && userRecord.token) ||
