@@ -16,6 +16,7 @@ from api.models import AuditLog, WorkloadReport
 from api.permissions import IsAcademicOrHoD
 from api.services.workload_service import (
     evaluate_mvp_anomaly,
+    staff_has_role,
     workload_item_hours_for_totals,
     _parse_year_range,
     _filter_reports_by_range,
@@ -466,7 +467,7 @@ def academic_submit_workload_requests(request):
 
     result_items = []
     for report in reports:
-        kind = 'HOD_SELF_WORKLOAD_REQUEST' if request.staff.role == 'HOD' else 'WORKLOAD_REQUEST'
+        kind = 'HOD_SELF_WORKLOAD_REQUEST' if staff_has_role(request.staff, 'HOD') else 'WORKLOAD_REQUEST'
         log = AuditLog.objects.create(
             report=report,
             action_by=request.staff,

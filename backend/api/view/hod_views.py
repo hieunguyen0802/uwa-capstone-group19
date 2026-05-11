@@ -24,12 +24,14 @@ from rest_framework.response import Response
 from api.models import AuditLog, WorkloadItem, WorkloadReport
 from api.permissions import IsHoD
 from api.services.workload_service import (
+    WORKLOAD_REQUEST_KINDS,
     _filter_reports_by_range,
     _parse_year_range,
     _reporting_period_label,
     evaluate_mvp_anomaly,
     get_workload_queryset,
     stale_report_response_payload,
+    workload_item_hours_for_totals,
 )
 
 
@@ -57,7 +59,7 @@ def _first(request_data, *keys, default=''):
 
 def _get_workload_request_meta(report):
     log = (
-        AuditLog.objects.filter(report=report, changes__kind='WORKLOAD_REQUEST')
+        AuditLog.objects.filter(report=report, changes__kind__in=WORKLOAD_REQUEST_KINDS)
         .order_by('-created_at')
         .first()
     )
@@ -77,7 +79,7 @@ def _get_workload_request_meta_map(reports):
         return meta
 
     logs = (
-        AuditLog.objects.filter(report_id__in=report_ids, changes__kind='WORKLOAD_REQUEST')
+        AuditLog.objects.filter(report_id__in=report_ids, changes__kind__in=WORKLOAD_REQUEST_KINDS)
         .order_by('-created_at')
     )
     for log in logs:
@@ -107,6 +109,14 @@ def _get_reviewer_note(report):
         .first()
     )
     return log.comment if log else ''
+
+
+def _report_item_hours(items) -> Decimal:
+    return sum((workload_item_hours_for_totals(item) for item in items), Decimal('0.00'))
+
+
+def _report_research_hours(report) -> Decimal:
+    return evaluate_mvp_anomaly(report)['metrics']['research_pts'] * Decimal('17.25')
 
 
 def _serialize_breakdown(items, report=None):
@@ -176,7 +186,13 @@ def _hod_visible_qs(staff):
     """
     self_submit_subq = AuditLog.objects.filter(
         report=OuterRef('pk'),
-        changes__kind='HOD_SELF_WORKLOAD_REQUEST',
+    ).filter(
+        Q(changes__kind='HOD_SELF_WORKLOAD_REQUEST') |
+        Q(
+            changes__kind='WORKLOAD_REQUEST',
+            action_by=OuterRef('staff'),
+            action_by__user__groups__name='HOD',
+        )
     )
     return (
         get_workload_queryset(staff)
@@ -216,10 +232,7 @@ def _serialize_row(report, request_meta_map=None):
     items = list(report.items.all())
     staff_user = report.staff.user
     full_name = staff_user.get_full_name().strip() or staff_user.username
-    items_total = sum((i.allocated_hours for i in items), Decimal('0.00'))
-    # Include research residual so total matches Academic/Ops views
-    research_hours = evaluate_mvp_anomaly(report)['metrics']['research_pts'] * Decimal('17.25')
-    total = items_total + research_hours
+    total = _report_total_hours(report, items=items)
     request_meta = (
         request_meta_map.get(str(report.report_id), {'reason': '', 'submittedAt': None})
         if request_meta_map is not None
@@ -249,7 +262,7 @@ def _serialize_detail(report):
     staff = report.staff
     staff_user = staff.user
     full_name = staff_user.get_full_name().strip() or staff_user.username
-    items_hours = sum((i.allocated_hours for i in items), Decimal('0.00'))
+    items_hours = _report_item_hours(items)
 
     # Include research residual so total matches Academic/Ops views
     anomaly_result = evaluate_mvp_anomaly(report)
@@ -305,8 +318,9 @@ def _serialize_detail(report):
     }
 
 
-def _report_total_hours(report) -> Decimal:
-    return sum((item.allocated_hours for item in report.items.all()), Decimal('0.00'))
+def _report_total_hours(report, items=None) -> Decimal:
+    report_items = list(items) if items is not None else list(report.items.all())
+    return _report_item_hours(report_items) + _report_research_hours(report)
 
 
 def _report_period_id(prefix: str, year, semester, department='') -> str:

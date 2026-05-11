@@ -4,6 +4,7 @@ from api.models import WorkloadReport
 
 POINT_TO_HOURS = Decimal('17.25')
 HDR_DISPLAY_ROW_PREFIXES = ('Full time students', 'Part time students')
+WORKLOAD_REQUEST_KINDS = ('WORKLOAD_REQUEST', 'HOD_SELF_WORKLOAD_REQUEST')
 
 STALE_REPORT_ERROR = {
     'success': False,
@@ -19,6 +20,30 @@ def stale_report_response_payload(extra=None):
     return payload
 
 
+def staff_has_role(staff, *role_names) -> bool:
+    """Return True when a staff member effectively has any of the given roles.
+
+    Mixed-role accounts can carry extra Django auth groups beyond Staff.role.
+    HOD/HoS/School Ops views already authorize by group membership, so queryset
+    scoping and workflow branching must follow the same effective-role check.
+    """
+    if staff is None:
+        return False
+
+    wanted = {str(name).strip().upper() for name in role_names if str(name).strip()}
+    if not wanted:
+        return False
+
+    if str(getattr(staff, 'role', '')).strip().upper() in wanted:
+        return True
+
+    user = getattr(staff, 'user', None)
+    if user is None or getattr(staff, 'user_id', None) is None:
+        return False
+
+    return user.groups.filter(name__in=wanted).exists()
+
+
 def get_workload_queryset(staff):
     """
     Returns a WorkloadReport queryset scoped to what `staff` is allowed to see.
@@ -30,11 +55,13 @@ def get_workload_queryset(staff):
     qs = WorkloadReport.objects.filter(is_current=True).select_related(
         'staff__user', 'staff__department', 'snapshot_department'
     )
-    if staff.role == 'ACADEMIC':
-        return qs.filter(staff=staff)
-    if staff.role == 'HOD':
+    if staff_has_role(staff, 'SCHOOL_OPS', 'HOS'):
+        return qs
+    if staff_has_role(staff, 'HOD'):
         return qs.filter(snapshot_department=staff.department)
-    return qs
+    if staff_has_role(staff, 'ACADEMIC'):
+        return qs.filter(staff=staff)
+    return qs.none()
 
 
 def _quantize_2(value: Decimal) -> Decimal:

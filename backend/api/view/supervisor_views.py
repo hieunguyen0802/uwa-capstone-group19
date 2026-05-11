@@ -20,6 +20,7 @@ from api.services.audit_service import (
     write_audit,
 )
 from api.services.workload_service import (
+    WORKLOAD_REQUEST_KINDS,
     get_workload_queryset,
     stale_report_response_payload,
     _parse_year_range,
@@ -47,7 +48,7 @@ def _get_request_reason(report):
     """Return the reason academic gave when submitting this report."""
     log = AuditLog.objects.filter(
         report=report,
-        changes__kind='WORKLOAD_REQUEST',
+        changes__kind__in=WORKLOAD_REQUEST_KINDS,
     ).order_by('-created_at').first()
     return log.comment if log else ''
 
@@ -56,7 +57,7 @@ def _get_submitted_time(report):
     """Return the timestamp when academic submitted this report."""
     log = AuditLog.objects.filter(
         report=report,
-        changes__kind='WORKLOAD_REQUEST',
+        changes__kind__in=WORKLOAD_REQUEST_KINDS,
     ).order_by('-created_at').first()
     return log.created_at.strftime('%Y-%m-%d %H:%M') if log else ''
 
