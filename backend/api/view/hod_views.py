@@ -30,6 +30,9 @@ from api.services.workload_service import (
     _reporting_period_label,
     evaluate_mvp_anomaly,
     get_workload_queryset,
+    report_research_hours,
+    report_total_hours,
+    semester_sort_key,
     stale_report_response_payload,
     workload_item_hours_for_totals,
 )
@@ -116,7 +119,7 @@ def _report_item_hours(items) -> Decimal:
 
 
 def _report_research_hours(report) -> Decimal:
-    return evaluate_mvp_anomaly(report)['metrics']['research_pts'] * Decimal('17.25')
+    return report_research_hours(report)
 
 
 def _serialize_breakdown(items, report=None):
@@ -319,8 +322,7 @@ def _serialize_detail(report):
 
 
 def _report_total_hours(report, items=None) -> Decimal:
-    report_items = list(items) if items is not None else list(report.items.all())
-    return _report_item_hours(report_items) + _report_research_hours(report)
+    return report_total_hours(report, items)
 
 
 def _report_period_id(prefix: str, year, semester, department='') -> str:
@@ -439,18 +441,43 @@ def _analytics_payload(qs, year_from, year_to, semester_filter, scope_label):
     trend = {}
     status_distribution = {'pending': 0, 'approved': 0, 'rejected': 0, 'initial': 0}
     hours_distribution = {}
+    department_stats = {}
+    department_trend = {}
     for report in reports:
         label = _period_label(report.academic_year, report.semester)
+        semester_label = f"{report.academic_year} {report.semester}"
+        dept_name = report.snapshot_department.name
+        total = _report_total_hours(report)
         bucket = trend.setdefault(label, {'period': label, 'totalWorkHours': Decimal('0.00'), 'staff': set()})
-        bucket['totalWorkHours'] += _report_total_hours(report)
+        bucket['totalWorkHours'] += total
         bucket['staff'].add(report.staff_id)
         status_distribution[report.status.lower()] = status_distribution.get(report.status.lower(), 0) + 1
-        dept_name = report.snapshot_department.name
-        hours_distribution[dept_name] = hours_distribution.get(dept_name, Decimal('0.00')) + _report_total_hours(report)
+        hours_distribution[dept_name] = hours_distribution.get(dept_name, Decimal('0.00')) + total
+
+        dept_bucket = department_stats.setdefault(dept_name, {
+            'department': dept_name,
+            'academics': set(),
+            'totalHours': Decimal('0.00'),
+            'pending': 0,
+            'approved': 0,
+            'rejected': 0,
+        })
+        dept_bucket['academics'].add(report.staff_id)
+        dept_bucket['totalHours'] += total
+        status_key = report.status.lower()
+        if status_key == 'pending':
+            dept_bucket['pending'] += 1
+        elif status_key == 'approved':
+            dept_bucket['approved'] += 1
+        elif status_key == 'rejected':
+            dept_bucket['rejected'] += 1
+
+        trend_row = department_trend.setdefault(semester_label, {'semester': semester_label})
+        trend_row[dept_name] = _to_hours(Decimal(str(trend_row.get(dept_name, 0))) + total)
 
     total_work_hours_trend = []
     average_work_hours_by_semester = []
-    for label in sorted(trend):
+    for label in sorted(trend, key=semester_sort_key):
         row = trend[label]
         hours = _to_hours(row['totalWorkHours'])
         staff_count = len(row['staff'])
@@ -467,6 +494,21 @@ def _analytics_payload(qs, year_from, year_to, semester_filter, scope_label):
         'totalWorkHoursTrend': total_work_hours_trend,
         'averageWorkHoursBySemester': average_work_hours_by_semester,
         'statusDistribution': status_distribution,
+        'departmentStats': [
+            {
+                'department': dept,
+                'academics': len(row['academics']),
+                'totalHours': _to_hours(row['totalHours']),
+                'pending': row['pending'],
+                'approved': row['approved'],
+                'rejected': row['rejected'],
+            }
+            for dept, row in sorted(department_stats.items())
+        ],
+        'departmentWorkloadTrend': [
+            department_trend[key]
+            for key in sorted(department_trend.keys(), key=semester_sort_key)
+        ],
         'workloadHoursDistribution': [
             {'department': dept, 'totalWorkHours': _to_hours(hours)}
             for dept, hours in sorted(hours_distribution.items())

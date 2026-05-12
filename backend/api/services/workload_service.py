@@ -82,6 +82,18 @@ def workload_item_hours_for_totals(item) -> Decimal:
     return item.allocated_hours or Decimal('0.00')
 
 
+def report_research_hours(report) -> Decimal:
+    """Calculated display hours for the Research (residual) breakdown row."""
+    return evaluate_mvp_anomaly(report)['metrics']['research_pts'] * POINT_TO_HOURS
+
+
+def report_total_hours(report, items=None) -> Decimal:
+    """Return the chart/list total using the same 5-tab workload breakdown as the UI."""
+    report_items = list(items) if items is not None else list(report.items.all())
+    item_hours = sum((workload_item_hours_for_totals(item) for item in report_items), Decimal('0.00'))
+    return item_hours + report_research_hours(report)
+
+
 def _teaching_band(calc_tr: Decimal) -> str:
     if calc_tr <= Decimal('0.20'):
         return 'Research Focused'
@@ -227,6 +239,29 @@ def _filter_reports_by_range(qs, year_from, year_to, semester_filter):
 
 def _build_semester_label(year: int, semester: str) -> str:
     return f"{year} {semester}"
+
+
+def semester_sort_key(label_or_pair):
+    sem_order = {'S1': 0, 'S2': 1, 'FULL_YEAR': 2}
+    if isinstance(label_or_pair, tuple):
+        year, semester = label_or_pair
+        return int(year or 0), sem_order.get(str(semester or '').upper(), 9)
+
+    parts = str(label_or_pair or '').replace('-', ' ').split()
+    year = 0
+    semester = ''
+    if parts:
+        try:
+            year = int(parts[0])
+        except (TypeError, ValueError):
+            year = 0
+    if len(parts) > 1:
+        raw_sem = parts[1].upper()
+        if raw_sem in {'1', '2'}:
+            semester = f"S{raw_sem}"
+        else:
+            semester = f"S{raw_sem[-1]}" if raw_sem.startswith('SEM') and raw_sem[-1].isdigit() else raw_sem
+    return year, sem_order.get(semester, 9)
 
 
 def _reporting_period_label(year_from, year_to, semester_filter) -> str:
