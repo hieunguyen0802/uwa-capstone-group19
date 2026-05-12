@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useState } from "react";
 import {
   CartesianGrid,
   Legend,
@@ -10,7 +10,6 @@ import {
   YAxis,
 } from "recharts";
 import DashboardHeader from "../components/common/DashboardHeader";
-import InfoField from "../components/common/InfoField";
 import PaginationControls from "../components/common/PaginationControls";
 import ProfileModal from "../components/common/ProfileModal";
 import ReportingFilterIntro from "../components/common/ReportingFilterIntro";
@@ -21,6 +20,7 @@ import StatusPill from "../components/common/StatusPill";
 import YearRangeSemesterActionRow from "../components/common/YearRangeSemesterActionRow";
 import ThemedNoticeModal, { SUPERSEDED_RECORD_MESSAGE } from "../components/common/ThemedNoticeModal";
 import WorkHoursBadge from "../components/common/WorkHoursBadge";
+import WorkloadDetailModal, { type WorkloadDetailField, type WorkloadDetailNoteSection } from "../components/common/WorkloadDetailModal";
 import { apiJson, clearLocalStorageKeys, downloadApiFile, isAbortError } from "../api/client";
 import { useAuth } from "../auth/AuthContext";
 import { profileFromAuth } from "../auth/profileFromAuth";
@@ -91,23 +91,6 @@ const BREAKDOWN_TABS: BreakdownCategory[] = [
   "Research (residual)",
 ];
 
-function workloadBreakdownTotalLabel(tab: BreakdownCategory): string {
-  switch (tab) {
-    case "Teaching":
-      return "Teaching Total";
-    case "HDR":
-      return "HDR Total";
-    case "Service":
-      return "Service Total";
-    case "Assigned Roles":
-      return "Assigned Roles Total";
-    case "Research (residual)":
-      return "Research Total";
-    default:
-      return "Total";
-  }
-}
-
 function totalBreakdownHours(breakdown: BreakdownData): number {
   return BREAKDOWN_TABS.reduce(
     (sum, tab) => sum + breakdown[tab].reduce((s, row) => s + (row.excludeFromWorkloadTotal ? 0 : row.hours), 0),
@@ -126,19 +109,6 @@ function actualTeachingRatioPercent(breakdown: BreakdownData): number {
   return Math.round((teachingH / totalH) * 1000) / 10;
 }
 
-function isDetailHoursAbnormal(item: AcademicItem, breakdown: BreakdownData): boolean {
-  const actualRatioPct = actualTeachingRatioPercent(breakdown);
-  const targetRatio = item.targetTeachingRatio;
-  if (targetRatio != null) {
-    if (actualRatioPct + 0.05 < targetRatio) return true;
-  }
-  const teachingTarget = item.teachingTargetHours;
-  if (teachingTarget != null) {
-    const teachingActual = teachingHoursFromBreakdown(breakdown);
-    if (teachingActual + 0.001 < teachingTarget) return true;
-  }
-  return false;
-}
 
 const SUPERVISOR_DRAFT_KEY = "academic_to_supervisor_requests_v1";
 const ACADEMIC_STATUS_SYNC_KEY = "academic_status_sync_v1";
@@ -284,17 +254,18 @@ function mapAcademicDetailToItem(detail: AcademicWorkloadDetailResponse, userDep
       breakdown: normalizedBreakdown,
       actualTeachingRatioDisplay:
         actualTeachingRatio == null ? "—" : `${(Math.round(actualTeachingRatio * 10) / 10).toFixed(1)}%`,
-      actualTeachingRatioOutOfRange: teachingRatioOutOfRange || bandMismatch,
+      actualTeachingRatioOutOfRange: teachingRatioOutOfRange,
       showActualTeachingRatioBandWarning: bandMismatch && !teachingRatioOutOfRange,
       actualRatioHoverText: v?.reason || "",
       totalHoursDisplay: (() => {
         const hrs = detail.hours ?? base.hours;
+        const hrsDisplay = (Math.round(hrs * 10) / 10).toFixed(1);
         if (v?.expectedMinHours != null && v?.expectedMaxHours != null) {
           const minDays = Math.ceil(v.expectedMinHours / 8);
           const maxDays = Math.ceil(v.expectedMaxHours / 8);
-          return `${hrs} (>${minDays} & <=${maxDays} working days)`;
+          return `${hrsDisplay} (>${minDays} & <=${maxDays} working days)`;
         }
-        return String(hrs);
+        return hrsDisplay;
       })(),
       adminModalHoursAbnormal: hoursOutOfRange,
       totalHoursTooltipText: hoursOutOfRange ? hoursHint : "",
@@ -318,7 +289,10 @@ function formatLocalDateTime(d: Date) {
 
 function academicConfirmationTimeCell(item: AcademicItem): string {
   if (item.confirmation !== "confirmed") return "";
-  return item.confirmationTime ?? "";
+  const raw = item.confirmationTime?.trim();
+  if (!raw) return "";
+  const d = new Date(raw);
+  return Number.isNaN(d.getTime()) ? raw : formatLocalDateTime(d);
 }
 
 function academicAssignedBy(item: AcademicItem) {
@@ -350,54 +324,6 @@ function computeYAxisDomain(values: Array<number | null>) {
   return [Math.max(0, min - pad), max + pad] as [number, number];
 }
 
-function breakdownById(id: number, totalHours: number): BreakdownData {
-  const safeTotal = Math.max(0, Math.round(totalHours));
-  const teaching1 = Math.max(0, Math.floor(safeTotal * 0.3));
-  const teaching2 = Math.max(0, Math.floor(safeTotal * 0.15));
-  const role1 = Math.max(0, Math.floor(safeTotal * 0.2));
-  const role2 = Math.max(0, Math.floor(safeTotal * 0.1));
-  const hdr1 = Math.max(0, Math.floor(safeTotal * 0.1));
-  const hdr2 = Math.max(0, Math.floor(safeTotal * 0.05));
-  const used = teaching1 + teaching2 + role1 + role2 + hdr1 + hdr2;
-  const service = Math.max(0, safeTotal - used);
-
-  const teachingUnits = [
-    ["CITS2401", "CITS2200"],
-    ["CITS3002", "CITS1401"],
-    ["CITS1001", "CITS2005"],
-  ] as const;
-  const hdrStudents = [
-    ["Student A", "Student B"],
-    ["Student C", "Student D"],
-    ["Student E", "Student F"],
-  ] as const;
-  const [unitA, unitB] = teachingUnits[id % teachingUnits.length];
-  const [studentA, studentB] = hdrStudents[id % hdrStudents.length];
-
-  return {
-    Teaching: [
-      { name: unitA, hours: teaching1 },
-      { name: unitB, hours: teaching2 },
-    ],
-    "Assigned Roles": [
-      { name: "Program Chair", hours: role1 },
-      { name: "Outreach Chair", hours: role2 },
-    ],
-    HDR: [
-      { name: studentA, hours: hdr1 },
-      { name: studentB, hours: hdr2 },
-    ],
-    Service: [{ name: "Committee support", hours: service }],
-    "Research (residual)": [{ name: "Research (residual)", hours: 0 }],
-  };
-}
-
-function statusLabel(status: AcademicItem["status"]) {
-  if (status === "approved") return "Approved";
-  if (status === "rejected") return "Rejected";
-  if (status === "") return "";
-  return "Pending";
-}
 
 function confirmationPillClass(confirmation: AcademicItem["confirmation"]) {
   if (confirmation === "confirmed") return "text-[#15803d]";
@@ -433,9 +359,6 @@ function AcademicDetailModal({
   onClose: () => void;
   onConfirm: () => void;
 }) {
-  const [activeTab, setActiveTab] = useState<BreakdownCategory>("Teaching");
-  const [descriptionExpanded, setDescriptionExpanded] = useState(true);
-  const [hodNotesExpanded, setHodNotesExpanded] = useState(false);
   const breakdown = useMemo(
     () => item.detailSnapshot?.breakdown ?? normalizeAcademicBreakdown(),
     [item.detailSnapshot]
@@ -445,16 +368,12 @@ function AcademicDetailModal({
     return Boolean(note) || item.status === "approved" || item.status === "rejected";
   }, [item.status, item.supervisorNote]);
 
-  useEffect(() => {
-    setHodNotesExpanded(hasHodReviewContent);
-  }, [item.id, hasHodReviewContent]);
   const displayTargetTeachingRatio =
-    item.targetTeachingRatio != null ? `${(Math.round(item.targetTeachingRatio * 10) / 10).toFixed(1)}%` : "—";
+    item.targetTeachingRatio != null ? `${(Math.round(item.targetTeachingRatio * 10) / 10).toFixed(1)}%` : "-";
   const displayActualTeachingRatio =
     item.detailSnapshot?.actualTeachingRatioDisplay ?? `${actualTeachingRatioPercent(breakdown)}%`;
-  // Keep modal and table on the same source of truth (`item.hours`), while
-  // still showing Ops-provided range hint suffix when it matches.
-  const canonicalHoursText = String(item.hours);
+
+  const canonicalHoursText = (Math.round(item.hours * 10) / 10).toFixed(1);
   const snapshotDisplay = item.detailSnapshot?.totalHoursDisplay?.trim() ?? "";
   const snapshotMatch = snapshotDisplay.match(/^([0-9]+(?:\.[0-9]+)?)\s*(.*)$/);
   const snapshotLeadingHours = snapshotMatch?.[1] ?? "";
@@ -465,6 +384,7 @@ function AcademicDetailModal({
     !snapshotHoursMismatch && snapshotSuffix
       ? `${canonicalHoursText} ${snapshotSuffix}`
       : canonicalHoursText;
+
   const actualRatioInputClassName = item.detailSnapshot?.actualTeachingRatioOutOfRange
     ? "border-red-500 ring-1 ring-red-300 bg-red-50/60 text-red-900"
     : item.detailSnapshot?.showActualTeachingRatioBandWarning
@@ -476,163 +396,89 @@ function AcademicDetailModal({
   const totalHoursInputClassName = !snapshotHoursMismatch && item.detailSnapshot?.adminModalHoursAbnormal
     ? "border-red-500 ring-1 ring-red-300 bg-red-50/40 text-red-900 text-xs sm:text-sm"
     : "text-xs sm:text-sm";
-  const tabRows = breakdown[activeTab];
-  const tabTotal = tabRows.reduce((sum, row) => sum + (row.excludeFromWorkloadTotal ? 0 : row.hours), 0);
   const hodReviewRequiresSubmission = String(item.hodReview ?? "")
     .trim()
     .toLowerCase() === "yes";
+  // Blocks confirm only while waiting for HoD — once approved the academic can self-confirm.
+  const hodReviewBlocksConfirm = hodReviewRequiresSubmission && item.status !== "approved";
+
+  const fields: WorkloadDetailField[] = [
+    { label: "Name", value: item.name },
+    { label: "Staff ID", value: item.employeeId },
+    { label: "Target teaching ratio", value: displayTargetTeachingRatio },
+    {
+      label: "Actual teaching ratio",
+      value: displayActualTeachingRatio,
+      className: "tabular-nums font-sans",
+      inputClassName: actualRatioInputClassName,
+      tooltipText: item.detailSnapshot?.actualRatioHoverText || "",
+      tooltipClassName: actualRatioTooltipClassName,
+    },
+    {
+      label: "Total work hours",
+      value: displayTotalWorkHours,
+      className: "tabular-nums font-sans",
+      inputClassName: totalHoursInputClassName,
+      tooltipText: !snapshotHoursMismatch ? item.detailSnapshot?.totalHoursTooltipText || "" : "",
+    },
+    { label: "Employment type", value: item.detailSnapshot?.employmentType || item.employmentType || "-" },
+    { label: "New Staff", value: item.newStaff || "-" },
+    {
+      label: "HoD Review",
+      value: item.hodReview || "-",
+      inputClassName: hodReviewBlocksConfirm
+        ? "border-red-400 bg-red-100 font-semibold text-red-800"
+        : hodReviewRequiresSubmission
+          ? "border-green-400 bg-green-100 font-semibold text-green-800"
+          : "",
+    },
+  ];
+
+  const notesSections: WorkloadDetailNoteSection[] = [
+    {
+      label: "School of Operations notes",
+      value: item.notes,
+      rows: 4,
+      collapsible: true,
+      defaultExpanded: true,
+    },
+    {
+      label: "Head of Department notes",
+      value: item.supervisorNote?.trim() ? item.supervisorNote : "- no notes yet -",
+      rows: 3,
+      collapsible: true,
+      defaultExpanded: hasHodReviewContent,
+    },
+  ];
 
   return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 p-4" onClick={onClose}>
-      <div className="w-full max-w-2xl rounded-md bg-white shadow-lg" onClick={(e) => e.stopPropagation()}>
-        <div className="flex items-center justify-between rounded-t-md bg-[#2f4d9c] px-5 py-3 text-white">
-          <div className="text-lg font-bold">
-            {`${yearSemesterByItem(item).year}-${yearSemesterByItem(item).semester}-${item.department || "Department N/A"}-Academic`}
-          </div>
+    <WorkloadDetailModal
+      title={`${yearSemesterByItem(item).year}-${yearSemesterByItem(item).semester}-${item.department || "Department N/A"}-Academic`}
+      fields={fields}
+      breakdown={breakdown}
+      tabs={BREAKDOWN_TABS}
+      rowKeyPrefix={item.id}
+      onClose={onClose}
+      notesSections={notesSections}
+      footer={
+        <div className="flex flex-col items-center gap-2 pt-1">
           <button
             type="button"
-            className="inline-flex h-9 w-9 items-center justify-center rounded-md bg-white/10 hover:bg-white/20"
-            onClick={onClose}
+            onClick={onConfirm}
+            disabled={item.status === "pending" || item.status === "rejected" || hodReviewBlocksConfirm}
+            className={`rounded-md px-6 py-2 text-sm font-semibold ${
+              item.confirmation === "confirmed"
+                ? "bg-[#16a34a] text-white"
+                : item.status === "pending" || item.status === "rejected" || hodReviewBlocksConfirm
+                  ? "cursor-not-allowed bg-slate-400 text-white"
+                  : "bg-[#2f4d9c] text-white hover:bg-[#29458c]"
+            }`}
           >
-            <span className="text-xl leading-none">×</span>
+            Confirmed
           </button>
         </div>
-
-        <div className="space-y-4 px-5 py-4">
-          <div className="grid grid-cols-2 gap-4">
-            <InfoField label="Name" value={item.name} />
-            <InfoField label="Staff ID" value={item.employeeId} />
-          </div>
-          <div className="grid grid-cols-2 gap-4">
-            <InfoField label="Target teaching ratio" value={displayTargetTeachingRatio} />
-            <InfoField
-              label="Actual teaching ratio"
-              value={displayActualTeachingRatio}
-              className="tabular-nums font-sans"
-              inputClassName={actualRatioInputClassName}
-              tooltipText={item.detailSnapshot?.actualRatioHoverText || ""}
-              tooltipClassName={actualRatioTooltipClassName}
-            />
-            <InfoField
-              label="Total work hours"
-              value={displayTotalWorkHours}
-              className="tabular-nums font-sans"
-              inputClassName={totalHoursInputClassName}
-              tooltipText={!snapshotHoursMismatch ? item.detailSnapshot?.totalHoursTooltipText || "" : ""}
-            />
-            <InfoField label="Employment type" value={item.detailSnapshot?.employmentType || item.employmentType || "—"} />
-            <InfoField label="New Staff" value={item.newStaff || "—"} />
-            <InfoField
-              label="HoD Review"
-              value={item.hodReview || "—"}
-              inputClassName={
-                hodReviewRequiresSubmission
-                  ? "border-red-400 bg-red-100 font-semibold text-red-800"
-                  : ""
-              }
-            />
-          </div>
-          <div>
-            <div className="text-xs font-semibold uppercase text-slate-500">Workload Breakdown</div>
-            <div className="mt-1 overflow-hidden rounded border border-slate-300">
-              <div className="flex flex-wrap gap-2 border-b border-slate-200 bg-slate-50 px-3 py-2">
-                {BREAKDOWN_TABS.map((tab) => (
-                  <button
-                    key={tab}
-                    type="button"
-                    onClick={() => setActiveTab(tab)}
-                    className={`rounded px-3 py-1 text-xs font-semibold ${
-                      activeTab === tab
-                        ? "bg-[#2f4d9c] text-white"
-                        : "bg-white text-slate-700 ring-1 ring-slate-300 hover:bg-slate-100"
-                    }`}
-                  >
-                    {tab}
-                  </button>
-                ))}
-              </div>
-              <table className="min-w-full">
-                <thead className="bg-white">
-                  <tr className="text-left text-xs font-semibold uppercase text-slate-600">
-                    <th className="px-3 py-2">{activeTab}</th>
-                    <th className="px-3 py-2 text-right">Hours</th>
-                  </tr>
-                </thead>
-                <tbody className="divide-y divide-slate-200 bg-white text-sm text-slate-700">
-                  {tabRows.map((row, idx) => (
-                    <tr key={`${item.id}-${activeTab}-${idx}`}>
-                      <td className="px-3 py-2">{row.name}</td>
-                      <td className="px-3 py-2 text-right tabular-nums font-sans">{row.hours}</td>
-                    </tr>
-                  ))}
-                  <tr className="bg-slate-50">
-                    <td className="px-3 py-2 font-semibold">{workloadBreakdownTotalLabel(activeTab)}</td>
-                    <td className="px-3 py-2 text-right font-semibold tabular-nums font-sans">{tabTotal}</td>
-                  </tr>
-                </tbody>
-              </table>
-            </div>
-          </div>
-          <div>
-            <button
-              type="button"
-              onClick={() => setDescriptionExpanded((v) => !v)}
-              className="flex w-full items-center justify-between rounded border border-slate-300 bg-slate-50 px-3 py-2 text-left text-xs font-semibold text-slate-500"
-            >
-              <span>School of Operations notes</span>
-              <span className="text-base leading-none">{descriptionExpanded ? "−" : "+"}</span>
-            </button>
-            {descriptionExpanded && (
-              <textarea
-                readOnly
-                value={item.notes}
-                className="mt-1 h-24 w-full resize-none rounded border border-slate-300 px-3 py-2 text-sm"
-              />
-            )}
-          </div>
-          <div>
-            <button
-              type="button"
-              onClick={() => setHodNotesExpanded((v) => !v)}
-              className="flex w-full items-center justify-between rounded border border-slate-300 bg-slate-50 px-3 py-2 text-left text-xs font-semibold text-slate-500"
-            >
-              <span>Head of Department notes</span>
-              <span className="text-base leading-none">{hodNotesExpanded ? "−" : "+"}</span>
-            </button>
-            {hodNotesExpanded ? (
-              <textarea
-                readOnly
-                value={item.supervisorNote?.trim() ? item.supervisorNote : "- no notes yet -"}
-                className="mt-1 h-20 w-full resize-none rounded border border-slate-300 px-3 py-2 text-sm"
-              />
-            ) : null}
-          </div>
-          <div className="flex flex-col items-center gap-2 pt-1">
-            <button
-              type="button"
-              onClick={() => {
-                onConfirm();
-              }}
-              disabled={hodReviewRequiresSubmission}
-              className={`rounded-md px-6 py-2 text-sm font-semibold ${
-                item.confirmation === "confirmed"
-                  ? "bg-[#16a34a] text-white"
-                  : hodReviewRequiresSubmission
-                    ? "cursor-not-allowed bg-slate-400 text-white"
-                    : "bg-[#2f4d9c] text-white hover:bg-[#29458c]"
-              }`}
-            >
-              Confirmed
-            </button>
-            {hodReviewRequiresSubmission && (
-              <p className="max-w-md text-center text-xs font-bold leading-relaxed text-red-700">
-                Please submit to your Head of Department for adjustment review.
-              </p>
-            )}
-          </div>
-        </div>
-      </div>
-    </div>
+      }
+    />
   );
 }
 
@@ -643,11 +489,12 @@ export default function Academic() {
   const [items, setItems] = useState<AcademicItem[]>([]);
   const [loadingItems, setLoadingItems] = useState(true);
   const [pageError, setPageError] = useState("");
-  const [selectedIds, setSelectedIds] = useState<Set<number>>(new Set());
+  const [selectedIds, setSelectedIds] = useState<Set<string>>(new Set());
   const [page, setPage] = useState(1);
   const pageSize = 10;
   const [filter, setFilter] = useState<"all" | "pending" | "approved" | "rejected">("all");
   const [detailId, setDetailId] = useState<number | null>(null);
+  const [confirmWorkloadOpen, setConfirmWorkloadOpen] = useState(false);
   const [supersededNoticeOpen, setSupersededNoticeOpen] = useState(false);
   const [requestModalOpen, setRequestModalOpen] = useState(false);
   const [requestReason, setRequestReason] = useState("");
@@ -695,7 +542,7 @@ export default function Academic() {
   const [visualSemesterInput, setVisualSemesterInput] = useState<"All" | "S1" | "S2">("All");
   const [visualError, setVisualError] = useState("");
   const [visualizationLoading, setVisualizationLoading] = useState(false);
-  const [appliedVisualFilters, setAppliedVisualFilters] = useState({
+  const [_appliedVisualFilters, setAppliedVisualFilters] = useState({
     yearFrom: "",
     yearTo: "",
     semester: "All" as "All" | "S1" | "S2",
@@ -719,19 +566,14 @@ export default function Academic() {
     () => notifications.find((n) => n.id === activeNotificationId) ?? null,
     [notifications, activeNotificationId]
   );
-  const notificationRecipientLabel = useMemo(() => {
-    const first = notifications[0];
-    if (!first) return `${user.firstName} ${user.surname}`;
-    return `${first.recipientName}${first.recipientEmail ? ` (${first.recipientEmail})` : ""}`;
-  }, [notifications, user.firstName, user.surname]);
-  const selectedYear = Number(searchYearInput) || currentYear;
+const selectedYear = Number(searchYearInput) || currentYear;
   const yearOptions = useMemo(
     () => Array.from({ length: 11 }, (_, i) => String(selectedYear - 5 + i)),
     [selectedYear]
   );
 
-  async function loadAcademicWorkloads() {
-    setLoadingItems(true);
+  const loadAcademicWorkloads = useCallback(async (options?: { silent?: boolean }) => {
+    if (!options?.silent) setLoadingItems(true);
     setPageError("");
     try {
       const response = await apiJson<AcademicWorkloadListResponse>("/api/academic/workloads/");
@@ -742,9 +584,9 @@ export default function Academic() {
         setPageError(error instanceof Error ? error.message : "Failed to load workloads.");
       }
     } finally {
-      setLoadingItems(false);
+      if (!options?.silent) setLoadingItems(false);
     }
-  }
+  }, [user.department]);
 
   async function loadAcademicVisualization(yearFrom: string, yearTo: string, semester: "All" | "S1" | "S2") {
     setVisualizationLoading(true);
@@ -797,7 +639,24 @@ export default function Academic() {
     });
     void loadAcademicWorkloads();
     void loadAcademicVisualization(defaultFrom, defaultTo, "All");
-  }, [currentYear]);
+  }, [currentYear, loadAcademicWorkloads]);
+
+  useEffect(() => {
+    const refreshLatestWorkloads = () => {
+      if (document.visibilityState === "visible") {
+        void loadAcademicWorkloads({ silent: true });
+      }
+    };
+
+    window.addEventListener("focus", refreshLatestWorkloads);
+    document.addEventListener("visibilitychange", refreshLatestWorkloads);
+    const intervalId = window.setInterval(refreshLatestWorkloads, 10000);
+    return () => {
+      window.removeEventListener("focus", refreshLatestWorkloads);
+      document.removeEventListener("visibilitychange", refreshLatestWorkloads);
+      window.clearInterval(intervalId);
+    };
+  }, [loadAcademicWorkloads]);
 
   const filteredItems = useMemo(() => {
     let next = searchFilters.status === "all" ? items : items.filter((x) => x.status === searchFilters.status);
@@ -875,27 +734,30 @@ export default function Academic() {
     return `Workload Report ${y}-${sem}`;
   }, [items]);
 
-  function toggleRow(id: number) {
+  function toggleRow(backendId: string) {
     setSelectedIds((prev) => {
-      if (prev.has(id)) return new Set();
-      return new Set([id]);
+      if (prev.has(backendId)) return new Set();
+      return new Set([backendId]);
     });
   }
 
   async function submitRequestToSupervisor(reason: string) {
-    const rows = items.filter((x) => selectedIds.has(x.id));
-    if (!rows.length) return;
+    const backendIds = items.filter((x) => selectedIds.has(x.backendId)).map((x) => x.backendId);
+    if (!backendIds.length) {
+      setRequestInfo("No matching workload found. Please re-select and try again.");
+      return;
+    }
     try {
       await apiJson<{ submittedCount?: number }>("/api/academic/workload-requests/", {
         method: "POST",
         body: JSON.stringify({
-          workloadIds: rows.map((row) => row.backendId),
+          workloadIds: backendIds,
           applicationReason: reason,
         }),
       });
       setSelectedIds(new Set());
       await loadAcademicWorkloads();
-      setRequestInfo(`${rows.length} request(s) have been submitted to Supervisor.`);
+      setRequestInfo(`${backendIds.length} request(s) have been submitted to HoD.`);
     } catch (error) {
       setRequestInfo(error instanceof Error ? error.message : "Failed to submit request.");
     }
@@ -1247,7 +1109,7 @@ export default function Academic() {
                 </thead>
                 <tbody className="divide-y divide-slate-200 bg-[#eef3fb]">
                   {pageItems.map((item, idx) => {
-                    const selected = selectedIds.has(item.id);
+                    const selected = selectedIds.has(item.backendId);
                     const rowCancelled = Boolean(item.cancelled);
                     const confirmationTimeCell = academicConfirmationTimeCell(item);
                     return (
@@ -1274,7 +1136,7 @@ export default function Academic() {
                           <input
                             type="checkbox"
                             checked={selected}
-                            onChange={() => toggleRow(item.id)}
+                            onChange={() => toggleRow(item.backendId)}
                             className={`h-4 w-4 accent-[#2f4d9c] ${rowCancelled ? "opacity-50" : ""}`}
                           />
                         </td>
@@ -1331,7 +1193,12 @@ export default function Academic() {
                             rowCancelled ? "text-slate-500" : "text-slate-800"
                           }`}
                         >
-                          {academicPushedAt(item) || "—"}
+                          {(() => {
+                            const raw = academicPushedAt(item);
+                            if (!raw) return "—";
+                            const d = parseDateTime(raw);
+                            return Number.isNaN(d.getTime()) ? raw : formatLocalDateTime(d);
+                          })()}
                         </td>
                       </tr>
                     );
@@ -1559,11 +1426,48 @@ export default function Academic() {
         <AcademicDetailModal
           item={detailItem}
           onClose={() => setDetailId(null)}
-          onConfirm={async () => {
-            await handleConfirmFromDetail(detailItem.id, detailItem.backendId);
-            setDetailId(null);
-          }}
+          onConfirm={() => { if (detailItem.confirmation !== "confirmed") setConfirmWorkloadOpen(true); }}
         />
+      )}
+
+      {confirmWorkloadOpen && detailItem && (
+        <div className="fixed inset-0 z-[60] flex items-center justify-center bg-black/40 p-4">
+          <div className="w-full max-w-sm rounded-md bg-white shadow-lg">
+            <div className="flex items-center justify-between rounded-t-md bg-[#2f4d9c] px-5 py-3 text-white">
+              <div className="text-base font-bold">Confirm Workload</div>
+              <button
+                type="button"
+                className="inline-flex h-8 w-8 items-center justify-center rounded bg-white/10 text-lg hover:bg-white/20"
+                onClick={() => setConfirmWorkloadOpen(false)}
+              >
+                ×
+              </button>
+            </div>
+            <div className="px-5 py-5 text-sm text-slate-700">
+              Are you sure you want to confirm this workload? This action cannot be undone.
+            </div>
+            <div className="flex justify-end gap-3 border-t border-slate-200 px-5 py-3">
+              <button
+                type="button"
+                className="rounded-md border border-slate-300 px-4 py-2 text-sm text-slate-600 hover:bg-slate-50"
+                onClick={() => setConfirmWorkloadOpen(false)}
+              >
+                No
+              </button>
+              <button
+                type="button"
+                className="rounded-md bg-[#2f4d9c] px-4 py-2 text-sm font-semibold text-white hover:bg-[#29458c]"
+                onClick={async () => {
+                  setConfirmWorkloadOpen(false);
+                  await handleConfirmFromDetail(detailItem.id, detailItem.backendId);
+                  setDetailId(null);
+                }}
+              >
+                Yes, Confirm
+              </button>
+            </div>
+          </div>
+        </div>
       )}
       {requestModalOpen && (
         <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 p-4">

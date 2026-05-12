@@ -13,11 +13,13 @@ import {
   useContext,
   useEffect,
   useMemo,
+  useRef,
   useState,
 } from "react";
 import {
   ACCESS_TOKEN_KEY,
   clearAuthStorage,
+  readAccessToken,
 } from "../api/client";
 import { AuthProfile, fetchMe } from "../api/auth";
 
@@ -36,6 +38,7 @@ type AuthContextValue = AuthState & {
 const AuthContext = createContext<AuthContextValue | null>(null);
 
 export function AuthProvider({ children }: { children: ReactNode }) {
+  const tokenRef = useRef<string | null>(null);
   const [state, setState] = useState<AuthState>({
     profile: null,
     loading: true,
@@ -43,7 +46,8 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   });
 
   const reload = useCallback(async () => {
-    const token = localStorage.getItem(ACCESS_TOKEN_KEY);
+    const token = readAccessToken();
+    tokenRef.current = token;
     if (!token) {
       setState({ profile: null, loading: false, error: null });
       return;
@@ -63,11 +67,36 @@ export function AuthProvider({ children }: { children: ReactNode }) {
 
   const logout = useCallback(() => {
     clearAuthStorage();
+    tokenRef.current = null;
     setState({ profile: null, loading: false, error: null });
   }, []);
 
   useEffect(() => {
     reload();
+  }, [reload]);
+
+  useEffect(() => {
+    const syncIfTokenChanged = () => {
+      const token = readAccessToken();
+      if (token !== tokenRef.current) {
+        void reload();
+      }
+    };
+
+    const onStorage = (event: StorageEvent) => {
+      if (event.key === ACCESS_TOKEN_KEY || event.key === null) {
+        syncIfTokenChanged();
+      }
+    };
+
+    window.addEventListener("storage", onStorage);
+    window.addEventListener("focus", syncIfTokenChanged);
+    document.addEventListener("visibilitychange", syncIfTokenChanged);
+    return () => {
+      window.removeEventListener("storage", onStorage);
+      window.removeEventListener("focus", syncIfTokenChanged);
+      document.removeEventListener("visibilitychange", syncIfTokenChanged);
+    };
   }, [reload]);
 
   const value = useMemo<AuthContextValue>(

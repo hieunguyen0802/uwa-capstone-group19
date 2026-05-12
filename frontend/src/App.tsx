@@ -23,7 +23,7 @@ function App() {
           <Route path="/login" element={<Login />} />
           <Route path="/role" element={<Role />} />
           <Route
-            path="/academic"
+            path="/workload-platform"
             element={
               <RequirePermission permission="api.view_academic_page">
                 <Academic />

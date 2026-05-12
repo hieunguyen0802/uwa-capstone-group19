@@ -56,7 +56,7 @@ class BaseTestCase(APITestCase):
             staff=self.academic,
             academic_year=2025,
             semester='S1',
-            snapshot_fte=self.academic.fte,
+            snapshot_fte=Decimal('1.00'),
             snapshot_department=self.dept_csse,
             status='INITIAL',
         )
@@ -206,7 +206,7 @@ class TestRolePermissions(BaseTestCase):
             staff=self.hod_csse,
             academic_year=2025,
             semester='S1',
-            snapshot_fte=self.hod_csse.fte,
+            snapshot_fte=Decimal('1.00'),
             snapshot_department=self.hod_csse.department,
             status='INITIAL',
         )
@@ -404,7 +404,7 @@ class TestAcademicWorkloadAndQuery(BaseTestCase):
             staff=self.hod_csse,
             academic_year=2025,
             semester='S1',
-            snapshot_fte=self.hod_csse.fte,
+            snapshot_fte=Decimal('1.00'),
             snapshot_department=self.hod_csse.department,
             status='INITIAL',
         )
@@ -1256,6 +1256,11 @@ class TestHoSContractEndpoints(BaseTestCase):
 class TestHODV2CaiFindings(BaseTestCase):
     """Regression tests for issues reported during HOD v2 review."""
 
+    def setUp(self):
+        super().setUp()
+        self.report.distributed_at = timezone.now()
+        self.report.save(update_fields=['distributed_at', 'updated_at'])
+
     def test_submit_requires_confirmation(self):
         client = self._auth_client(self.academic)
         res = client.post(
@@ -1268,6 +1273,12 @@ class TestHODV2CaiFindings(BaseTestCase):
 
     def test_submit_blocks_anomaly_even_if_confirmed_flag_exists(self):
         anomaly_report = self._make_anomaly_report(self.academic, year=2026, semester='S1')
+        anomaly_report.distributed_at = timezone.now()
+        anomaly_report.confirmation_status = 'CONFIRMED'
+        anomaly_report.confirmation_at = timezone.now()
+        anomaly_report.save(
+            update_fields=['distributed_at', 'confirmation_status', 'confirmation_at', 'updated_at']
+        )
         AuditLog.objects.create(
             report=anomaly_report,
             action_by=self.academic,
@@ -1303,6 +1314,9 @@ class TestHODV2CaiFindings(BaseTestCase):
             action_type='COMMENT',
             changes={'kind': 'CONFIRMATION', 'confirmation': 'confirmed'},
         )
+        self.report.confirmation_status = 'CONFIRMED'
+        self.report.confirmation_at = timezone.now()
+        self.report.save(update_fields=['confirmation_status', 'confirmation_at', 'updated_at'])
         confirmed_res = client.get('/api/supervisor/requests/')
         self.assertEqual(confirmed_res.status_code, 200)
         initial_ids = [r['report_id'] for r in confirmed_res.data['initial']]
@@ -1397,6 +1411,129 @@ class TestHODV2CaiFindings(BaseTestCase):
         row = next(item for item in listing.data['data']['items'] if item['id'] == str(self.report.report_id))
         self.assertEqual(row['request_reason'], 'second reason')
         self.assertIn(timezone.now().strftime('%Y-%m-%d'), row['submitted_time'])
+
+
+class TestHodHosSelfWorkflowRegressions(BaseTestCase):
+    """Regression coverage for the HoD -> HoS self-submit workflow on /workload-platform."""
+
+    def _prepare_distributed_report_with_hdr_display_row(self, report):
+        WorkloadItem.objects.create(
+            report=report,
+            category='TEACHING',
+            unit_code='CITS4011',
+            allocated_hours=Decimal('129.00'),
+        )
+        WorkloadItem.objects.create(
+            report=report,
+            category='HDR_SUPERVISION',
+            description='Full time students 4',
+            allocated_hours=Decimal('69.00'),
+        )
+        report.distributed_at = timezone.now()
+        report.save(update_fields=['distributed_at', 'updated_at'])
+        return report
+
+    def test_hod_totals_ignore_hdr_display_rows(self):
+        self._prepare_distributed_report_with_hdr_display_row(self.report)
+        self._submit_report(self.report)
+
+        academic_client = self._auth_client(self.academic)
+        academic_listing = academic_client.get('/api/academic/workloads/')
+        self.assertEqual(academic_listing.status_code, 200)
+        academic_row = next(item for item in academic_listing.data['items'] if item['id'] == str(self.report.report_id))
+
+        client = self._auth_client(self.hod_csse)
+        listing = client.get('/api/hod/workload-requests/?page_size=200')
+        self.assertEqual(listing.status_code, 200)
+        row = next(item for item in listing.data['items'] if item['id'] == str(self.report.report_id))
+        self.assertEqual(row['totalWorkHours'], academic_row['hours'])
+
+        detail = client.get(f'/api/hod/workload-requests/{self.report.report_id}/')
+        self.assertEqual(detail.status_code, 200)
+        self.assertEqual(detail.data['totalWorkHours'], academic_row['hours'])
+
+    def test_mixed_role_hod_self_submit_only_appears_in_hos_queue(self):
+        self._prepare_distributed_report_with_hdr_display_row(self.report)
+        self.report.hod_review = 'yes'
+        self.report.save(update_fields=['hod_review', 'updated_at'])
+
+        hod_group = Group.objects.get(name='HOD')
+        self.academic.user.groups.add(hod_group)
+
+        hybrid_client = self._auth_client(self.academic)
+        submit = hybrid_client.post(
+            '/api/academic/workload-requests/',
+            data={'workloadIds': [str(self.report.report_id)], 'reason': 'wrong'},
+            format='json',
+        )
+        self.assertEqual(submit.status_code, 201)
+
+        academic_listing = hybrid_client.get('/api/academic/workloads/')
+        self.assertEqual(academic_listing.status_code, 200)
+        academic_row = next(item for item in academic_listing.data['items'] if item['id'] == str(self.report.report_id))
+
+        self.assertTrue(
+            AuditLog.objects.filter(
+                report=self.report,
+                changes__kind='HOD_SELF_WORKLOAD_REQUEST',
+                comment='wrong',
+            ).exists()
+        )
+
+        hod_listing = hybrid_client.get('/api/hod/workload-requests/?page_size=200')
+        self.assertEqual(hod_listing.status_code, 200)
+        hod_ids = [item['id'] for item in hod_listing.data['items']]
+        self.assertNotIn(str(self.report.report_id), hod_ids)
+
+        hos_client = self._auth_client(self.hos)
+        hos_listing = hos_client.get('/api/hos/workload-requests/?page_size=200')
+        self.assertEqual(hos_listing.status_code, 200)
+        hos_row = next(item for item in hos_listing.data['items'] if item['id'] == str(self.report.report_id))
+        self.assertEqual(hos_row['reason'], 'wrong')
+        self.assertEqual(hos_row['totalWorkHours'], academic_row['hours'])
+
+        hos_detail = hos_client.get(f'/api/hos/workload-requests/{self.report.report_id}/')
+        self.assertEqual(hos_detail.status_code, 200)
+        self.assertEqual(hos_detail.data['applicationReason'], 'wrong')
+        self.assertEqual(hos_detail.data['totalWorkHours'], academic_row['hours'])
+
+    def test_legacy_hod_self_request_tag_is_hidden_from_hod_queue(self):
+        hod_report = WorkloadReport.objects.create(
+            staff=self.hod_csse,
+            academic_year=2026,
+            semester='S1',
+            snapshot_fte=Decimal('1.00'),
+            snapshot_department=self.dept_csse,
+            status='INITIAL',
+            hod_review='yes',
+            distributed_at=timezone.now(),
+        )
+        self._prepare_distributed_report_with_hdr_display_row(hod_report)
+        AuditLog.objects.create(
+            report=hod_report,
+            action_by=self.hod_csse,
+            action_type='COMMENT',
+            comment='legacy wrong',
+            changes={
+                'kind': 'WORKLOAD_REQUEST',
+                'status': 'pending',
+                'source_workload_id': str(hod_report.report_id),
+            },
+        )
+        hod_report.status = 'PENDING'
+        hod_report.save(update_fields=['status', 'updated_at'])
+
+        hod_client = self._auth_client(self.hod_csse)
+        hod_listing = hod_client.get('/api/hod/workload-requests/?page_size=200')
+        self.assertEqual(hod_listing.status_code, 200)
+        hod_ids = [item['id'] for item in hod_listing.data['items']]
+        self.assertNotIn(str(hod_report.report_id), hod_ids)
+
+        hos_client = self._auth_client(self.hos)
+        hos_listing = hos_client.get('/api/hos/workload-requests/?page_size=200')
+        self.assertEqual(hos_listing.status_code, 200)
+        hos_ids = [item['id'] for item in hos_listing.data['items']]
+        self.assertIn(str(hod_report.report_id), hos_ids)
 
 
 class TestAdminOpsContract(BaseTestCase):
@@ -1622,12 +1759,12 @@ class TestCodexAuditFixes(BaseTestCase):
         v1.is_current = False
         v2 = WorkloadReport.objects.create(
             staff=self.academic, academic_year=2025, semester='S1',
-            snapshot_fte=self.academic.fte, snapshot_department=self.dept_csse,
+            snapshot_fte=Decimal('1.00'), snapshot_department=self.dept_csse,
             status='INITIAL', is_current=False,
         )
         v3 = WorkloadReport.objects.create(
             staff=self.academic, academic_year=2025, semester='S1',
-            snapshot_fte=self.academic.fte, snapshot_department=self.dept_csse,
+            snapshot_fte=Decimal('1.00'), snapshot_department=self.dept_csse,
             status='INITIAL', is_current=True,
         )
         v1.superseded_by = v2
@@ -1770,4 +1907,3 @@ class TestNativePermissionClasses(BaseTestCase):
         with self.assertRaises(PermissionDenied) as cm:
             IsHoD().has_permission(request, view=None)
         self.assertEqual(cm.exception.detail.get('code'), 'FORBIDDEN')
-

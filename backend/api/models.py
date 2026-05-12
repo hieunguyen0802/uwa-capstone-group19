@@ -250,6 +250,18 @@ class WorkloadReport(models.Model):
     )
     confirmation_at = models.DateTimeField(null=True, blank=True)
 
+    # School Ops assignee for the Pending Distribution stage.
+    # This is intentionally separate from distributed_at / distribution audit so
+    # "who imported/assigned this pending workload" remains distinct from
+    # "who actually distributed it later".
+    assigned_by = models.ForeignKey(
+        Staff,
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name='assigned_workload_reports',
+    )
+
     # Set by the School Ops distribute action; NULL means not yet distributed.
     # Kept separate from status so that the academic→HoD workflow status
     # (INITIAL / PENDING / APPROVED / REJECTED) is never mutated by distribution.

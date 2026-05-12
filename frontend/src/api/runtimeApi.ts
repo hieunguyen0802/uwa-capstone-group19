@@ -16,15 +16,15 @@ export function readAccessToken(): string {
   if (typeof window === "undefined") return "";
 
   const directToken =
-    window.localStorage.getItem(ACCESS_TOKEN_KEY) ||
     window.sessionStorage.getItem(ACCESS_TOKEN_KEY) ||
-    window.localStorage.getItem("access") ||
     window.sessionStorage.getItem("access") ||
-    window.localStorage.getItem("token") ||
-    window.sessionStorage.getItem("token");
+    window.sessionStorage.getItem("token") ||
+    window.localStorage.getItem(ACCESS_TOKEN_KEY) ||
+    window.localStorage.getItem("access") ||
+    window.localStorage.getItem("token");
   if (directToken) return directToken;
 
-  const userRecord = parseStoredJson(window.localStorage.getItem("user"));
+  const userRecord = parseStoredJson(window.sessionStorage.getItem("user") ?? window.localStorage.getItem("user"));
   const nestedToken =
     (typeof userRecord?.access === "string" && userRecord.access) ||
     (typeof userRecord?.token === "string" && userRecord.token) ||
