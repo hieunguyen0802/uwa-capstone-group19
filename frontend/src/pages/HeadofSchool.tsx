@@ -51,6 +51,16 @@ import ThemedNoticeModal, { SUPERSEDED_RECORD_MESSAGE } from "../components/comm
 import WorkHoursBadge from "../components/common/WorkHoursBadge";
 import WorkloadApprovalModal from "../components/common/WorkloadApprovalModal";
 
+type HosStatusFilter = "all" | "pending" | "approved" | "rejected";
+
+type HosSearchFilters = {
+  employeeId: string;
+  name: string;
+  department: string;
+  year: string;
+  semester: "" | "S1" | "S2";
+};
+
 type MockRequest = {
   id: string;
   studentId: string;
@@ -120,22 +130,6 @@ function workloadModalNotes(row: Pick<MockRequest, "notes" | "description">) {
 
 function requestReasonText(row: Pick<MockRequest, "requestReason" | "description">) {
   return row.requestReason?.trim() || extractRequestReason(row.description ?? "").trim();
-}
-
-/** Last name, first name, or full name (substring or order-independent tokens; commas as spaces). */
-function workloadNameSearchMatches(recordName: string, queryRaw: string): boolean {
-  const q = queryRaw.trim().toLowerCase();
-  if (!q) return true;
-  const norm = recordName
-    .toLowerCase()
-    .replace(/,/g, " ")
-    .replace(/\s+/g, " ")
-    .trim();
-  if (!norm) return false;
-  if (norm.includes(q)) return true;
-  const qTokens = q.split(/\s+/).filter(Boolean);
-  const parts = norm.split(" ").filter(Boolean);
-  return qTokens.every((t) => parts.some((p) => p.includes(t)));
 }
 
 function shortDepartmentName(department: string) {
@@ -292,9 +286,7 @@ export default function HeadofSchool() {
   const pageSize = 10; // Items per page
   const [submitting, setSubmitting] = useState(false);
 
-  const [statusFilter, setStatusFilter] = useState<
-    "all" | "pending" | "approved" | "rejected"
-  >("pending");
+  const [statusFilter, setStatusFilter] = useState<HosStatusFilter>("pending");
 
   const [popup, setPopup] = useState<{
     open: boolean;
@@ -318,7 +310,7 @@ export default function HeadofSchool() {
   const [searchDepartmentInput, setSearchDepartmentInput] = useState("");
   const [searchYearInput, setSearchYearInput] = useState("");
   const [searchSemesterInput, setSearchSemesterInput] = useState<"" | "S1" | "S2">("");
-  const [searchFilters, setSearchFilters] = useState({
+  const [searchFilters, setSearchFilters] = useState<HosSearchFilters>({
     employeeId: "",
     name: "",
     department: "",
@@ -375,6 +367,20 @@ export default function HeadofSchool() {
     department: "All Departments",
   });
 
+  function buildWorkloadRequestParams(status: HosStatusFilter, filters: HosSearchFilters) {
+    const params: Record<string, string> = {
+      status,
+      page: "1",
+      pageSize: "100",
+    };
+    if (filters.employeeId) params.staffId = filters.employeeId;
+    if (filters.name) params.name = filters.name;
+    if (filters.department) params.department = filters.department;
+    if (filters.year) params.year = filters.year;
+    if (filters.semester) params.semester = filters.semester;
+    return params;
+  }
+
   const availableDepartments: AssignDepartment[] = [
     "Physics",
     "Mathematics & Statistics",
@@ -425,7 +431,7 @@ export default function HeadofSchool() {
       setLoading(true);
       try {
         const [workloadRes, reportsRes, staffRes, assignmentRes, analyticsRes] = await Promise.all([
-          fetchHosWorkloadRequests({ status: "all", page: "1", pageSize: "100" }),
+          fetchHosWorkloadRequests(buildWorkloadRequestParams(statusFilter, searchFilters)),
           fetchHosSemesterReports(),
           fetchHosStaffDirectory({ page: "1", pageSize: "100" }),
           fetchHosRoleAssignments(),
@@ -492,7 +498,7 @@ export default function HeadofSchool() {
   }
 
   async function refreshWorkloads() {
-    const workloadRes = await fetchHosWorkloadRequests({ status: "all", page: "1", pageSize: "100" });
+    const workloadRes = await fetchHosWorkloadRequests(buildWorkloadRequestParams(statusFilter, searchFilters));
     setPending(workloadRes.items.map(mapWorkloadRow));
     const reportsRes = await fetchHosSemesterReports();
     setHosSemesterReports(reportsRes.items);
@@ -513,59 +519,7 @@ export default function HeadofSchool() {
     [pending]
   );
 
-  const itemsForFilter = useMemo(() => {
-    const byStatus =
-      statusFilter === "all"
-        ? pending
-        : pending.filter((it) => it.status === statusFilter);
-
-    const hasSearchFilter = Object.values(searchFilters).some((value) => value);
-    if (!hasSearchFilter) return byStatus;
-
-    return byStatus.filter((it) => {
-      if (
-        searchFilters.employeeId &&
-        !it.studentId.toLowerCase().includes(searchFilters.employeeId)
-      ) {
-        return false;
-      }
-
-      if (searchFilters.name && !workloadNameSearchMatches(it.name, searchFilters.name)) {
-        return false;
-      }
-
-      if (searchFilters.department) {
-        const departmentText = it.department.toLowerCase();
-        const normalizedSearch = searchFilters.department.replace("school", "").trim();
-        if (!departmentText.includes(searchFilters.department) && (!normalizedSearch || !departmentText.includes(normalizedSearch))) {
-          return false;
-        }
-      }
-
-      const submittedText = formatSubmittedTime(it.submittedAt);
-      const submittedDate = new Date(submittedText.replace(" ", "T"));
-      const hasValidSubmittedDate = !Number.isNaN(submittedDate.getTime());
-      const selectedYear = Number(searchFilters.year);
-
-      if (searchFilters.year && Number.isFinite(selectedYear) && hasValidSubmittedDate) {
-        if (searchFilters.semester === "s1") {
-          // S1: [YYYY-01-01, YYYY-07-01)
-          const s1Start = new Date(selectedYear, 0, 1);
-          const s1End = new Date(selectedYear, 6, 1);
-          if (!(submittedDate >= s1Start && submittedDate < s1End)) return false;
-        } else if (searchFilters.semester === "s2") {
-          // S2: [YYYY-07-01, YYYY+1-01-01)
-          const s2Start = new Date(selectedYear, 6, 1);
-          const s2End = new Date(selectedYear + 1, 0, 1);
-          if (!(submittedDate >= s2Start && submittedDate < s2End)) return false;
-        } else if (submittedDate.getFullYear() !== selectedYear) {
-          return false;
-        }
-      }
-
-      return it.name.trim().length > 0;
-    });
-  }, [pending, statusFilter, searchFilters]);
+  const itemsForFilter = pending;
   const adminSearchResults = useMemo(() => {
     const hasFilter = Object.values(adminSearchFilters).some((value) => value);
     if (!hasFilter) return assignablePeople;
@@ -809,25 +763,60 @@ export default function HeadofSchool() {
 
 
   function handleSearch() {
-    setSearchFilters({
+    const nextFilters: HosSearchFilters = {
       employeeId: searchEmployeeIdInput.trim().toLowerCase(),
       name: searchNameInput.trim().toLowerCase(),
       department: searchDepartmentInput.trim().toLowerCase(),
       year: searchYearInput.trim().toLowerCase(),
-      semester: searchSemesterInput.trim().toLowerCase(),
-    });
+      semester: searchSemesterInput,
+    };
+    setSearchFilters(nextFilters);
     setPage(1);
     setSelectedIds(new Set());
     setDetailsOpen(false);
     setDetailsItem(null);
+    void fetchHosWorkloadRequests(buildWorkloadRequestParams(statusFilter, nextFilters)).then((res) => {
+      setPending(res.items.map(mapWorkloadRow));
+    });
   }
 
-  function handleAdminSearch() {
-    setAdminSearchFilters({
+  function applyStatusFilter(nextStatus: HosStatusFilter) {
+    setStatusFilter(nextStatus);
+    setPage(1);
+    setSelectedIds(new Set());
+    setDetailsOpen(false);
+    setDetailsItem(null);
+    void fetchHosWorkloadRequests(buildWorkloadRequestParams(nextStatus, searchFilters)).then((res) => {
+      setPending(res.items.map(mapWorkloadRow));
+    });
+  }
+
+  async function handleAdminSearch() {
+    const nextFilters = {
       firstName: adminSearchFirstNameInput.trim().toLowerCase(),
       lastName: adminSearchLastNameInput.trim().toLowerCase(),
       staffId: adminSearchStaffIdInput.trim().toLowerCase(),
-    });
+    };
+    setAdminSearchFilters(nextFilters);
+    const params: Record<string, string> = { page: "1", pageSize: "100" };
+    if (nextFilters.firstName) params.firstName = nextFilters.firstName;
+    if (nextFilters.lastName) params.lastName = nextFilters.lastName;
+    if (nextFilters.staffId) params.staffId = nextFilters.staffId;
+    const staffRes = await fetchHosStaffDirectory(params);
+    setAssignablePeople(
+      staffRes.items.map((person, idx) => ({
+        id: idx + 1,
+        staffId: person.staffId,
+        firstName: person.firstName,
+        lastName: person.lastName,
+        email: person.email,
+        title: person.title,
+        currentDepartment: person.currentDepartment,
+        isActive: person.isActive,
+        isNewEmployee: person.isNewEmployee,
+        notes: person.notes,
+      }))
+    );
   }
 
   function handlePersonDepartmentChange(personId: number, nextDepartment: string) {
@@ -1378,13 +1367,7 @@ export default function HeadofSchool() {
                   <div className="flex flex-wrap items-center justify-start gap-4">
                     <button
                       type="button"
-                      onClick={() => {
-                        setStatusFilter("all");
-                        setSelectedIds(new Set());
-                        setPage(1);
-                        setDetailsOpen(false);
-                        setDetailsItem(null);
-                      }}
+                      onClick={() => applyStatusFilter("all")}
                       className={`rounded-md border px-5 py-2 text-base font-semibold ${
                         statusFilter === "all"
                           ? "border-[#2f4d9c] bg-[#2f4d9c] text-white"
@@ -1395,13 +1378,7 @@ export default function HeadofSchool() {
                     </button>
                     <button
                       type="button"
-                      onClick={() => {
-                        setStatusFilter("pending");
-                        setSelectedIds(new Set());
-                        setPage(1);
-                        setDetailsOpen(false);
-                        setDetailsItem(null);
-                      }}
+                      onClick={() => applyStatusFilter("pending")}
                       className={`relative rounded-md border px-5 py-2 text-base font-semibold ${
                         statusFilter === "pending"
                           ? "border-[#d97706] bg-[#d97706] text-white"
@@ -1417,13 +1394,7 @@ export default function HeadofSchool() {
                     </button>
                     <button
                       type="button"
-                      onClick={() => {
-                        setStatusFilter("approved");
-                        setSelectedIds(new Set());
-                        setPage(1);
-                        setDetailsOpen(false);
-                        setDetailsItem(null);
-                      }}
+                      onClick={() => applyStatusFilter("approved")}
                       className={`rounded-md border px-5 py-2 text-base font-semibold ${
                         statusFilter === "approved"
                           ? "border-[#16a34a] bg-[#16a34a] text-white"
@@ -1434,13 +1405,7 @@ export default function HeadofSchool() {
                     </button>
                     <button
                       type="button"
-                      onClick={() => {
-                        setStatusFilter("rejected");
-                        setSelectedIds(new Set());
-                        setPage(1);
-                        setDetailsOpen(false);
-                        setDetailsItem(null);
-                      }}
+                      onClick={() => applyStatusFilter("rejected")}
                       className={`rounded-md border px-5 py-2 text-base font-semibold ${
                         statusFilter === "rejected"
                           ? "border-[#dc2626] bg-[#dc2626] text-white"
