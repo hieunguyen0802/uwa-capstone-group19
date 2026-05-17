@@ -54,7 +54,7 @@ import WorkloadDetailModal, {
   type WorkloadDetailField,
   type WorkloadDetailNoteSection,
 } from "../components/common/WorkloadDetailModal";
-import { apiJson } from "../api/client";
+import { apiJson, downloadApiFile } from "../api/client";
 import { useAuth } from "../auth/AuthContext";
 import { profileFromAuth } from "../auth/profileFromAuth";
 
@@ -133,6 +133,38 @@ type OpsPeriodInfo = {
   year: number | null;
   semester: "" | "S1" | "S2" | "FULL_YEAR" | "ALL";
   label: string;
+};
+
+type AdminDepartmentStat = {
+  department: string;
+  academics: number;
+  totalHours: number;
+  pending: number;
+  approved: number;
+  rejected: number;
+};
+
+type AdminVisualizationPayload = {
+  reportingPeriodLabel?: string;
+  scopeLabel?: string;
+  summary?: {
+    totalDepartments?: number;
+    totalAcademics?: number;
+    totalWorkHours?: number;
+    pendingRequests?: number;
+    approvedRequests?: number;
+    rejectedRequests?: number;
+  };
+  departmentStats?: Array<{
+    department: string;
+    academics: number;
+    total_hours?: number;
+    totalHours?: number;
+    pending: number;
+    approved: number;
+    rejected: number;
+  }>;
+  trend?: Array<Record<string, string | number | null>>;
 };
 
 type BreakdownCategory = "Teaching" | "Assigned Roles" | "HDR" | "Service" | "Research (residual)";
@@ -777,22 +809,6 @@ function rowMatchesWorkloadFailedTab(
   return false;
 }
 
-/** Last name, first name, or full name (substring or order-independent tokens; commas as spaces). */
-function workloadNameSearchMatches(recordName: string, queryRaw: string): boolean {
-  const q = queryRaw.trim().toLowerCase();
-  if (!q) return true;
-  const norm = recordName
-    .toLowerCase()
-    .replace(/,/g, " ")
-    .replace(/\s+/g, " ")
-    .trim();
-  if (!norm) return false;
-  if (norm.includes(q)) return true;
-  const qTokens = q.split(/\s+/).filter(Boolean);
-  const parts = norm.split(" ").filter(Boolean);
-  return qTokens.every((t) => parts.some((p) => p.includes(t)));
-}
-
 function shortDepartmentName(department: string) {
   if (department === "Computer Science & Software Engineering") return "CS&SE";
   if (department === "Mathematics & Statistics") return "Math&Stats";
@@ -1257,6 +1273,40 @@ export default function SchoolofOperations() {
     semester: "All",
     department: "All Departments",
   });
+  const [adminVisualization, setAdminVisualization] = useState<AdminVisualizationPayload | null>(null);
+  const [visualizationLoading, setVisualizationLoading] = useState(false);
+
+  async function loadAdminVisualization(filters = visualFilters) {
+    setVisualizationLoading(true);
+    try {
+      const params = new URLSearchParams();
+      if (filters.fromYear) params.set("year_from", filters.fromYear);
+      if (filters.toYear) params.set("year_to", filters.toYear);
+      params.set("semester", filters.semester);
+      if (filters.department !== "All Departments") params.set("department", filters.department);
+      const response = await apiJson<{
+        success: boolean;
+        data: AdminVisualizationPayload;
+      }>(
+        `/api/school-operations/visualization?${params.toString()}`
+      );
+      if (response.success) {
+        setAdminVisualization(response.data);
+      }
+      setVisualFilterError((prev) => (prev.startsWith("Load failed") ? "" : prev));
+    } catch (error) {
+      setAdminVisualization(null);
+      const message = error instanceof Error ? error.message : "Could not load visualization.";
+      setVisualFilterError(`Load failed: ${message}`);
+    } finally {
+      setVisualizationLoading(false);
+    }
+  }
+
+  useEffect(() => {
+    void loadAdminVisualization();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
 
   const availableDepartments: AssignDepartment[] = [
     "Physics",
@@ -1811,6 +1861,30 @@ export default function SchoolofOperations() {
     XLSX.writeFile(wb, `workload_${statusFilter}_${stamp}.xlsx`);
   }
 
+  async function handleSchoolExportExcel() {
+    const params = new URLSearchParams();
+    if (exportYearFromInput.trim()) params.set("year_from", exportYearFromInput.trim());
+    if (exportYearToInput.trim()) params.set("year_to", exportYearToInput.trim());
+    params.set("semester", exportSemesterInput);
+    if (exportDepartmentInput !== "All Departments") params.set("department", exportDepartmentInput);
+    try {
+      await downloadApiFile(`/api/school-operations/export?${params.toString()}`, "School_Workload_History.xlsx");
+      setPopup({
+        open: true,
+        title: "Export ready",
+        message: "School workload export downloaded.",
+        status: "approved",
+      });
+    } catch (error) {
+      setPopup({
+        open: true,
+        title: "Export failed",
+        message: error instanceof Error ? error.message : "Unable to export school workload data.",
+        status: "rejected",
+      });
+    }
+  }
+
   const adminSearchResults = useMemo(() => {
     const hasFilter = Object.values(adminSearchFilters).some((value) => value);
     if (!hasFilter) return assignablePeople;
@@ -1848,35 +1922,23 @@ export default function SchoolofOperations() {
     }
   }, [adminPage, adminTotalPages]);
 
-  const departmentStats = useMemo(
-    () => [
-      {
-        department: "Computer Science & Software Engineering",
-        totalHours: 430,
-        academics: 27,
-        pending: 17,
-        approved: 8,
-        rejected: 2,
-      },
-      {
-        department: "Mathematics & Statistics",
-        totalHours: 318,
-        academics: 19,
-        pending: 7,
-        approved: 10,
-        rejected: 2,
-      },
-      {
-        department: "Physics",
-        totalHours: 264,
-        academics: 14,
-        pending: 5,
-        approved: 7,
-        rejected: 2,
-      },
-    ],
-    []
+  const departmentStats = useMemo<AdminDepartmentStat[]>(
+    () =>
+      (adminVisualization?.departmentStats ?? []).map((item) => ({
+        department: item.department,
+        totalHours: Number(item.totalHours ?? item.total_hours ?? 0),
+        academics: Number(item.academics ?? 0),
+        pending: Number(item.pending ?? 0),
+        approved: Number(item.approved ?? 0),
+        rejected: Number(item.rejected ?? 0),
+      })),
+    [adminVisualization]
   );
+  const visualDepartmentOptions = useMemo(() => {
+    const names = new Set<string>(ACADEMIC_IMPORT_DEPARTMENTS);
+    departmentStats.forEach((item) => names.add(item.department));
+    return Array.from(names).sort((a, b) => a.localeCompare(b));
+  }, [departmentStats]);
   const filteredDepartmentStats = useMemo(() => {
     if (visualFilters.department === "All Departments") return departmentStats;
     return departmentStats.filter((item) => item.department === visualFilters.department);
@@ -1935,30 +1997,10 @@ export default function SchoolofOperations() {
     [filteredDepartmentStats]
   );
 
-  const workloadTrendBySemester = useMemo(() => {
-    const startYear = currentYear - 5;
-    const endYear = currentYear + 5;
-    const currentMonth = new Date().getMonth();
-    const hasReachedS2 = currentMonth >= 6;
-    const rows: Array<Record<string, string | number | null>> = [];
-    for (let year = startYear; year <= endYear; year += 1) {
-      const offset = year - startYear;
-      rows.push({
-        semester: `${year} S1`,
-        "Computer Science & Software Engineering": 178 + offset * 8,
-        "Mathematics & Statistics": 128 + offset * 6,
-        Physics: 104 + offset * 5,
-      });
-      rows.push({
-        semester: `${year} S2`,
-        "Computer Science & Software Engineering":
-          year === currentYear && !hasReachedS2 ? null : 186 + offset * 9,
-        "Mathematics & Statistics": year === currentYear && !hasReachedS2 ? null : 136 + offset * 7,
-        Physics: year === currentYear && !hasReachedS2 ? null : 111 + offset * 6,
-      });
-    }
-    return rows;
-  }, [currentYear]);
+  const workloadTrendBySemester = useMemo(
+    () => adminVisualization?.trend ?? [],
+    [adminVisualization]
+  );
 
   const schoolSummary = useMemo(() => {
     const totalAcademics = filteredDepartmentStats.reduce((sum, item) => sum + item.academics, 0);
@@ -1966,7 +2008,7 @@ export default function SchoolofOperations() {
     const pendingRequests = filteredDepartmentStats.reduce((sum, item) => sum + item.pending, 0);
     const approvedRequests = filteredDepartmentStats.reduce((sum, item) => sum + item.approved, 0);
     const rejectedRequests = filteredDepartmentStats.reduce((sum, item) => sum + item.rejected, 0);
-    return {
+    const fallbackSummary = {
       totalDepartments: filteredDepartmentStats.length,
       totalAcademics,
       totalWorkHours: Number(totalWorkHours.toFixed(1)),
@@ -1974,7 +2016,20 @@ export default function SchoolofOperations() {
       approvedRequests,
       rejectedRequests,
     };
-  }, [filteredDepartmentStats]);
+
+    if (visualFilters.department === "All Departments") {
+      const summary = adminVisualization?.summary;
+      return {
+        totalDepartments: Number(summary?.totalDepartments ?? fallbackSummary.totalDepartments),
+        totalAcademics: Number(summary?.totalAcademics ?? fallbackSummary.totalAcademics),
+        totalWorkHours: Number(Number(summary?.totalWorkHours ?? fallbackSummary.totalWorkHours).toFixed(1)),
+        pendingRequests: Number(summary?.pendingRequests ?? fallbackSummary.pendingRequests),
+        approvedRequests: Number(summary?.approvedRequests ?? fallbackSummary.approvedRequests),
+        rejectedRequests: Number(summary?.rejectedRequests ?? fallbackSummary.rejectedRequests),
+      };
+    }
+    return fallbackSummary;
+  }, [adminVisualization, filteredDepartmentStats, visualFilters.department]);
   const workloadPerAcademicByDepartment = useMemo(
     () =>
       filteredDepartmentStats.map((item) => ({
@@ -2011,6 +2066,7 @@ export default function SchoolofOperations() {
     });
   }, [workloadTrendBySemester, visualFilters, currentYear]);
   const reportingPeriodLabel = useMemo(() => {
+    if (adminVisualization?.reportingPeriodLabel) return adminVisualization.reportingPeriodLabel;
     const yearLabel =
       visualFilters.fromYear === visualFilters.toYear
         ? visualFilters.fromYear
@@ -2019,10 +2075,10 @@ export default function SchoolofOperations() {
       return `${yearLabel} All Semesters`;
     }
     return `${yearLabel} ${visualFilters.semester}`;
-  }, [visualFilters]);
+  }, [adminVisualization, visualFilters]);
   const scopeLabel = useMemo(
-    () => (visualFilters.department === "All Departments" ? "All Departments" : visualFilters.department),
-    [visualFilters.department]
+    () => adminVisualization?.scopeLabel || (visualFilters.department === "All Departments" ? "All Departments" : visualFilters.department),
+    [adminVisualization, visualFilters.department]
   );
   const departmentColorMap: Record<string, string> = {
     "Computer Science & Software Engineering": "#1f3b86",
@@ -2038,7 +2094,7 @@ export default function SchoolofOperations() {
   };
   const currentSemesterLabel = `${currentYear} ${currentSemester}`;
 
-  function handleApplyVisualizationFilter() {
+  async function handleApplyVisualizationFilter() {
     const fromYear = Number(visualYearFromInput);
     const toYear = Number(visualYearToInput);
     if (!Number.isFinite(fromYear) || !Number.isFinite(toYear)) {
@@ -2047,19 +2103,15 @@ export default function SchoolofOperations() {
     }
     const startYear = Math.min(fromYear, toYear);
     const endYear = Math.max(fromYear, toYear);
-    const yearSpan = endYear - startYear;
-    const maxYearSpan = 2;
-    if (yearSpan > maxYearSpan) {
-      setVisualFilterError("Maximum range is 3 years.");
-      return;
-    }
     setVisualFilterError("");
-    setVisualFilters({
+    const nextFilters = {
       fromYear: String(startYear),
       toYear: String(endYear),
       semester: visualSemesterInput,
       department: visualDepartmentInput,
-    });
+    };
+    setVisualFilters(nextFilters);
+    await loadAdminVisualization(nextFilters);
   }
   const legendStyle = { fontFamily: "Inter, Arial, sans-serif", fontSize: 12 };
 
@@ -2313,13 +2365,20 @@ export default function SchoolofOperations() {
       });
   }
 
-  function handleAdminSearch() {
-    setAdminSearchFilters({
+  async function handleAdminSearch() {
+    const nextFilters = {
       firstName: adminSearchFirstNameInput.trim().toLowerCase(),
       lastName: adminSearchLastNameInput.trim().toLowerCase(),
       staffId: adminSearchStaffIdInput.trim().toLowerCase(),
-    });
+    };
+    setAdminSearchFilters(nextFilters);
     setAdminPage(1);
+    const params = new URLSearchParams({ page: "1", page_size: "100" });
+    if (nextFilters.firstName) params.set("first_name", nextFilters.firstName);
+    if (nextFilters.lastName) params.set("last_name", nextFilters.lastName);
+    if (nextFilters.staffId) params.set("staff_id", nextFilters.staffId);
+    const response = await apiJson<StaffDirectoryResponse>(`/api/school-operations/staff?${params.toString()}`);
+    setAssignablePeople((response.data?.items ?? []).map(mapStaffRowToAssignablePerson));
   }
 
   function handlePersonDepartmentChange(personId: number, nextDepartment: string) {
@@ -4547,9 +4606,9 @@ export default function SchoolofOperations() {
                       className="w-full rounded border border-slate-300 bg-white px-3 py-2 text-sm text-slate-800"
                     >
                       <option value="All Departments">All Departments</option>
-                      {departmentStats.map((item) => (
-                        <option key={item.department} value={item.department}>
-                          {item.department}
+                      {visualDepartmentOptions.map((department) => (
+                        <option key={department} value={department}>
+                          {department}
                         </option>
                       ))}
                     </select>
@@ -4566,11 +4625,13 @@ export default function SchoolofOperations() {
                   </div>
                 </div>
                 <div className="mt-3 text-sm font-semibold text-[#2f4d9c]">
-                  For readability, the dashboard displays up to 3 full academic years at a time. You can export more
-                  data in the Export Excel tab.
+                  For readability, the chart displays the latest 6 semesters in the selected range.
                 </div>
                 {visualFilterError && (
                   <div className="mt-3 text-sm font-semibold text-[#dc2626]">{visualFilterError}</div>
+                )}
+                {visualizationLoading && (
+                  <div className="mt-3 text-sm font-semibold text-slate-500">Loading visualization...</div>
                 )}
               </div>
               <div className="mt-3">
@@ -4916,9 +4977,9 @@ export default function SchoolofOperations() {
                     className="w-full rounded border border-slate-300 bg-white px-3 py-2 text-sm text-slate-800"
                   >
                     <option value="All Departments">All Departments</option>
-                    {departmentStats.map((item) => (
-                      <option key={`export-dept-${item.department}`} value={item.department}>
-                        {item.department}
+                    {visualDepartmentOptions.map((department) => (
+                      <option key={`export-dept-${department}`} value={department}>
+                        {department}
                       </option>
                     ))}
                   </select>
@@ -4927,6 +4988,7 @@ export default function SchoolofOperations() {
                 <div className="flex items-end">
                   <button
                     type="button"
+                    onClick={handleSchoolExportExcel}
                     className="w-full rounded bg-[#2f4d9c] px-4 py-2 text-sm font-semibold text-white hover:bg-[#264183]"
                   >
                     Export Excel

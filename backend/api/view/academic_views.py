@@ -17,11 +17,13 @@ from api.permissions import IsAcademicOrHoD
 from api.services.workload_service import (
     evaluate_mvp_anomaly,
     staff_has_role,
+    report_total_hours,
     workload_item_hours_for_totals,
     _parse_year_range,
     _filter_reports_by_range,
     _build_semester_label,
     _reporting_period_label,
+    semester_sort_key,
 )
 from api.view.supervisor_views import _get_request_reason
 from api.view.ops_admin_views import _serialize_workload_detail as _serialize_ops_workload_detail
@@ -506,19 +508,18 @@ def academic_visualization(request):
     qs = _own_reports_qs(request.staff).prefetch_related('items')
     qs = _filter_reports_by_range(qs, year_from, year_to, semester_filter)
 
-    SEM_ORDER = {'S1': 0, 'S2': 1, 'FULL_YEAR': 2}
     reports = list(qs.order_by('academic_year', 'semester'))
 
     seen = {}
     for r in reports:
         key = (r.academic_year, r.semester)
         seen[key] = True
-    ordered_keys = sorted(seen.keys(), key=lambda k: (k[0], SEM_ORDER.get(k[1], 9)))
+    ordered_keys = sorted(seen.keys(), key=semester_sort_key)
 
     my_hours_map = {}
     for r in reports:
         key = (r.academic_year, r.semester)
-        total = sum((workload_item_hours_for_totals(item) for item in r.items.all()), Decimal('0.00'))
+        total = report_total_hours(r)
         my_hours_map[key] = my_hours_map.get(key, Decimal('0.00')) + total
 
     dept_id = request.staff.department_id
@@ -531,7 +532,7 @@ def academic_visualization(request):
     dept_hours_map = {}
     for r in dept_qs.order_by('academic_year', 'semester'):
         key = (r.academic_year, r.semester)
-        total = sum((workload_item_hours_for_totals(item) for item in r.items.all()), Decimal('0.00'))
+        total = report_total_hours(r)
         dept_hours_map.setdefault(key, []).append(total)
 
     my_vs_dept = []

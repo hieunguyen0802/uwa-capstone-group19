@@ -104,6 +104,15 @@ type HodWorkloadListResponse = {
   };
 };
 
+type HodStatusFilter = "all" | "pending" | "approved" | "rejected";
+
+type HodSearchFilters = {
+  employeeId: string;
+  name: string;
+  year: string;
+  semester: "" | "S1" | "S2";
+};
+
 type HodWorkloadDetailPayload = {
   id: string;
   staffId: string;
@@ -317,9 +326,7 @@ export default function Supervisor() {
   const pageSize = 10; // Items per page
   const [submitting, setSubmitting] = useState(false);
 
-  const [statusFilter, setStatusFilter] = useState<
-    "all" | "pending" | "approved" | "rejected"
-  >("pending");
+  const [statusFilter, setStatusFilter] = useState<HodStatusFilter>("pending");
 
   const [popup, setPopup] = useState<{
     open: boolean;
@@ -341,7 +348,7 @@ export default function Supervisor() {
   const [searchNameInput, setSearchNameInput] = useState("");
   const [searchYearInput, setSearchYearInput] = useState("");
   const [searchSemesterInput, setSearchSemesterInput] = useState<"" | "S1" | "S2">("");
-  const [searchFilters, setSearchFilters] = useState({
+  const [searchFilters, setSearchFilters] = useState<HodSearchFilters>({
     employeeId: "",
     name: "",
     year: "",
@@ -391,11 +398,19 @@ export default function Supervisor() {
     return hodAnnualReports.slice(start, start + hodReportsPerPage);
   }, [hodAnnualReports, hodReportInboxPage]);
 
-  async function loadHodRequests() {
+  async function loadHodRequests(options?: { status?: HodStatusFilter; filters?: HodSearchFilters }) {
     setLoading(true);
     setPageError("");
     try {
-      const response = await apiJson<HodWorkloadListResponse>("/api/hod/workload-requests/?page_size=200");
+      const params = new URLSearchParams({ page_size: "100" });
+      const nextStatus = options?.status ?? statusFilter;
+      const nextFilters = options?.filters ?? searchFilters;
+      if (nextStatus !== "all") params.set("status", nextStatus);
+      if (nextFilters.employeeId) params.set("staffId", nextFilters.employeeId);
+      if (nextFilters.name) params.set("name", nextFilters.name);
+      if (nextFilters.year) params.set("year", nextFilters.year);
+      if (nextFilters.semester) params.set("semester", nextFilters.semester);
+      const response = await apiJson<HodWorkloadListResponse>(`/api/hod/workload-requests/?${params.toString()}`);
       setPending((response.items ?? []).map(mapHodRowToRequest));
     } catch (error) {
       if (!isAbortError(error)) {
@@ -517,61 +532,7 @@ export default function Supervisor() {
     setHodReportInboxPage((prev) => Math.min(Math.max(1, prev), total));
   }, [hodAnnualReports.length]);
 
-  const itemsForFilter = useMemo(() => {
-    const byStatus =
-      statusFilter === "all"
-        ? pending
-        : pending.filter((it) => it.status === statusFilter);
-
-    const hasSearchFilter = Object.values(searchFilters).some((value) => value);
-    if (!hasSearchFilter) return byStatus;
-
-    return byStatus.filter((it) => {
-      const fullName = it.name.toLowerCase();
-      const nameParts = it.name.trim().toLowerCase().split(/\s+/);
-      const firstName = nameParts[0] || "";
-      const lastName = nameParts[nameParts.length - 1] || "";
-
-      if (
-        searchFilters.employeeId &&
-        !it.studentId.toLowerCase().includes(searchFilters.employeeId)
-      ) {
-        return false;
-      }
-
-      if (searchFilters.name) {
-        const q = searchFilters.name;
-        const matchByFull = fullName.includes(q);
-        const matchByFirst = firstName.includes(q);
-        const matchByLast = lastName.includes(q);
-        const matchByReversed = `${lastName} ${firstName}`.includes(q);
-        if (!(matchByFull || matchByFirst || matchByLast || matchByReversed)) return false;
-      }
-
-      const submittedText = submittedAtDisplay(it);
-      const submittedDate = new Date(submittedText.replace(" ", "T"));
-      const hasValidSubmittedDate = !Number.isNaN(submittedDate.getTime());
-      const selectedYear = Number(searchFilters.year);
-
-      if (searchFilters.year && Number.isFinite(selectedYear) && hasValidSubmittedDate) {
-        if (searchFilters.semester === "s1") {
-          // S1: [YYYY-01-01, YYYY-07-01)
-          const s1Start = new Date(selectedYear, 0, 1);
-          const s1End = new Date(selectedYear, 6, 1);
-          if (!(submittedDate >= s1Start && submittedDate < s1End)) return false;
-        } else if (searchFilters.semester === "s2") {
-          // S2: [YYYY-07-01, YYYY+1-01-01)
-          const s2Start = new Date(selectedYear, 6, 1);
-          const s2End = new Date(selectedYear + 1, 0, 1);
-          if (!(submittedDate >= s2Start && submittedDate < s2End)) return false;
-        } else if (submittedDate.getFullYear() !== selectedYear) {
-          return false;
-        }
-      }
-
-      return fullName.length > 0;
-    });
-  }, [pending, statusFilter, searchFilters]);
+  const itemsForFilter = pending;
 
   const totalPages = Math.max(1, Math.ceil(itemsForFilter.length / pageSize));
   const pageItems = useMemo(() => {
@@ -583,7 +544,7 @@ export default function Supervisor() {
       (visualizationData.averageWorkHoursBySemester ?? []).map((item) => ({
         semester: item.period,
         averageHours: item.averageWorkHours,
-      })),
+      })).slice(-6),
     [visualizationData]
   );
   const trendChartData = useMemo(
@@ -591,7 +552,7 @@ export default function Supervisor() {
       (visualizationData.totalWorkHoursTrend ?? []).map((item) => ({
         semester: item.period,
         totalHours: item.totalWorkHours,
-      })),
+      })).slice(-6),
     [visualizationData]
   );
   const averageHoursDomain = useMemo(
@@ -645,10 +606,6 @@ export default function Supervisor() {
     }
     const startYear = Math.min(fromYear, toYear);
     const endYear = Math.max(fromYear, toYear);
-    if (endYear - startYear > 2) {
-      setVisualError("Maximum range is 3 years.");
-      return;
-    }
     setAppliedVisualFilters({
       yearFrom: String(startYear),
       yearTo: String(endYear),
@@ -673,16 +630,27 @@ export default function Supervisor() {
 
 
   function handleSearch() {
-    setSearchFilters({
+    const nextFilters: HodSearchFilters = {
       employeeId: searchEmployeeIdInput.trim().toLowerCase(),
       name: searchNameInput.trim().toLowerCase(),
       year: searchYearInput.trim().toLowerCase(),
-      semester: searchSemesterInput.trim().toLowerCase(),
-    });
+      semester: searchSemesterInput,
+    };
+    setSearchFilters(nextFilters);
     setPage(1);
     setSelectedIds(new Set());
     setDetailsOpen(false);
     setDetailsItem(null);
+    void loadHodRequests({ status: statusFilter, filters: nextFilters });
+  }
+
+  function applyStatusFilter(nextStatus: HodStatusFilter) {
+    setStatusFilter(nextStatus);
+    setSelectedIds(new Set());
+    setPage(1);
+    setDetailsOpen(false);
+    setDetailsItem(null);
+    void loadHodRequests({ status: nextStatus, filters: searchFilters });
   }
 
   async function openDetails(item: MockRequest) {
@@ -957,13 +925,7 @@ export default function Supervisor() {
                 <div className="flex flex-wrap items-center justify-start gap-4">
                 <button
                   type="button"
-                  onClick={() => {
-                    setStatusFilter("all");
-                    setSelectedIds(new Set());
-                    setPage(1);
-                    setDetailsOpen(false);
-                    setDetailsItem(null);
-                  }}
+                  onClick={() => applyStatusFilter("all")}
                   className={`rounded-md border px-5 py-2 text-base font-semibold ${
                     statusFilter === "all"
                       ? "border-[#2f4d9c] bg-[#2f4d9c] text-white"
@@ -975,13 +937,7 @@ export default function Supervisor() {
 
                 <button
                   type="button"
-                  onClick={() => {
-                    setStatusFilter("pending");
-                    setSelectedIds(new Set());
-                    setPage(1);
-                    setDetailsOpen(false);
-                    setDetailsItem(null);
-                  }}
+                  onClick={() => applyStatusFilter("pending")}
                   className={`relative rounded-md border px-5 py-2 text-base font-semibold ${
                     statusFilter === "pending"
                       ? "border-[#d97706] bg-[#d97706] text-white"
@@ -998,13 +954,7 @@ export default function Supervisor() {
 
                 <button
                   type="button"
-                  onClick={() => {
-                    setStatusFilter("approved");
-                    setSelectedIds(new Set());
-                    setPage(1);
-                    setDetailsOpen(false);
-                    setDetailsItem(null);
-                  }}
+                  onClick={() => applyStatusFilter("approved")}
                   className={`rounded-md border px-5 py-2 text-base font-semibold ${
                     statusFilter === "approved"
                       ? "border-[#16a34a] bg-[#16a34a] text-white"
@@ -1016,13 +966,7 @@ export default function Supervisor() {
 
                 <button
                   type="button"
-                  onClick={() => {
-                    setStatusFilter("rejected");
-                    setSelectedIds(new Set());
-                    setPage(1);
-                    setDetailsOpen(false);
-                    setDetailsItem(null);
-                  }}
+                  onClick={() => applyStatusFilter("rejected")}
                   className={`rounded-md border px-5 py-2 text-base font-semibold ${
                     statusFilter === "rejected"
                       ? "border-[#dc2626] bg-[#dc2626] text-white"
@@ -1254,7 +1198,7 @@ export default function Supervisor() {
                 </div>
                 {visualError && <div className="mt-3 text-sm font-semibold text-[#dc2626]">{visualError}</div>}
                 <div className="mt-2 text-sm font-semibold text-[#2f4d9c]">
-                  For readability, Visualization supports up to 3 years. Export more data in Export Excel.
+                  For readability, the chart displays the latest 6 semesters in the selected range.
                 </div>
               </div>
 

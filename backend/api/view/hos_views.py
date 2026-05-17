@@ -21,6 +21,8 @@ from api.services.workload_service import (
     _filter_reports_by_range,
     _parse_year_range,
     _reporting_period_label,
+    report_total_hours,
+    semester_sort_key,
 )
 
 ROLE_ALIAS_TO_DB = {
@@ -517,7 +519,7 @@ def hos_visualization(request):
         'total_departments': len({report.snapshot_department_id for report in reports}),
         'total_academics': len({report.staff_id for report in reports}),
         'total_work_hours': float(
-            round(sum(sum(item.allocated_hours for item in report.items.all()) for report in reports), 2)
+            round(sum(report_total_hours(report) for report in reports), 2)
         ),
         'pending_requests': sum(1 for report in reports if report.status == 'PENDING'),
         'approved_requests': sum(1 for report in reports if report.status == 'APPROVED'),
@@ -539,7 +541,7 @@ def hos_visualization(request):
             },
         )
         stats['academics'].add(report.staff_id)
-        stats['total_hours'] += sum(item.allocated_hours for item in report.items.all())
+        stats['total_hours'] += report_total_hours(report)
         if report.status == 'PENDING':
             stats['pending'] += 1
         elif report.status == 'APPROVED':
@@ -568,11 +570,11 @@ def hos_visualization(request):
         trend_row[report.snapshot_department.name] = float(
             round(
                 trend_row.get(report.snapshot_department.name, 0)
-                + sum(item.allocated_hours for item in report.items.all()),
+                + report_total_hours(report),
                 2,
             )
         )
-    workload_trend = [trend_map[key] for key in sorted(trend_map.keys())]
+    workload_trend = [trend_map[key] for key in sorted(trend_map.keys(), key=semester_sort_key)]
 
     return Response(
         {

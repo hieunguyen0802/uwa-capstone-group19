@@ -167,6 +167,13 @@ type AcademicWorkloadListResponse = {
   };
 };
 
+type AcademicSearchFilters = {
+  status: "all" | "pending" | "approved" | "rejected";
+  confirmation: "" | "confirmed" | "unconfirmed";
+  year: string;
+  semester: "" | "S1" | "S2";
+};
+
 type AcademicWorkloadDetailResponse = AcademicWorkloadRowResponse & {
   actualTeachingRatio?: number | null;
   employmentType?: string | null;
@@ -520,12 +527,7 @@ export default function Academic() {
   );
   const [searchYearInput, setSearchYearInput] = useState("");
   const [searchSemesterInput, setSearchSemesterInput] = useState<"" | "S1" | "S2">("");
-  const [searchFilters, setSearchFilters] = useState<{
-    status: "all" | "pending" | "approved" | "rejected";
-    confirmation: "" | "confirmed" | "unconfirmed";
-    year: string;
-    semester: "" | "S1" | "S2";
-  }>({
+  const [searchFilters, setSearchFilters] = useState<AcademicSearchFilters>({
     status: "all",
     confirmation: "",
     year: "",
@@ -542,7 +544,7 @@ export default function Academic() {
   const [visualSemesterInput, setVisualSemesterInput] = useState<"All" | "S1" | "S2">("All");
   const [visualError, setVisualError] = useState("");
   const [visualizationLoading, setVisualizationLoading] = useState(false);
-  const [_appliedVisualFilters, setAppliedVisualFilters] = useState({
+  const [, setAppliedVisualFilters] = useState({
     yearFrom: "",
     yearTo: "",
     semester: "All" as "All" | "S1" | "S2",
@@ -572,11 +574,17 @@ const selectedYear = Number(searchYearInput) || currentYear;
     [selectedYear]
   );
 
-  const loadAcademicWorkloads = useCallback(async (options?: { silent?: boolean }) => {
+  const loadAcademicWorkloads = useCallback(async (options?: { silent?: boolean; filters?: AcademicSearchFilters }) => {
     if (!options?.silent) setLoadingItems(true);
     setPageError("");
     try {
-      const response = await apiJson<AcademicWorkloadListResponse>("/api/academic/workloads/");
+      const params = new URLSearchParams({ page_size: "100" });
+      const filters = options?.filters;
+      if (filters?.status && filters.status !== "all") params.set("status", filters.status);
+      if (filters?.confirmation) params.set("confirmation", filters.confirmation);
+      if (filters?.year) params.set("year", filters.year);
+      if (filters?.semester) params.set("semester", filters.semester);
+      const response = await apiJson<AcademicWorkloadListResponse>(`/api/academic/workloads/?${params.toString()}`);
       setItems((response.items ?? []).map((row) => mapAcademicRowToItem(row, user.department)));
     } catch (error) {
       if (!isAbortError(error)) {
@@ -644,7 +652,7 @@ const selectedYear = Number(searchYearInput) || currentYear;
   useEffect(() => {
     const refreshLatestWorkloads = () => {
       if (document.visibilityState === "visible") {
-        void loadAcademicWorkloads({ silent: true });
+        void loadAcademicWorkloads({ silent: true, filters: searchFilters });
       }
     };
 
@@ -656,41 +664,9 @@ const selectedYear = Number(searchYearInput) || currentYear;
       document.removeEventListener("visibilitychange", refreshLatestWorkloads);
       window.clearInterval(intervalId);
     };
-  }, [loadAcademicWorkloads]);
+  }, [loadAcademicWorkloads, searchFilters]);
 
-  const filteredItems = useMemo(() => {
-    let next = searchFilters.status === "all" ? items : items.filter((x) => x.status === searchFilters.status);
-
-    if (searchFilters.confirmation) {
-      next = next.filter((x) => x.confirmation === searchFilters.confirmation);
-    }
-
-    const selectedYearNumber = Number(searchFilters.year);
-    if (searchFilters.year && Number.isFinite(selectedYearNumber)) {
-      next = next.filter((x) => {
-        const pushedAt = academicPushedAt(x);
-        if (!pushedAt) return false;
-        const submitted = parseDateTime(pushedAt);
-        if (Number.isNaN(submitted.getTime())) return false;
-
-        if (searchFilters.semester === "S1") {
-          const s1Start = new Date(selectedYearNumber, 0, 1);
-          const s1End = new Date(selectedYearNumber, 6, 1);
-          return submitted >= s1Start && submitted < s1End;
-        }
-
-        if (searchFilters.semester === "S2") {
-          const s2Start = new Date(selectedYearNumber, 6, 1);
-          const s2End = new Date(selectedYearNumber + 1, 0, 1);
-          return submitted >= s2Start && submitted < s2End;
-        }
-
-        return submitted.getFullYear() === selectedYearNumber;
-      });
-    }
-
-    return next;
-  }, [items, searchFilters]);
+  const filteredItems = items;
   const totalPages = Math.max(1, Math.ceil(filteredItems.length / pageSize));
   const pageItems = useMemo(() => {
     const start = (page - 1) * pageSize;
@@ -699,11 +675,11 @@ const selectedYear = Number(searchYearInput) || currentYear;
 
   const detailItem = useMemo(() => items.find((x) => x.id === detailId) || null, [items, detailId]);
   const myVsDepartmentTrendData = useMemo(
-    () => visualizationData.myVsDepartmentTrend ?? [],
+    () => (visualizationData.myVsDepartmentTrend ?? []).slice(-6),
     [visualizationData]
   );
   const trendChartData = useMemo(
-    () => visualizationData.totalHoursTrend ?? [],
+    () => (visualizationData.totalHoursTrend ?? []).slice(-6),
     [visualizationData]
   );
   const compareTrendDomain = useMemo(
@@ -836,13 +812,15 @@ const selectedYear = Number(searchYearInput) || currentYear;
   }
 
   function handleSearch() {
-    setSearchFilters({
+    const nextFilters: AcademicSearchFilters = {
       status: filter,
       confirmation: confirmationFilter,
       year: searchYearInput,
       semester: searchSemesterInput,
-    });
+    };
+    setSearchFilters(nextFilters);
     setPage(1);
+    void loadAcademicWorkloads({ filters: nextFilters });
   }
 
   async function handleApplyVisualizationFilter() {
@@ -855,10 +833,6 @@ const selectedYear = Number(searchYearInput) || currentYear;
     }
     const startYear = Math.min(fromYear, toYear);
     const endYear = Math.max(fromYear, toYear);
-    if (endYear - startYear > 2) {
-      setVisualError("Maximum range is 3 years.");
-      return;
-    }
     setAppliedVisualFilters({
       yearFrom: String(startYear),
       yearTo: String(endYear),
@@ -1281,7 +1255,7 @@ const selectedYear = Number(searchYearInput) || currentYear;
                 />
                 {visualError && <div className="mt-3 text-sm font-semibold text-[#dc2626]">{visualError}</div>}
                 <div className="mt-2 text-sm font-semibold text-[#2f4d9c]">
-                  For readability, Visualization supports up to 3 years. Export more data in Export Excel.
+                  For readability, the chart displays the latest 6 semesters in the selected range.
                 </div>
               </div>
               <ReportingPeriodBar periodLabel={reportingPeriodLabel} />
