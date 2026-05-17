@@ -1,5 +1,4 @@
 from django.urls import path
-from django.http import HttpResponse
 from api.view.auth_views import login_view
 from api.view.me_views import auth_me_view
 from api.view.pageinfo_views import messages_view, profile_avatar, profile_me
@@ -235,7 +234,4 @@ urlpatterns = [
     path('school-operations/audit-log/export', admin_audit_log_export),
     path('school-operations/contact-staff', admin_contact_staff),
     
-    
-    # test url 
-    path('test/', lambda request: HttpResponse('OK')),
 ]

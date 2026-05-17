@@ -17,9 +17,14 @@ Including another URLconf
 from django.conf import settings
 from django.conf.urls.static import static
 from django.urls import path, include
+from django.http import HttpResponse
+
 
 urlpatterns = [
     path('api/', include('api.urls')),
+    
+    # test url 
+    path('test/', lambda request: HttpResponse('OK')),
 ]
 
 if settings.DEBUG:
