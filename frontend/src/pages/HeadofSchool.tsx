@@ -593,17 +593,34 @@ export default function HeadofSchool() {
   }, [adminSearchFilters, assignablePeople]);
 
   const departmentStats = useMemo(
-    () =>
-      (analyticsData?.workloadHoursDistribution ?? []).map((item) => ({
+    () => {
+      const stats = analyticsData?.departmentStats;
+      if (stats?.length) {
+        return stats.map((item) => ({
+          department: item.department,
+          totalHours: Number(item.totalHours) || 0,
+          academics: Number(item.academics) || 0,
+          pending: Number(item.pending) || 0,
+          approved: Number(item.approved) || 0,
+          rejected: Number(item.rejected) || 0,
+        }));
+      }
+      return (analyticsData?.workloadHoursDistribution ?? []).map((item) => ({
         department: item.department,
         totalHours: Number(item.totalWorkHours) || 0,
         academics: 0,
         pending: 0,
         approved: 0,
         rejected: 0,
-      })),
+      }));
+    },
     [analyticsData]
   );
+  const visualDepartmentOptions = useMemo(() => {
+    const names = new Set<string>(["Physics", "Mathematics & Statistics", "Computer Science & Software Engineering"]);
+    departmentStats.forEach((item) => names.add(item.department));
+    return Array.from(names).sort((a, b) => a.localeCompare(b));
+  }, [departmentStats]);
   const filteredDepartmentStats = useMemo(() => {
     if (visualFilters.department === "All Departments") return departmentStats;
     return departmentStats.filter((item) => item.department === visualFilters.department);
@@ -663,11 +680,14 @@ export default function HeadofSchool() {
   );
 
   const workloadTrendBySemester = useMemo(
-    () =>
-      (analyticsData?.totalWorkHoursTrend ?? []).map((item) => ({
+    () => {
+      const departmentTrend = analyticsData?.departmentWorkloadTrend;
+      if (departmentTrend?.length) return departmentTrend;
+      return (analyticsData?.totalWorkHoursTrend ?? []).map((item) => ({
         semester: item.period,
         "Total Work Hours": item.totalWorkHours,
-      })),
+      }));
+    },
     [analyticsData]
   );
 
@@ -755,12 +775,6 @@ export default function HeadofSchool() {
     }
     const startYear = Math.min(fromYear, toYear);
     const endYear = Math.max(fromYear, toYear);
-    const yearSpan = endYear - startYear;
-    const maxYearSpan = 2;
-    if (yearSpan > maxYearSpan) {
-      setVisualFilterError("Maximum range is 3 years.");
-      return;
-    }
     setVisualFilterError("");
     setVisualFilters({
       fromYear: String(startYear),
@@ -2033,9 +2047,9 @@ export default function HeadofSchool() {
                       className="w-full rounded border border-slate-300 bg-white px-3 py-2 text-sm text-slate-800"
                     >
                       <option value="All Departments">All Departments</option>
-                      {departmentStats.map((item) => (
-                        <option key={item.department} value={item.department}>
-                          {item.department}
+                      {visualDepartmentOptions.map((department) => (
+                        <option key={department} value={department}>
+                          {department}
                         </option>
                       ))}
                     </select>
@@ -2315,25 +2329,50 @@ export default function HeadofSchool() {
                           align="right"
                           wrapperStyle={legendStyle}
                         />
-                        <Line
-                          type="monotone"
-                          dataKey="Total Work Hours"
-                          stroke="#1f3b86"
-                          strokeWidth={2}
-                          dot={(props: any) => {
-                            const isCurrentSemester = props?.payload?.semester === currentSemesterLabel;
-                            return (
-                              <circle
-                                cx={props.cx}
-                                cy={props.cy}
-                                r={isCurrentSemester ? 6 : 3}
-                                fill="#1f3b86"
-                                stroke="#ffffff"
-                                strokeWidth={isCurrentSemester ? 2 : 1}
-                              />
-                            );
-                          }}
-                        />
+                        {filteredDepartmentStats.length > 0 ? (
+                          filteredDepartmentStats.map((item) => (
+                            <Line
+                              key={item.department}
+                              type="monotone"
+                              dataKey={item.department}
+                              stroke={departmentColorMap[item.department] || "#1e3a8a"}
+                              strokeWidth={2}
+                              dot={(props: any) => {
+                                const isCurrentSemester = props?.payload?.semester === currentSemesterLabel;
+                                return (
+                                  <circle
+                                    cx={props.cx}
+                                    cy={props.cy}
+                                    r={isCurrentSemester ? 6 : 3}
+                                    fill={departmentColorMap[item.department] || "#1e3a8a"}
+                                    stroke="#ffffff"
+                                    strokeWidth={isCurrentSemester ? 2 : 1}
+                                  />
+                                );
+                              }}
+                            />
+                          ))
+                        ) : (
+                          <Line
+                            type="monotone"
+                            dataKey="Total Work Hours"
+                            stroke="#1f3b86"
+                            strokeWidth={2}
+                            dot={(props: any) => {
+                              const isCurrentSemester = props?.payload?.semester === currentSemesterLabel;
+                              return (
+                                <circle
+                                  cx={props.cx}
+                                  cy={props.cy}
+                                  r={isCurrentSemester ? 6 : 3}
+                                  fill="#1f3b86"
+                                  stroke="#ffffff"
+                                  strokeWidth={isCurrentSemester ? 2 : 1}
+                                />
+                              );
+                            }}
+                          />
+                        )}
                       </LineChart>
                     </ResponsiveContainer>
                   </div>
@@ -2394,9 +2433,9 @@ export default function HeadofSchool() {
                     className="w-full rounded border border-slate-300 bg-white px-3 py-2 text-sm text-slate-800"
                   >
                     <option value="All Departments">All Departments</option>
-                    {departmentStats.map((item) => (
-                      <option key={`export-dept-${item.department}`} value={item.department}>
-                        {item.department}
+                    {visualDepartmentOptions.map((department) => (
+                      <option key={`export-dept-${department}`} value={department}>
+                        {department}
                       </option>
                     ))}
                   </select>

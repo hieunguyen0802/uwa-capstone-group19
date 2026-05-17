@@ -583,7 +583,7 @@ export default function Supervisor() {
       (visualizationData.averageWorkHoursBySemester ?? []).map((item) => ({
         semester: item.period,
         averageHours: item.averageWorkHours,
-      })),
+      })).slice(-6),
     [visualizationData]
   );
   const trendChartData = useMemo(
@@ -591,7 +591,7 @@ export default function Supervisor() {
       (visualizationData.totalWorkHoursTrend ?? []).map((item) => ({
         semester: item.period,
         totalHours: item.totalWorkHours,
-      })),
+      })).slice(-6),
     [visualizationData]
   );
   const averageHoursDomain = useMemo(
@@ -645,10 +645,6 @@ export default function Supervisor() {
     }
     const startYear = Math.min(fromYear, toYear);
     const endYear = Math.max(fromYear, toYear);
-    if (endYear - startYear > 2) {
-      setVisualError("Maximum range is 3 years.");
-      return;
-    }
     setAppliedVisualFilters({
       yearFrom: String(startYear),
       yearTo: String(endYear),
@@ -1254,7 +1250,7 @@ export default function Supervisor() {
                 </div>
                 {visualError && <div className="mt-3 text-sm font-semibold text-[#dc2626]">{visualError}</div>}
                 <div className="mt-2 text-sm font-semibold text-[#2f4d9c]">
-                  For readability, Visualization supports up to 3 years. Export more data in Export Excel.
+                  For readability, the chart displays the latest 6 semesters in the selected range.
                 </div>
               </div>
 

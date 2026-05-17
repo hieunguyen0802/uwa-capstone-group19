@@ -797,6 +797,64 @@ class TestAcademicVisualization(BaseTestCase):
 
 # ─── Test: export endpoint ────────────────────────────────────────────────────
 
+class TestVisualizationRealData(BaseTestCase):
+    def _seed_seven_semesters(self, status='PENDING'):
+        WorkloadReport.objects.all().delete()
+        periods = [
+            (2022, 'S1'),
+            (2022, 'S2'),
+            (2023, 'S1'),
+            (2023, 'S2'),
+            (2024, 'S1'),
+            (2024, 'S2'),
+            (2025, 'S1'),
+        ]
+        reports = []
+        for idx, (year, semester) in enumerate(periods, start=1):
+            report = WorkloadReport.objects.create(
+                staff=self.academic,
+                academic_year=year,
+                semester=semester,
+                snapshot_fte=Decimal('1.00'),
+                snapshot_department=self.dept_csse,
+                status=status,
+                distributed_at=timezone.now(),
+            )
+            WorkloadItem.objects.create(
+                report=report,
+                category='TEACHING',
+                unit_code=f'CITS{idx:04d}',
+                allocated_hours=Decimal('86.25'),
+            )
+            reports.append(report)
+        return reports
+
+    def test_school_ops_visualization_reads_seven_semesters_from_database(self):
+        self._seed_seven_semesters()
+        client = self._auth_client(self.ops)
+        res = client.get('/api/school-operations/visualization?fromYear=2022&toYear=2025&semester=All')
+        self.assertEqual(res.status_code, 200)
+        data = res.data['data']
+        self.assertEqual(len(data['trend']), 7)
+        self.assertEqual(data['trend'][0]['semester'], '2022 S1')
+        self.assertEqual(data['trend'][-1]['semester'], '2025 S1')
+        self.assertEqual(data['summary']['totalAcademics'], 1)
+        self.assertEqual(data['summary']['pendingRequests'], 7)
+        self.assertEqual(data['departmentStats'][0]['academics'], 1)
+
+    def test_hos_v3_analytics_includes_department_stats_and_seven_semester_trend(self):
+        self._seed_seven_semesters()
+        client = self._auth_client(self.hos)
+        res = client.get('/api/hos/analytics/workloads?fromYear=2022&toYear=2025&semester=All')
+        self.assertEqual(res.status_code, 200)
+        data = res.data['data']
+        self.assertEqual(len(data['departmentWorkloadTrend']), 7)
+        self.assertEqual(data['departmentWorkloadTrend'][0]['semester'], '2022 S1')
+        self.assertEqual(data['departmentWorkloadTrend'][-1]['semester'], '2025 S1')
+        self.assertEqual(data['departmentStats'][0]['academics'], 1)
+        self.assertEqual(data['departmentStats'][0]['pending'], 7)
+
+
 class TestAcademicExport(BaseTestCase):
     """
     Verifies GET /api/academic/export/ returns a real xlsx binary stream.
