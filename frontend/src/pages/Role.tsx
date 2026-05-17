@@ -11,7 +11,7 @@ import { useAuth } from "../auth/AuthContext";
  */
 
 const HOME_ROUTE_BY_ROLE: Record<string, string> = {
-  ACADEMIC: "/academic",
+  ACADEMIC: "/workload-platform",
   HOD: "/role",
   SCHOOL_OPS: "/school-operations",
   HOS: "/school-head",
@@ -32,7 +32,7 @@ const HOD_CHOICES = [
     subtitle: "Submit and review your own workload",
     color: "bg-[#9a8538]",
     icon: "AC",
-    route: "/academic",
+    route: "/workload-platform",
   },
 ];
 

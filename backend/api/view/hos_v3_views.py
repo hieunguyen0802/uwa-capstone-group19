@@ -54,7 +54,13 @@ def _hos_visible_qs():
     """
     hod_self_subq = AuditLog.objects.filter(
         report=OuterRef('pk'),
-        changes__kind='HOD_SELF_WORKLOAD_REQUEST',
+    ).filter(
+        Q(changes__kind='HOD_SELF_WORKLOAD_REQUEST') |
+        Q(
+            changes__kind='WORKLOAD_REQUEST',
+            action_by=OuterRef('staff'),
+            action_by__user__groups__name='HOD',
+        )
     )
     return (
         WorkloadReport.objects.filter(is_current=True)

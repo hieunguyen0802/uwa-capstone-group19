@@ -25,6 +25,13 @@ export type HosWorkloadDetail = HosWorkloadRow & {
   breakdown: HosBreakdown;
   canEditBreakdown?: boolean;
   cancelled?: boolean;
+  targetTeachingRatio?: number | null;
+  actualTeachingRatio?: number;
+  expectedMinHours?: number | null;
+  expectedMaxHours?: number | null;
+  employmentType?: string;
+  isNewStaff?: boolean;
+  hodReviewRequired?: boolean;
 };
 
 export type HosSemesterReport = {
@@ -75,6 +82,15 @@ export type HosAnalyticsPayload = {
   totalWorkHoursTrend: Array<{ period: string; totalWorkHours: number }>;
   averageWorkHoursBySemester: Array<{ period: string; averageWorkHours: number }>;
   statusDistribution: Record<string, number>;
+  departmentStats?: Array<{
+    department: string;
+    academics: number;
+    totalHours: number;
+    pending: number;
+    approved: number;
+    rejected: number;
+  }>;
+  departmentWorkloadTrend?: Array<Record<string, string | number | null>>;
   workloadHoursDistribution: Array<{ department: string; totalWorkHours: number }>;
 };
 

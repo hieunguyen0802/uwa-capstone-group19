@@ -48,3 +48,7 @@ image/
 .claude/skills/
 skills-lock.json
 .claude/
+
+# Local backups and database dumps
+backups/
+*.dump

@@ -18,7 +18,6 @@ import ExcelJS from "exceljs";
 import * as XLSX from "xlsx";
 import DashboardHeader from "../components/common/DashboardHeader";
 import FilterFormRow from "../components/common/FilterFormRow";
-import InfoField from "../components/common/InfoField";
 import PaginationControls from "../components/common/PaginationControls";
 import ProfileModal from "../components/common/ProfileModal";
 import SearchButton from "../components/common/SearchButton";
@@ -51,7 +50,11 @@ import {
 import TemplateImportExportActions from "../components/common/TemplateImportExportActions";
 import ThemedNoticeModal, { SUPERSEDED_RECORD_MESSAGE } from "../components/common/ThemedNoticeModal";
 import WorkHoursBadge from "../components/common/WorkHoursBadge";
-import { apiJson } from "../api/client";
+import WorkloadDetailModal, {
+  type WorkloadDetailField,
+  type WorkloadDetailNoteSection,
+} from "../components/common/WorkloadDetailModal";
+import { apiJson, downloadApiFile } from "../api/client";
 import { useAuth } from "../auth/AuthContext";
 import { profileFromAuth } from "../auth/profileFromAuth";
 
@@ -88,6 +91,10 @@ type MockRequest = {
   operatedBy?: string;
   /** Staff number of the School Ops / approver shown under DISTRIBUTED BY. */
   operatedByStaffId?: string;
+  /** School Ops user shown in ASSIGNED BY for Pending Distribution rows. */
+  assignedBy?: string;
+  /** Staff number shown under ASSIGNED BY for Pending Distribution rows. */
+  assignedByStaffId?: string;
   /** Target teaching share of total workload (0–100), for validation in the detail modal. */
   targetTeachingRatio?: number;
   /** Minimum teaching hours expected in the breakdown (optional). */
@@ -102,6 +109,8 @@ type MockRequest = {
   workloadNewStaff?: boolean;
   /** Workload template column F — HoD Review (yes/no). */
   hodReview?: "yes" | "no";
+  /** Staff role from backend — 'HOD' | 'ACADEMIC' | 'SCHOOL_OPS' | 'HOS'. */
+  staffRole?: string;
   /** ISO timestamp set at the moment of workload import (local machine time). */
   importedAt?: string;
   /** Local-timezone timestamp when this workload was distributed (APPROVED). */
@@ -124,6 +133,38 @@ type OpsPeriodInfo = {
   year: number | null;
   semester: "" | "S1" | "S2" | "FULL_YEAR" | "ALL";
   label: string;
+};
+
+type AdminDepartmentStat = {
+  department: string;
+  academics: number;
+  totalHours: number;
+  pending: number;
+  approved: number;
+  rejected: number;
+};
+
+type AdminVisualizationPayload = {
+  reportingPeriodLabel?: string;
+  scopeLabel?: string;
+  summary?: {
+    totalDepartments?: number;
+    totalAcademics?: number;
+    totalWorkHours?: number;
+    pendingRequests?: number;
+    approvedRequests?: number;
+    rejectedRequests?: number;
+  };
+  departmentStats?: Array<{
+    department: string;
+    academics: number;
+    total_hours?: number;
+    totalHours?: number;
+    pending: number;
+    approved: number;
+    rejected: number;
+  }>;
+  trend?: Array<Record<string, string | number | null>>;
 };
 
 type BreakdownCategory = "Teaching" | "Assigned Roles" | "HDR" | "Service" | "Research (residual)";
@@ -153,23 +194,6 @@ type WorkloadDetailSnapshot = {
 
 /** HDR tab: imported summary row label (must match merged HDR breakdown). */
 const HDR_TOTAL_ROW_LABEL = "HDR Total";
-
-function workloadBreakdownTotalLabel(tab: BreakdownCategory): string {
-  switch (tab) {
-    case "Teaching":
-      return "Teaching Total";
-    case "HDR":
-      return HDR_TOTAL_ROW_LABEL;
-    case "Service":
-      return "Service Total";
-    case "Assigned Roles":
-      return "Assigned Roles Total";
-    case "Research (residual)":
-      return "Research Total";
-    default:
-      return "Total";
-  }
-}
 
 const ADMIN_WORKLOAD_BREAKDOWN_TABS: BreakdownCategory[] = [
   "Teaching",
@@ -258,6 +282,10 @@ function operatorDisplayLabel(item: MockRequest): string {
   return item.operatedByStaffId?.trim()
     ? `${item.operatedBy}\n${item.operatedByStaffId}`
     : item.operatedBy ?? "—";
+}
+
+function hasAssignee(item: MockRequest): boolean {
+  return Boolean(item.assignedBy?.trim());
 }
 
 function buildWorkloadListQueryString(query: WorkloadListQuery): string {
@@ -781,22 +809,6 @@ function rowMatchesWorkloadFailedTab(
   return false;
 }
 
-/** Last name, first name, or full name (substring or order-independent tokens; commas as spaces). */
-function workloadNameSearchMatches(recordName: string, queryRaw: string): boolean {
-  const q = queryRaw.trim().toLowerCase();
-  if (!q) return true;
-  const norm = recordName
-    .toLowerCase()
-    .replace(/,/g, " ")
-    .replace(/\s+/g, " ")
-    .trim();
-  if (!norm) return false;
-  if (norm.includes(q)) return true;
-  const qTokens = q.split(/\s+/).filter(Boolean);
-  const parts = norm.split(" ").filter(Boolean);
-  return qTokens.every((t) => parts.some((p) => p.includes(t)));
-}
-
 function shortDepartmentName(department: string) {
   if (department === "Computer Science & Software Engineering") return "CS&SE";
   if (department === "Mathematics & Statistics") return "Math&Stats";
@@ -984,9 +996,10 @@ export default function SchoolofOperations() {
             id: string; studentId: string; semesterLabel: string; periodLabel: string;
             name: string; unit: string; notes?: string; title: string; department: string;
             rate: number; status: string; confirmation?: "confirmed" | "unconfirmed"; confirmationTime?: string; hours: number; supervisorNote?: string;
-            operatedBy?: string; operatedByStaffId?: string; targetTeachingRatio?: number | null; targetBand?: string | null;
+            operatedBy?: string; operatedByStaffId?: string; assignedBy?: string; assignedByStaffId?: string;
+            targetTeachingRatio?: number | null; targetBand?: string | null;
             cancelled?: boolean; importedFromTemplate?: boolean; workloadNewStaff?: boolean;
-            hodReview?: string; createdAt?: string; distributedTime?: string; fte?: number;
+            hodReview?: string; staffRole?: string; createdAt?: string; distributedTime?: string; fte?: number;
           }>;
           currentPeriod?: {
             year: number;
@@ -1024,12 +1037,15 @@ export default function SchoolofOperations() {
         supervisorNote: row.supervisorNote ?? "",
         operatedBy: row.operatedBy ?? "—",
         operatedByStaffId: row.operatedByStaffId ?? "",
+        assignedBy: row.assignedBy ?? "",
+        assignedByStaffId: row.assignedByStaffId ?? "",
         targetTeachingRatio: row.targetTeachingRatio ?? undefined,
         targetBand: row.targetBand ?? undefined,
         cancelled: Boolean(row.cancelled),
         importedFromTemplate: Boolean(row.importedFromTemplate),
         workloadNewStaff: Boolean(row.workloadNewStaff),
         hodReview: row.hodReview === "yes" ? "yes" : "no",
+        staffRole: row.staffRole ?? undefined,
         importedAt: row.createdAt ?? undefined,
         distributedTime: row.distributedTime ?? undefined,
       }));
@@ -1125,6 +1141,7 @@ export default function SchoolofOperations() {
   const [statusFilter, setStatusFilter] = useState<
     "all" | "distributed" | "failed" | "superseded"
   >("all");
+  const [distributionFailedWorkloadIds, setDistributionFailedWorkloadIds] = useState<Set<string>>(new Set());
 
   const [popup, setPopup] = useState<{
     open: boolean;
@@ -1191,7 +1208,6 @@ export default function SchoolofOperations() {
   const [supersededNoticeOpen, setSupersededNoticeOpen] = useState(false);
   const [detailsItem, setDetailsItem] = useState<MockRequest | null>(null);
   const [detailsBreakdown, setDetailsBreakdown] = useState<BreakdownData | null>(null);
-  const [detailsTab, setDetailsTab] = useState<BreakdownCategory>("Teaching");
   const [noteModalOpen, setNoteModalOpen] = useState(false);
   const [noteDraft, setNoteDraft] = useState("");
   const [noteError, setNoteError] = useState("");
@@ -1257,6 +1273,40 @@ export default function SchoolofOperations() {
     semester: "All",
     department: "All Departments",
   });
+  const [adminVisualization, setAdminVisualization] = useState<AdminVisualizationPayload | null>(null);
+  const [visualizationLoading, setVisualizationLoading] = useState(false);
+
+  async function loadAdminVisualization(filters = visualFilters) {
+    setVisualizationLoading(true);
+    try {
+      const params = new URLSearchParams();
+      if (filters.fromYear) params.set("year_from", filters.fromYear);
+      if (filters.toYear) params.set("year_to", filters.toYear);
+      params.set("semester", filters.semester);
+      if (filters.department !== "All Departments") params.set("department", filters.department);
+      const response = await apiJson<{
+        success: boolean;
+        data: AdminVisualizationPayload;
+      }>(
+        `/api/school-operations/visualization?${params.toString()}`
+      );
+      if (response.success) {
+        setAdminVisualization(response.data);
+      }
+      setVisualFilterError((prev) => (prev.startsWith("Load failed") ? "" : prev));
+    } catch (error) {
+      setAdminVisualization(null);
+      const message = error instanceof Error ? error.message : "Could not load visualization.";
+      setVisualFilterError(`Load failed: ${message}`);
+    } finally {
+      setVisualizationLoading(false);
+    }
+  }
+
+  useEffect(() => {
+    void loadAdminVisualization();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
 
   const availableDepartments: AssignDepartment[] = [
     "Physics",
@@ -1634,7 +1684,7 @@ export default function SchoolofOperations() {
   }, [detailsExpectedHoursRange]);
 
   const totalHoursDisplay = useMemo(
-    () => `${detailsComputedTotalHours} ${totalHoursWorkingDaysSuffix}`,
+    () => `${formatOneDecimal(detailsComputedTotalHours)} ${totalHoursWorkingDaysSuffix}`,
     [detailsComputedTotalHours, totalHoursWorkingDaysSuffix]
   );
 
@@ -1644,14 +1694,15 @@ export default function SchoolofOperations() {
       if (statusFilter === "all") return !it.cancelled && it.status === "initial" && !it.distributedTime;
       if (statusFilter === "superseded") return Boolean(it.cancelled);
       if (statusFilter === "failed")
-        return rowMatchesWorkloadFailedTab(
-          it,
-          workloadAnomalyImportByStaffId,
-          workloadAssignedRoleImportByStaffId,
-          workloadTeachingImportLinesByStaffId,
-          workloadHdrImportByStaffId,
-          workloadServiceImportByStaffId
-        );
+        return Boolean(it.backendId && distributionFailedWorkloadIds.has(it.backendId)) ||
+          rowMatchesWorkloadFailedTab(
+            it,
+            workloadAnomalyImportByStaffId,
+            workloadAssignedRoleImportByStaffId,
+            workloadTeachingImportLinesByStaffId,
+            workloadHdrImportByStaffId,
+            workloadServiceImportByStaffId
+          );
       // "distributed" = items that have been distributed (distributedTime set),
       // regardless of the academic→HoD workflow status
       if (statusFilter === "distributed") {
@@ -1663,6 +1714,7 @@ export default function SchoolofOperations() {
   }, [
     pending,
     statusFilter,
+    distributionFailedWorkloadIds,
     workloadAnomalyImportByStaffId,
     workloadAssignedRoleImportByStaffId,
     workloadTeachingImportLinesByStaffId,
@@ -1709,17 +1761,19 @@ export default function SchoolofOperations() {
   const workloadFailedFilterCount = useMemo(
     () =>
       pending.filter((it) =>
+        Boolean(it.backendId && distributionFailedWorkloadIds.has(it.backendId)) ||
         rowMatchesWorkloadFailedTab(
-          it,
-          workloadAnomalyImportByStaffId,
-          workloadAssignedRoleImportByStaffId,
-          workloadTeachingImportLinesByStaffId,
-          workloadHdrImportByStaffId,
-          workloadServiceImportByStaffId
-        )
+            it,
+            workloadAnomalyImportByStaffId,
+            workloadAssignedRoleImportByStaffId,
+            workloadTeachingImportLinesByStaffId,
+            workloadHdrImportByStaffId,
+            workloadServiceImportByStaffId
+          )
       ).length,
     [
       pending,
+      distributionFailedWorkloadIds,
       workloadAnomalyImportByStaffId,
       workloadAssignedRoleImportByStaffId,
       workloadTeachingImportLinesByStaffId,
@@ -1807,6 +1861,30 @@ export default function SchoolofOperations() {
     XLSX.writeFile(wb, `workload_${statusFilter}_${stamp}.xlsx`);
   }
 
+  async function handleSchoolExportExcel() {
+    const params = new URLSearchParams();
+    if (exportYearFromInput.trim()) params.set("year_from", exportYearFromInput.trim());
+    if (exportYearToInput.trim()) params.set("year_to", exportYearToInput.trim());
+    params.set("semester", exportSemesterInput);
+    if (exportDepartmentInput !== "All Departments") params.set("department", exportDepartmentInput);
+    try {
+      await downloadApiFile(`/api/school-operations/export?${params.toString()}`, "School_Workload_History.xlsx");
+      setPopup({
+        open: true,
+        title: "Export ready",
+        message: "School workload export downloaded.",
+        status: "approved",
+      });
+    } catch (error) {
+      setPopup({
+        open: true,
+        title: "Export failed",
+        message: error instanceof Error ? error.message : "Unable to export school workload data.",
+        status: "rejected",
+      });
+    }
+  }
+
   const adminSearchResults = useMemo(() => {
     const hasFilter = Object.values(adminSearchFilters).some((value) => value);
     if (!hasFilter) return assignablePeople;
@@ -1844,35 +1922,23 @@ export default function SchoolofOperations() {
     }
   }, [adminPage, adminTotalPages]);
 
-  const departmentStats = useMemo(
-    () => [
-      {
-        department: "Computer Science & Software Engineering",
-        totalHours: 430,
-        academics: 27,
-        pending: 17,
-        approved: 8,
-        rejected: 2,
-      },
-      {
-        department: "Mathematics & Statistics",
-        totalHours: 318,
-        academics: 19,
-        pending: 7,
-        approved: 10,
-        rejected: 2,
-      },
-      {
-        department: "Physics",
-        totalHours: 264,
-        academics: 14,
-        pending: 5,
-        approved: 7,
-        rejected: 2,
-      },
-    ],
-    []
+  const departmentStats = useMemo<AdminDepartmentStat[]>(
+    () =>
+      (adminVisualization?.departmentStats ?? []).map((item) => ({
+        department: item.department,
+        totalHours: Number(item.totalHours ?? item.total_hours ?? 0),
+        academics: Number(item.academics ?? 0),
+        pending: Number(item.pending ?? 0),
+        approved: Number(item.approved ?? 0),
+        rejected: Number(item.rejected ?? 0),
+      })),
+    [adminVisualization]
   );
+  const visualDepartmentOptions = useMemo(() => {
+    const names = new Set<string>(ACADEMIC_IMPORT_DEPARTMENTS);
+    departmentStats.forEach((item) => names.add(item.department));
+    return Array.from(names).sort((a, b) => a.localeCompare(b));
+  }, [departmentStats]);
   const filteredDepartmentStats = useMemo(() => {
     if (visualFilters.department === "All Departments") return departmentStats;
     return departmentStats.filter((item) => item.department === visualFilters.department);
@@ -1931,30 +1997,10 @@ export default function SchoolofOperations() {
     [filteredDepartmentStats]
   );
 
-  const workloadTrendBySemester = useMemo(() => {
-    const startYear = currentYear - 5;
-    const endYear = currentYear + 5;
-    const currentMonth = new Date().getMonth();
-    const hasReachedS2 = currentMonth >= 6;
-    const rows: Array<Record<string, string | number | null>> = [];
-    for (let year = startYear; year <= endYear; year += 1) {
-      const offset = year - startYear;
-      rows.push({
-        semester: `${year} S1`,
-        "Computer Science & Software Engineering": 178 + offset * 8,
-        "Mathematics & Statistics": 128 + offset * 6,
-        Physics: 104 + offset * 5,
-      });
-      rows.push({
-        semester: `${year} S2`,
-        "Computer Science & Software Engineering":
-          year === currentYear && !hasReachedS2 ? null : 186 + offset * 9,
-        "Mathematics & Statistics": year === currentYear && !hasReachedS2 ? null : 136 + offset * 7,
-        Physics: year === currentYear && !hasReachedS2 ? null : 111 + offset * 6,
-      });
-    }
-    return rows;
-  }, [currentYear]);
+  const workloadTrendBySemester = useMemo(
+    () => adminVisualization?.trend ?? [],
+    [adminVisualization]
+  );
 
   const schoolSummary = useMemo(() => {
     const totalAcademics = filteredDepartmentStats.reduce((sum, item) => sum + item.academics, 0);
@@ -1962,7 +2008,7 @@ export default function SchoolofOperations() {
     const pendingRequests = filteredDepartmentStats.reduce((sum, item) => sum + item.pending, 0);
     const approvedRequests = filteredDepartmentStats.reduce((sum, item) => sum + item.approved, 0);
     const rejectedRequests = filteredDepartmentStats.reduce((sum, item) => sum + item.rejected, 0);
-    return {
+    const fallbackSummary = {
       totalDepartments: filteredDepartmentStats.length,
       totalAcademics,
       totalWorkHours: Number(totalWorkHours.toFixed(1)),
@@ -1970,7 +2016,20 @@ export default function SchoolofOperations() {
       approvedRequests,
       rejectedRequests,
     };
-  }, [filteredDepartmentStats]);
+
+    if (visualFilters.department === "All Departments") {
+      const summary = adminVisualization?.summary;
+      return {
+        totalDepartments: Number(summary?.totalDepartments ?? fallbackSummary.totalDepartments),
+        totalAcademics: Number(summary?.totalAcademics ?? fallbackSummary.totalAcademics),
+        totalWorkHours: Number(Number(summary?.totalWorkHours ?? fallbackSummary.totalWorkHours).toFixed(1)),
+        pendingRequests: Number(summary?.pendingRequests ?? fallbackSummary.pendingRequests),
+        approvedRequests: Number(summary?.approvedRequests ?? fallbackSummary.approvedRequests),
+        rejectedRequests: Number(summary?.rejectedRequests ?? fallbackSummary.rejectedRequests),
+      };
+    }
+    return fallbackSummary;
+  }, [adminVisualization, filteredDepartmentStats, visualFilters.department]);
   const workloadPerAcademicByDepartment = useMemo(
     () =>
       filteredDepartmentStats.map((item) => ({
@@ -2007,6 +2066,7 @@ export default function SchoolofOperations() {
     });
   }, [workloadTrendBySemester, visualFilters, currentYear]);
   const reportingPeriodLabel = useMemo(() => {
+    if (adminVisualization?.reportingPeriodLabel) return adminVisualization.reportingPeriodLabel;
     const yearLabel =
       visualFilters.fromYear === visualFilters.toYear
         ? visualFilters.fromYear
@@ -2015,10 +2075,10 @@ export default function SchoolofOperations() {
       return `${yearLabel} All Semesters`;
     }
     return `${yearLabel} ${visualFilters.semester}`;
-  }, [visualFilters]);
+  }, [adminVisualization, visualFilters]);
   const scopeLabel = useMemo(
-    () => (visualFilters.department === "All Departments" ? "All Departments" : visualFilters.department),
-    [visualFilters.department]
+    () => adminVisualization?.scopeLabel || (visualFilters.department === "All Departments" ? "All Departments" : visualFilters.department),
+    [adminVisualization, visualFilters.department]
   );
   const departmentColorMap: Record<string, string> = {
     "Computer Science & Software Engineering": "#1f3b86",
@@ -2034,7 +2094,7 @@ export default function SchoolofOperations() {
   };
   const currentSemesterLabel = `${currentYear} ${currentSemester}`;
 
-  function handleApplyVisualizationFilter() {
+  async function handleApplyVisualizationFilter() {
     const fromYear = Number(visualYearFromInput);
     const toYear = Number(visualYearToInput);
     if (!Number.isFinite(fromYear) || !Number.isFinite(toYear)) {
@@ -2043,19 +2103,15 @@ export default function SchoolofOperations() {
     }
     const startYear = Math.min(fromYear, toYear);
     const endYear = Math.max(fromYear, toYear);
-    const yearSpan = endYear - startYear;
-    const maxYearSpan = 2;
-    if (yearSpan > maxYearSpan) {
-      setVisualFilterError("Maximum range is 3 years.");
-      return;
-    }
     setVisualFilterError("");
-    setVisualFilters({
+    const nextFilters = {
       fromYear: String(startYear),
       toYear: String(endYear),
       semester: visualSemesterInput,
       department: visualDepartmentInput,
-    });
+    };
+    setVisualFilters(nextFilters);
+    await loadAdminVisualization(nextFilters);
   }
   const legendStyle = { fontFamily: "Inter, Arial, sans-serif", fontSize: 12 };
 
@@ -2282,11 +2338,13 @@ export default function SchoolofOperations() {
         setSearchSemesterInput("");
         // Re-fetch from backend so list reflects the active cycle after distribution.
         void fetchWorkloadList(resetQuery);
-        setSelectedIds(new Set());
-        setStatusFilter("all");
-        setDistributeModalOpen(false);
         const ok = resp.data?.processedCount ?? 0;
         const bad = resp.data?.failedCount ?? 0;
+        const failedIds = new Set((resp.data?.failed ?? []).map((f) => f.workloadId).filter(Boolean));
+        setDistributionFailedWorkloadIds(failedIds);
+        setSelectedIds(new Set());
+        setStatusFilter(bad > 0 ? "failed" : "distributed");
+        setDistributeModalOpen(false);
         const failDetails = (resp.data?.failed ?? [])
           .map((f) => `• ${f.name || f.staffId}: ${f.error}`)
           .join("\n");
@@ -2307,13 +2365,20 @@ export default function SchoolofOperations() {
       });
   }
 
-  function handleAdminSearch() {
-    setAdminSearchFilters({
+  async function handleAdminSearch() {
+    const nextFilters = {
       firstName: adminSearchFirstNameInput.trim().toLowerCase(),
       lastName: adminSearchLastNameInput.trim().toLowerCase(),
       staffId: adminSearchStaffIdInput.trim().toLowerCase(),
-    });
+    };
+    setAdminSearchFilters(nextFilters);
     setAdminPage(1);
+    const params = new URLSearchParams({ page: "1", page_size: "100" });
+    if (nextFilters.firstName) params.set("first_name", nextFilters.firstName);
+    if (nextFilters.lastName) params.set("last_name", nextFilters.lastName);
+    if (nextFilters.staffId) params.set("staff_id", nextFilters.staffId);
+    const response = await apiJson<StaffDirectoryResponse>(`/api/school-operations/staff?${params.toString()}`);
+    setAssignablePeople((response.data?.items ?? []).map(mapStaffRowToAssignablePerson));
   }
 
   function handlePersonDepartmentChange(personId: number, nextDepartment: string) {
@@ -2835,6 +2900,7 @@ export default function SchoolofOperations() {
       const failedRows = Array.from(failedRowSet).sort((a, b) => a - b);
 
       setStatusFilter("all");
+      setDistributionFailedWorkloadIds(new Set());
       setSelectedIds(new Set());
       setPage(1);
       setDetailsOpen(false);
@@ -3731,6 +3797,9 @@ export default function SchoolofOperations() {
                         <th className="px-3 py-2 text-center">STATUS</th>
                         <th className="px-3 py-2 text-center whitespace-nowrap">TOTAL WORK HOURS</th>
                         <th className="px-3 py-2">CONFIRMATION</th>
+                        {statusFilter === "all" && (
+                          <th className="px-3 py-2 whitespace-nowrap">ASSIGNED BY</th>
+                        )}
                         {statusFilter !== "all" && (
                           <th className="px-3 py-2 text-right whitespace-nowrap">
                             {statusFilter === "distributed" ? "DISTRIBUTED TIME" : "CREATE TIME"}
@@ -3746,14 +3815,14 @@ export default function SchoolofOperations() {
                     <tbody className="divide-y divide-slate-200 bg-white">
                       {loading && (
                         <tr>
-                          <td colSpan={8} className="px-3 py-6 text-center text-sm text-slate-500">
+                          <td colSpan={statusFilter === "all" ? 7 : 8} className="px-3 py-6 text-center text-sm text-slate-500">
                             Loading...
                           </td>
                         </tr>
                       )}
                       {!loading && pageItems.length === 0 && (
                         <tr>
-                          <td colSpan={8} className="px-3 py-6 text-center text-sm text-slate-500">
+                          <td colSpan={statusFilter === "all" ? 7 : 8} className="px-3 py-6 text-center text-sm text-slate-500">
                             {statusFilter === "all" ? "No pending items" : "No items found"}
                           </td>
                         </tr>
@@ -3831,6 +3900,18 @@ export default function SchoolofOperations() {
                                   </span>
                                 )}
                               </td>
+                              {statusFilter === "all" && (
+                                <td className="px-3 py-3 text-sm text-slate-700">
+                                  {hasAssignee(item) ? (
+                                    <div className="space-y-1">
+                                      <div className="text-slate-700">{item.assignedBy}</div>
+                                      <div className="text-xs text-slate-400">{item.assignedByStaffId}</div>
+                                    </div>
+                                  ) : (
+                                    "—"
+                                  )}
+                                </td>
+                              )}
                               {statusFilter !== "all" && (
                                 <td className="px-3 py-3 text-right tabular-nums font-sans font-semibold text-slate-800">
                                   {statusFilter === "distributed"
@@ -3932,224 +4013,121 @@ export default function SchoolofOperations() {
                 </div>
               </div>
 
-              {detailsOpen && detailsItem && (
-                <div
-                  className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 p-4"
-                  onClick={closeDetails}
-                >
-                  <div
-                    className="w-full max-w-2xl rounded-sm bg-white p-0 shadow"
-                    onClick={(e) => e.stopPropagation()}
-                  >
-                    <div className="rounded-sm border border-black">
-                      <div className="flex items-center justify-between rounded-t-sm bg-[#2f4d9c] px-5 py-3 text-white">
-                        <div className="text-lg font-bold">
-                          {`${workloadDetailReportingPeriodLabel(detailsItem)}-${detailsItem.department?.trim() || "Department N/A"}-Academic`}
-                        </div>
-                        <button
-                          type="button"
-                          onClick={closeDetails}
-                          className="inline-flex h-9 w-9 items-center justify-center rounded-md bg-white/10 hover:bg-white/20"
-                        >
-                          <span className="text-xl leading-none">×</span>
-                        </button>
-                      </div>
+              {detailsOpen && detailsItem && (() => {
+                const fields: WorkloadDetailField[] = [
+                  { label: "Name", value: displayNameWithoutComma(detailsItem.name) },
+                  { label: "Staff ID", value: detailsItem.studentId },
+                  {
+                    label: "Target teaching ratio",
+                    value:
+                      detailsItem.targetTeachingRatio != null
+                        ? `${formatOneDecimal(detailsItem.targetTeachingRatio)}%`
+                        : "-",
+                  },
+                  {
+                    label: "Actual teaching ratio",
+                    value: actualTeachingRatioDisplay,
+                    className: "tabular-nums font-sans",
+                    inputClassName: actualTeachingRatioOutOfRange
+                      ? "border-red-500 ring-1 ring-red-300 bg-red-50/60 text-red-900"
+                      : showActualTeachingRatioBandWarning
+                        ? "border-yellow-500 ring-1 ring-yellow-300 bg-yellow-50/60 text-amber-900"
+                        : "",
+                    tooltipText: actualRatioHoverText,
+                    tooltipClassName: actualTeachingRatioOutOfRange
+                      ? "border-red-300 bg-red-50 text-red-900"
+                      : "border-yellow-300 bg-yellow-50 text-amber-900",
+                  },
+                  {
+                    label: "Total work hours",
+                    value: totalHoursDisplay,
+                    className: "tabular-nums font-sans",
+                    inputClassName: adminModalHoursAbnormal
+                      ? "border-red-500 ring-1 ring-red-300 bg-red-50/40 text-red-900 text-xs sm:text-sm"
+                      : "text-xs sm:text-sm",
+                    tooltipText: totalHoursTooltipText,
+                  },
+                  {
+                    label: "Employment type",
+                    value: employmentTypeLabelFromFte(detailsAnomaly?.fte ?? null),
+                    className: "font-sans",
+                    inputClassName: "text-slate-800",
+                  },
+                  {
+                    label: "New Staff",
+                    value: templateNewStaffDisplay(detailsItem.workloadNewStaff),
+                    className: "font-sans",
+                    inputClassName: "text-slate-800",
+                  },
+                  {
+                    label: detailsItem.staffRole === "HOD" ? "HoS Review" : "HoD Review",
+                    value: showActualTeachingRatioBandWarning
+                      ? "Yes"
+                      : templateHodReviewDisplay(detailsItem.hodReview),
+                    className: "font-sans",
+                    inputClassName:
+                      showActualTeachingRatioBandWarning || detailsItem.hodReview === "yes"
+                        ? "border-yellow-500 ring-1 ring-yellow-300 bg-yellow-50/60 text-amber-900"
+                        : "text-slate-800",
+                    tooltipText: showActualTeachingRatioBandWarning
+                      ? detailsItem.staffRole === "HOD"
+                        ? "T:R band mismatch detected. HoS Review is required; workload can still be distributed, but HoD must submit to HoS for approval."
+                        : "T:R band mismatch detected. HoD Review is required; workload can still be distributed, but Academic must submit to HoD for approval."
+                      : detailsItem.hodReview === "yes"
+                        ? detailsItem.staffRole === "HOD"
+                          ? "HoS Review is flagged for this staff member. Please ensure the workload is submitted to HoS for review."
+                          : "HoD Review is flagged for this staff member. Please ensure the workload is submitted to HoD for review."
+                        : undefined,
+                    tooltipClassName: "border-yellow-300 bg-yellow-50 text-amber-900",
+                  },
+                ];
+                const notesSections: WorkloadDetailNoteSection[] = [
+                  {
+                    label: "NOTES",
+                    value: workloadModalNotes(detailsItem).trim(),
+                    placeholder: STAFF_PROFILE_NOTES_PLACEHOLDER,
+                    rows: 4,
+                  },
+                ];
+                const historyAction =
+                  statusFilter === "distributed" ? (
+                    <button
+                      type="button"
+                      onClick={() => {
+                        setChangeHistoryPage(1);
+                        setChangeHistoryRows([]);
+                        setChangeHistoryOpen(true);
+                        if (detailsItem?.backendId) {
+                          setChangeHistoryLoading(true);
+                          void apiJson<{ success: boolean; data: ChangeHistoryEntry[] }>(
+                            `/api/school-operations/workloads/${detailsItem.backendId}/history`
+                          )
+                            .then((resp) => {
+                              if (resp.success) setChangeHistoryRows(resp.data ?? []);
+                            })
+                            .finally(() => setChangeHistoryLoading(false));
+                        }
+                      }}
+                      className="rounded border border-[#2f4d9c] px-4 py-2 text-sm font-semibold text-[#2f4d9c] hover:bg-[#eef2ff]"
+                    >
+                      Change history
+                    </button>
+                  ) : null;
 
-                      <div className="space-y-4 px-5 py-4">
-                        <div className="grid grid-cols-1 gap-4 sm:grid-cols-2">
-                          <InfoField label="Name" value={displayNameWithoutComma(detailsItem.name)} />
-                          <InfoField label="Staff ID" value={detailsItem.studentId} />
-                        </div>
-                        <div className="grid grid-cols-1 gap-4 sm:grid-cols-2">
-                          <InfoField
-                            label="Target teaching ratio"
-                            value={
-                              detailsItem.targetTeachingRatio != null
-                                ? `${formatOneDecimal(detailsItem.targetTeachingRatio)}%`
-                                : "—"
-                            }
-                          />
-                          <InfoField
-                            label="Actual teaching ratio"
-                            value={actualTeachingRatioDisplay}
-                            className="tabular-nums font-sans"
-                            inputClassName={
-                              actualTeachingRatioOutOfRange
-                                ? "border-red-500 ring-1 ring-red-300 bg-red-50/60 text-red-900"
-                                : showActualTeachingRatioBandWarning
-                                  ? "border-yellow-500 ring-1 ring-yellow-300 bg-yellow-50/60 text-amber-900"
-                                  : ""
-                            }
-                            tooltipText={actualRatioHoverText}
-                            tooltipClassName={
-                              actualTeachingRatioOutOfRange
-                                ? "border-red-300 bg-red-50 text-red-900"
-                                : "border-yellow-300 bg-yellow-50 text-amber-900"
-                            }
-                          />
-                          <InfoField
-                            label="Total work hours"
-                            value={totalHoursDisplay}
-                            className="tabular-nums font-sans"
-                            inputClassName={
-                              adminModalHoursAbnormal
-                                ? "border-red-500 ring-1 ring-red-300 bg-red-50/40 text-red-900 text-xs sm:text-sm"
-                                : "text-xs sm:text-sm"
-                            }
-                            tooltipText={totalHoursTooltipText}
-                          />
-                          <InfoField
-                            label="Employment type"
-                            value={employmentTypeLabelFromFte(detailsAnomaly?.fte ?? null)}
-                            className="font-sans"
-                            inputClassName="text-slate-800"
-                          />
-                          <InfoField
-                            label="New Staff"
-                            value={templateNewStaffDisplay(detailsItem.workloadNewStaff)}
-                            className="font-sans"
-                            inputClassName="text-slate-800"
-                          />
-                          <InfoField
-                            label="HoD Review"
-                            value={
-                              showActualTeachingRatioBandWarning
-                                ? "Yes"
-                                : templateHodReviewDisplay(detailsItem.hodReview)
-                            }
-                            className="font-sans"
-                            inputClassName={
-                              showActualTeachingRatioBandWarning || detailsItem.hodReview === "yes"
-                                ? "border-yellow-500 ring-1 ring-yellow-300 bg-yellow-50/60 text-amber-900"
-                                : "text-slate-800"
-                            }
-                            tooltipText={
-                              showActualTeachingRatioBandWarning
-                                ? "T:R band mismatch detected. HoD Review is required — workload can still be distributed, but Academic must submit to HoD for approval."
-                                : detailsItem.hodReview === "yes"
-                                  ? "HoD Review is flagged for this staff member. Please ensure the workload is submitted to HoD for review."
-                                  : undefined
-                            }
-                            tooltipClassName="border-yellow-300 bg-yellow-50 text-amber-900"
-                          />
-                        </div>
-                        <div>
-                          <div className="text-xs font-semibold uppercase text-slate-500">Workload Breakdown</div>
-                          <div className="mt-1 overflow-hidden rounded border border-slate-300">
-                            <div className="flex flex-wrap gap-2 border-b border-slate-200 bg-slate-50 px-3 py-2">
-                              {ADMIN_WORKLOAD_BREAKDOWN_TABS.map((tab) => (
-                                <button
-                                  key={tab}
-                                  type="button"
-                                  onClick={() => setDetailsTab(tab)}
-                                  className={`rounded px-3 py-1 text-xs font-semibold ${
-                                    detailsTab === tab
-                                      ? "bg-[#2f4d9c] text-white"
-                                      : "bg-white text-slate-700 ring-1 ring-slate-300 hover:bg-slate-100"
-                                  }`}
-                                >
-                                  {tab}
-                                </button>
-                              ))}
-                            </div>
-                            <table className="min-w-full">
-                              <thead className="bg-white">
-                                <tr className="text-left text-xs font-semibold uppercase text-slate-600">
-                                  <th className="px-3 py-2">{detailsTab}</th>
-                                  <th className="px-3 py-2 text-right">Hours</th>
-                                </tr>
-                              </thead>
-                              <tbody className="divide-y divide-slate-200 bg-white text-sm text-slate-700">
-                                {(adminModalBreakdown?.[detailsTab] ?? []).map((row, idx) => {
-                                  const isHdrSummaryRow =
-                                    detailsTab === "HDR" && row.name === HDR_TOTAL_ROW_LABEL;
-                                  const conflictHighlightRow = Boolean(
-                                    row.roleHourConflict || row.teachingDuplicateUnit
-                                  );
-                                  return (
-                                    <tr
-                                      key={`${detailsItem.id}-${detailsTab}-${idx}`}
-                                      className={
-                                        conflictHighlightRow
-                                          ? "bg-red-50"
-                                          : isHdrSummaryRow
-                                            ? "bg-slate-50"
-                                            : undefined
-                                      }
-                                    >
-                                      <td
-                                        className={`px-3 py-2 ${
-                                          isHdrSummaryRow ? "font-bold text-slate-800" : ""
-                                        } ${conflictHighlightRow ? "font-semibold text-red-900" : ""}`}
-                                      >
-                                        {row.name}
-                                      </td>
-                                      <td
-                                        className={`px-3 py-2 text-right tabular-nums font-sans ${
-                                          isHdrSummaryRow ? "font-bold text-slate-800" : ""
-                                        } ${conflictHighlightRow ? "font-semibold text-red-900" : ""}`}
-                                      >
-                                        {row.hours}
-                                      </td>
-                                    </tr>
-                                  );
-                                })}
-                                {detailsTab !== "HDR" && (
-                                  <tr className="bg-slate-50">
-                                    <td className="px-3 py-2 font-bold text-slate-800">
-                                      {workloadBreakdownTotalLabel(detailsTab)}
-                                    </td>
-                                    <td className="px-3 py-2 text-right font-bold tabular-nums font-sans text-slate-800">
-                                      {(adminModalBreakdown?.[detailsTab] ?? []).reduce(
-                                        (sum, row) => sum + workloadHoursForBreakdownRow(row),
-                                        0
-                                      )}
-                                    </td>
-                                  </tr>
-                                )}
-                              </tbody>
-                            </table>
-                          </div>
-                        </div>
-                        <div>
-                          <div className="mb-1 text-xs font-semibold text-slate-500">NOTES</div>
-                          <textarea
-                            readOnly
-                            value={workloadModalNotes(detailsItem).trim()}
-                            placeholder={STAFF_PROFILE_NOTES_PLACEHOLDER}
-                            rows={4}
-                            className="w-full resize-y rounded border border-slate-300 bg-white px-3 py-2 text-sm text-slate-700 outline-none placeholder:text-slate-500 read-only:bg-slate-50"
-                          />
-                        </div>
-                        {statusFilter === "distributed" && (
-                          <div className="flex justify-end pt-1">
-                            <button
-                              type="button"
-                              onClick={() => {
-                                setChangeHistoryPage(1);
-                                setChangeHistoryRows([]);
-                                setChangeHistoryOpen(true);
-                                if (detailsItem?.backendId) {
-                                  setChangeHistoryLoading(true);
-                                  void apiJson<{ success: boolean; data: ChangeHistoryEntry[] }>(
-                                    `/api/school-operations/workloads/${detailsItem.backendId}/history`
-                                  ).then((resp) => {
-                                    if (resp.success) setChangeHistoryRows(resp.data ?? []);
-                                  }).finally(() => setChangeHistoryLoading(false));
-                                }
-                              }}
-                              className="rounded border border-[#2f4d9c] px-4 py-2 text-sm font-semibold text-[#2f4d9c] hover:bg-[#eef2ff]"
-                            >
-                              追溯修改记录
-                            </button>
-                          </div>
-                        )}
-                        <div className="h-2" />
-                      </div>
-                    </div>
-                  </div>
-                </div>
-              )}
+                return (
+                  <WorkloadDetailModal
+                    title={`${workloadDetailReportingPeriodLabel(detailsItem)}-${detailsItem.department?.trim() || "Department N/A"}-Academic`}
+                    fields={fields}
+                    breakdown={adminModalBreakdown ?? emptyBreakdown()}
+                    tabs={ADMIN_WORKLOAD_BREAKDOWN_TABS}
+                    rowKeyPrefix={detailsItem.id}
+                    onClose={closeDetails}
+                    notesSections={notesSections}
+                    historyAction={historyAction}
+                    footer={<div className="h-2" />}
+                  />
+                );
+              })()}
 
               {changeHistoryOpen && detailsItem && (() => {
                 const HISTORY_PAGE_SIZE = 10;
@@ -4629,9 +4607,9 @@ export default function SchoolofOperations() {
                       className="w-full rounded border border-slate-300 bg-white px-3 py-2 text-sm text-slate-800"
                     >
                       <option value="All Departments">All Departments</option>
-                      {departmentStats.map((item) => (
-                        <option key={item.department} value={item.department}>
-                          {item.department}
+                      {visualDepartmentOptions.map((department) => (
+                        <option key={department} value={department}>
+                          {department}
                         </option>
                       ))}
                     </select>
@@ -4648,11 +4626,13 @@ export default function SchoolofOperations() {
                   </div>
                 </div>
                 <div className="mt-3 text-sm font-semibold text-[#2f4d9c]">
-                  For readability, the dashboard displays up to 3 full academic years at a time. You can export more
-                  data in the Export Excel tab.
+                  For readability, the chart displays the latest 6 semesters in the selected range.
                 </div>
                 {visualFilterError && (
                   <div className="mt-3 text-sm font-semibold text-[#dc2626]">{visualFilterError}</div>
+                )}
+                {visualizationLoading && (
+                  <div className="mt-3 text-sm font-semibold text-slate-500">Loading visualization...</div>
                 )}
               </div>
               <div className="mt-3">
@@ -4998,9 +4978,9 @@ export default function SchoolofOperations() {
                     className="w-full rounded border border-slate-300 bg-white px-3 py-2 text-sm text-slate-800"
                   >
                     <option value="All Departments">All Departments</option>
-                    {departmentStats.map((item) => (
-                      <option key={`export-dept-${item.department}`} value={item.department}>
-                        {item.department}
+                    {visualDepartmentOptions.map((department) => (
+                      <option key={`export-dept-${department}`} value={department}>
+                        {department}
                       </option>
                     ))}
                   </select>
@@ -5009,6 +4989,7 @@ export default function SchoolofOperations() {
                 <div className="flex items-end">
                   <button
                     type="button"
+                    onClick={handleSchoolExportExcel}
                     className="w-full rounded bg-[#2f4d9c] px-4 py-2 text-sm font-semibold text-white hover:bg-[#264183]"
                   >
                     Export Excel

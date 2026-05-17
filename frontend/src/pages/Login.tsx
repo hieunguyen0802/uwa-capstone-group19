@@ -77,8 +77,10 @@ export default function Login() {
     setLoginError("");
     try {
       const result = await verifyOtp(email, otpCode.trim());
-      localStorage.setItem(ACCESS_TOKEN_KEY, result.access);
-      localStorage.setItem(REFRESH_TOKEN_KEY, result.refresh);
+      localStorage.removeItem(ACCESS_TOKEN_KEY);
+      localStorage.removeItem(REFRESH_TOKEN_KEY);
+      sessionStorage.setItem(ACCESS_TOKEN_KEY, result.access);
+      sessionStorage.setItem(REFRESH_TOKEN_KEY, result.refresh);
       await reload();
       navigate(homeRouteForRole(result.role), { replace: true });
     } catch (err) {
@@ -171,7 +173,7 @@ function homeRouteForRole(role: string): string {
     case "SCHOOL_OPS":
       return "/school-operations";
     case "ACADEMIC":
-      return "/academic";
+      return "/workload-platform";
     case "HOD":
     default:
       return "/role";

@@ -80,7 +80,7 @@ function homeRouteForRole(role: string): string {
     case "SCHOOL_OPS":
       return "/school-operations";
     case "ACADEMIC":
-      return "/academic";
+      return "/workload-platform";
     case "HOD":
     default:
       return "/role";

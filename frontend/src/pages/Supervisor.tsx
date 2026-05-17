@@ -11,12 +11,15 @@ import StatusPill from "../components/common/StatusPill";
 import VisualizationSummaryCards from "../components/common/VisualizationSummaryCards";
 import ThemedNoticeModal, { SUPERSEDED_RECORD_MESSAGE } from "../components/common/ThemedNoticeModal";
 import WorkHoursBadge from "../components/common/WorkHoursBadge";
+import WorkloadApprovalModal from "../components/common/WorkloadApprovalModal";
 import { apiJson, clearLocalStorageKeys, downloadApiFile, isAbortError } from "../api/client";
 import { useAuth } from "../auth/AuthContext";
 import { profileFromAuth } from "../auth/profileFromAuth";
 
 type MockRequest = {
   id: number;
+  /** Original UUID string from backend — used for API calls to avoid parseInt truncation. */
+  backendId?: string;
   sourceWorkloadId?: number;
   studentId: string;
   semesterLabel: string;
@@ -38,6 +41,8 @@ type MockRequest = {
   newStaff?: "Yes" | "No";
   hodReviewRequired?: boolean;
   actualTeachingRatio?: number;
+  expectedMinHours?: number;
+  expectedMaxHours?: number;
   detailSnapshot?: {
     breakdown: BreakdownData;
   };
@@ -75,55 +80,63 @@ type HodAnnualReportItem = {
 
 type HodWorkloadRowResponse = {
   id: string;
-  employee_id: string;
+  staffId: string;
   name: string;
   title: string;
   department: string;
-  request_reason?: string;
+  reason?: string;
   status: "pending" | "approved" | "rejected";
-  total_hours: number;
-  submitted_time?: string | null;
-  semester_label?: string;
-  period_label: string;
-  is_anomaly?: boolean;
+  totalWorkHours: number;
+  submittedAt?: string | null;
+  semesterLabel?: string;
+  periodLabel: string;
 };
 
 type HodWorkloadListResponse = {
-  success?: boolean;
-  message?: string;
-  data?: {
-    items?: HodWorkloadRowResponse[];
-    page?: number;
-    page_size?: number;
-    total?: number;
-    summary?: {
-      pending?: number;
-      approved?: number;
-      rejected?: number;
-    };
+  items?: HodWorkloadRowResponse[];
+  page?: number;
+  pageSize?: number;
+  total?: number;
+  summary?: {
+    pending?: number;
+    approved?: number;
+    rejected?: number;
   };
+};
+
+type HodStatusFilter = "all" | "pending" | "approved" | "rejected";
+
+type HodSearchFilters = {
+  employeeId: string;
+  name: string;
+  year: string;
+  semester: "" | "S1" | "S2";
 };
 
 type HodWorkloadDetailPayload = {
   id: string;
-  employee_id: string;
+  staffId: string;
   name: string;
   title: string;
   department: string;
-  total_hours: number;
-  request_reason?: string | null;
-  description?: string | null;
-  supervisor_note?: string | null;
+  totalWorkHours: number;
+  applicationReason?: string | null;
+  schoolOperationsNotes?: string | null;
+  reviewerNote?: string | null;
   status: "pending" | "approved" | "rejected";
   breakdown: Partial<Record<BreakdownCategory, BreakdownEntry[]>>;
-  is_anomaly?: boolean;
+  canEditBreakdown?: boolean;
+  periodLabel?: string;
+  targetTeachingRatio?: number;
+  actualTeachingRatio?: number;
+  employmentType?: string;
+  isNewStaff?: boolean;
+  hodReviewRequired?: boolean;
+  expectedMinHours?: number | null;
+  expectedMaxHours?: number | null;
 };
 
-type HodWorkloadDetailResponse = {
-  success?: boolean;
-  message?: string;
-  data?: HodWorkloadDetailPayload;
-};
+type HodWorkloadDetailResponse = HodWorkloadDetailPayload;
 
 type HodVisualizationResponse = {
   success?: boolean;
@@ -223,19 +236,20 @@ function mapHodRowToRequest(row: HodWorkloadRowResponse): MockRequest {
   const numericId = Number.parseInt(String(row.id), 10);
   return {
     id: Number.isFinite(numericId) ? numericId : Date.now(),
-    studentId: row.employee_id,
-    semesterLabel: row.semester_label || row.period_label,
-    periodLabel: row.period_label,
+    backendId: String(row.id),
+    studentId: row.staffId,
+    semesterLabel: row.semesterLabel || row.periodLabel,
+    periodLabel: row.periodLabel,
     name: row.name,
     unit: "",
     notes: "",
-    requestReason: row.request_reason || "",
+    requestReason: row.reason || "",
     title: row.title || "",
     department: row.department || "",
     rate: 0,
     status: row.status,
-    hours: Number(row.total_hours ?? 0),
-    submittedAt: row.submitted_time ?? "",
+    hours: Number(row.totalWorkHours ?? 0),
+    submittedAt: row.submittedAt ?? "",
     cancelled: false,
   };
 }
@@ -243,21 +257,28 @@ function mapHodRowToRequest(row: HodWorkloadRowResponse): MockRequest {
 function mapHodDetailToRequest(detail: HodWorkloadDetailPayload): MockRequest {
   const base = mapHodRowToRequest({
     id: detail.id,
-    employee_id: detail.employee_id,
+    staffId: detail.staffId,
     name: detail.name,
     title: detail.title,
     department: detail.department,
-    request_reason: detail.request_reason || "",
+    reason: detail.applicationReason || "",
     status: detail.status,
-    total_hours: detail.total_hours,
-    submitted_time: "",
-    semester_label: "",
-    period_label: "",
+    totalWorkHours: detail.totalWorkHours,
+    submittedAt: "",
+    semesterLabel: "",
+    periodLabel: detail.periodLabel || "",
   });
   return {
     ...base,
-    notes: detail.description ?? "",
-    supervisorNote: detail.supervisor_note ?? "",
+    notes: detail.schoolOperationsNotes ?? "",
+    supervisorNote: detail.reviewerNote ?? "",
+    targetTeachingRatio: detail.targetTeachingRatio,
+    actualTeachingRatio: detail.actualTeachingRatio,
+    employmentType: detail.employmentType,
+    newStaff: detail.isNewStaff === true ? "Yes" : detail.isNewStaff === false ? "No" : undefined,
+    hodReviewRequired: detail.hodReviewRequired,
+    expectedMinHours: detail.expectedMinHours ?? undefined,
+    expectedMaxHours: detail.expectedMaxHours ?? undefined,
     detailSnapshot: {
       breakdown: normalizeHodBreakdown(detail.breakdown),
     },
@@ -265,8 +286,22 @@ function mapHodDetailToRequest(detail: HodWorkloadDetailPayload): MockRequest {
   };
 }
 
+
+function formatIsoDateTime(iso: string): string {
+  const d = new Date(iso);
+  if (Number.isNaN(d.getTime())) return iso;
+  const y = d.getFullYear();
+  const mo = String(d.getMonth() + 1).padStart(2, "0");
+  const day = String(d.getDate()).padStart(2, "0");
+  const hh = String(d.getHours()).padStart(2, "0");
+  const mm = String(d.getMinutes()).padStart(2, "0");
+  return `${y}-${mo}-${day} ${hh}:${mm}`;
+}
+
 function submittedAtDisplay(item: Pick<MockRequest, "submittedAt">): string {
-  return item.submittedAt?.trim() || "—";
+  const raw = item.submittedAt?.trim();
+  if (!raw) return "—";
+  return formatIsoDateTime(raw);
 }
 
 export default function Supervisor() {
@@ -291,9 +326,7 @@ export default function Supervisor() {
   const pageSize = 10; // Items per page
   const [submitting, setSubmitting] = useState(false);
 
-  const [statusFilter, setStatusFilter] = useState<
-    "all" | "pending" | "approved" | "rejected"
-  >("pending");
+  const [statusFilter, setStatusFilter] = useState<HodStatusFilter>("pending");
 
   const [popup, setPopup] = useState<{
     open: boolean;
@@ -310,22 +343,12 @@ export default function Supervisor() {
   const [detailsOpen, setDetailsOpen] = useState(false);
   const [supersededNoticeOpen, setSupersededNoticeOpen] = useState(false);
   const [detailsItem, setDetailsItem] = useState<MockRequest | null>(null);
-  const [detailsBreakdown, setDetailsBreakdown] = useState<BreakdownData | null>(null);
-  const [detailsTab, setDetailsTab] = useState<BreakdownCategory>("Teaching");
-  const [detailsEditMode, setDetailsEditMode] = useState(false);
-  const [descriptionExpanded, setDescriptionExpanded] = useState(false);
-  const [noteModalOpen, setNoteModalOpen] = useState(false);
-  const [noteDraft, setNoteDraft] = useState("");
-  const [noteError, setNoteError] = useState("");
-  const [detailsModalError, setDetailsModalError] = useState("");
-  const [noteDecision, setNoteDecision] = useState<"approve" | "reject">("approve");
-  const [noteTargetId, setNoteTargetId] = useState<number | null>(null);
 
   const [searchEmployeeIdInput, setSearchEmployeeIdInput] = useState("");
   const [searchNameInput, setSearchNameInput] = useState("");
   const [searchYearInput, setSearchYearInput] = useState("");
   const [searchSemesterInput, setSearchSemesterInput] = useState<"" | "S1" | "S2">("");
-  const [searchFilters, setSearchFilters] = useState({
+  const [searchFilters, setSearchFilters] = useState<HodSearchFilters>({
     employeeId: "",
     name: "",
     year: "",
@@ -342,7 +365,7 @@ export default function Supervisor() {
   const [visualSemesterInput, setVisualSemesterInput] = useState<"All" | "S1" | "S2">("All");
   const [visualError, setVisualError] = useState("");
   const [visualizationLoading, setVisualizationLoading] = useState(false);
-  const [appliedVisualFilters, setAppliedVisualFilters] = useState({
+  const [, setAppliedVisualFilters] = useState({
     yearFrom: "",
     yearTo: "",
     semester: "All" as "All" | "S1" | "S2",
@@ -375,12 +398,20 @@ export default function Supervisor() {
     return hodAnnualReports.slice(start, start + hodReportsPerPage);
   }, [hodAnnualReports, hodReportInboxPage]);
 
-  async function loadHodRequests() {
+  async function loadHodRequests(options?: { status?: HodStatusFilter; filters?: HodSearchFilters }) {
     setLoading(true);
     setPageError("");
     try {
-      const response = await apiJson<HodWorkloadListResponse>("/api/supervisor/workload-requests/?page=1&page_size=200");
-      setPending((response.data?.items ?? []).map(mapHodRowToRequest));
+      const params = new URLSearchParams({ page_size: "100" });
+      const nextStatus = options?.status ?? statusFilter;
+      const nextFilters = options?.filters ?? searchFilters;
+      if (nextStatus !== "all") params.set("status", nextStatus);
+      if (nextFilters.employeeId) params.set("staffId", nextFilters.employeeId);
+      if (nextFilters.name) params.set("name", nextFilters.name);
+      if (nextFilters.year) params.set("year", nextFilters.year);
+      if (nextFilters.semester) params.set("semester", nextFilters.semester);
+      const response = await apiJson<HodWorkloadListResponse>(`/api/hod/workload-requests/?${params.toString()}`);
+      setPending((response.items ?? []).map(mapHodRowToRequest));
     } catch (error) {
       if (!isAbortError(error)) {
         setPending([]);
@@ -447,10 +478,11 @@ export default function Supervisor() {
     }
   }
 
-  async function loadHodDetail(id: number) {
-    const response = await apiJson<HodWorkloadDetailResponse>(`/api/supervisor/workload-requests/${id}/`);
-    const mapped = mapHodDetailToRequest(response.data as HodWorkloadDetailPayload);
-    const existing = pending.find((row) => row.id === id);
+  async function loadHodDetail(numericId: number, backendId?: string) {
+    const apiId = backendId || String(numericId);
+    const response = await apiJson<HodWorkloadDetailResponse>(`/api/hod/workload-requests/${apiId}/`);
+    const mapped = mapHodDetailToRequest(response as HodWorkloadDetailPayload);
+    const existing = pending.find((row) => row.id === numericId);
     const merged = existing
       ? {
           ...existing,
@@ -460,7 +492,7 @@ export default function Supervisor() {
           submittedAt: existing.submittedAt,
         }
       : mapped;
-    setPending((prev) => prev.map((row) => (row.id === id ? { ...row, ...merged } : row)));
+    setPending((prev) => prev.map((row) => (row.id === numericId ? { ...row, ...merged } : row)));
     return merged;
   }
 
@@ -500,61 +532,7 @@ export default function Supervisor() {
     setHodReportInboxPage((prev) => Math.min(Math.max(1, prev), total));
   }, [hodAnnualReports.length]);
 
-  const itemsForFilter = useMemo(() => {
-    const byStatus =
-      statusFilter === "all"
-        ? pending
-        : pending.filter((it) => it.status === statusFilter);
-
-    const hasSearchFilter = Object.values(searchFilters).some((value) => value);
-    if (!hasSearchFilter) return byStatus;
-
-    return byStatus.filter((it) => {
-      const fullName = it.name.toLowerCase();
-      const nameParts = it.name.trim().toLowerCase().split(/\s+/);
-      const firstName = nameParts[0] || "";
-      const lastName = nameParts[nameParts.length - 1] || "";
-
-      if (
-        searchFilters.employeeId &&
-        !it.studentId.toLowerCase().includes(searchFilters.employeeId)
-      ) {
-        return false;
-      }
-
-      if (searchFilters.name) {
-        const q = searchFilters.name;
-        const matchByFull = fullName.includes(q);
-        const matchByFirst = firstName.includes(q);
-        const matchByLast = lastName.includes(q);
-        const matchByReversed = `${lastName} ${firstName}`.includes(q);
-        if (!(matchByFull || matchByFirst || matchByLast || matchByReversed)) return false;
-      }
-
-      const submittedText = submittedAtDisplay(it);
-      const submittedDate = new Date(submittedText.replace(" ", "T"));
-      const hasValidSubmittedDate = !Number.isNaN(submittedDate.getTime());
-      const selectedYear = Number(searchFilters.year);
-
-      if (searchFilters.year && Number.isFinite(selectedYear) && hasValidSubmittedDate) {
-        if (searchFilters.semester === "s1") {
-          // S1: [YYYY-01-01, YYYY-07-01)
-          const s1Start = new Date(selectedYear, 0, 1);
-          const s1End = new Date(selectedYear, 6, 1);
-          if (!(submittedDate >= s1Start && submittedDate < s1End)) return false;
-        } else if (searchFilters.semester === "s2") {
-          // S2: [YYYY-07-01, YYYY+1-01-01)
-          const s2Start = new Date(selectedYear, 6, 1);
-          const s2End = new Date(selectedYear + 1, 0, 1);
-          if (!(submittedDate >= s2Start && submittedDate < s2End)) return false;
-        } else if (submittedDate.getFullYear() !== selectedYear) {
-          return false;
-        }
-      }
-
-      return fullName.length > 0;
-    });
-  }, [pending, statusFilter, searchFilters]);
+  const itemsForFilter = pending;
 
   const totalPages = Math.max(1, Math.ceil(itemsForFilter.length / pageSize));
   const pageItems = useMemo(() => {
@@ -566,7 +544,7 @@ export default function Supervisor() {
       (visualizationData.averageWorkHoursBySemester ?? []).map((item) => ({
         semester: item.period,
         averageHours: item.averageWorkHours,
-      })),
+      })).slice(-6),
     [visualizationData]
   );
   const trendChartData = useMemo(
@@ -574,7 +552,7 @@ export default function Supervisor() {
       (visualizationData.totalWorkHoursTrend ?? []).map((item) => ({
         semester: item.period,
         totalHours: item.totalWorkHours,
-      })),
+      })).slice(-6),
     [visualizationData]
   );
   const averageHoursDomain = useMemo(
@@ -600,6 +578,13 @@ export default function Supervisor() {
     () => visualizationData.reportingPeriodLabel || "N/A",
     [visualizationData]
   );
+  const workloadReportTitle = useMemo(() => {
+    const first = pending.find((r) => r.periodLabel);
+    if (!first?.periodLabel) return "Workload Report";
+    const matched = first.periodLabel.match(/^(\d{4})-(1|2)$/);
+    if (!matched) return `Workload Report ${first.periodLabel}`;
+    return `Workload Report ${matched[1]} - Sem ${matched[2]}`;
+  }, [pending]);
 
   function toggleSelected(id: number) {
     setSelectedIds((prev) => {
@@ -610,12 +595,6 @@ export default function Supervisor() {
     });
   }
 
-  function statusLabel(status: string) {
-    if (status === "pending") return "Pending";
-    if (status === "approved") return "Approved";
-    if (status === "rejected") return "Rejected";
-    return status;
-  }
 
   async function handleApplyVisualizationFilter() {
     setVisualError("");
@@ -627,10 +606,6 @@ export default function Supervisor() {
     }
     const startYear = Math.min(fromYear, toYear);
     const endYear = Math.max(fromYear, toYear);
-    if (endYear - startYear > 2) {
-      setVisualError("Maximum range is 3 years.");
-      return;
-    }
     setAppliedVisualFilters({
       yearFrom: String(startYear),
       yearTo: String(endYear),
@@ -646,146 +621,36 @@ export default function Supervisor() {
       if (exportYearFromInput) params.set("year_from", exportYearFromInput);
       if (exportYearToInput) params.set("year_to", exportYearToInput);
       params.set("semester", exportSemesterInput);
-      await downloadApiFile(`/api/supervisor/export/?${params.toString()}`, "HoD_Workloads.xlsx");
+      await downloadApiFile(`/api/hod/exports/workloads/?${params.toString()}`, "HoD_Workloads.xlsx");
       setExportMessage("HoD workload export downloaded.");
     } catch (error) {
       setExportMessage(error instanceof Error ? error.message : "Failed to export workloads.");
     }
   }
 
-  const canSubmit =
-    statusFilter === "pending" && selectedIds.size > 0 && !submitting;
-
-  async function handleDecision(kind: "approve" | "reject") {
-    if (!canSubmit) return;
-    setSubmitting(true);
-    const count = selectedIds.size;
-    try {
-      await apiJson("/api/supervisor/workload-requests/batch-decision/", {
-        method: "POST",
-        body: JSON.stringify({
-          request_ids: Array.from(selectedIds).map(String),
-          decision: kind === "approve" ? "approved" : "rejected",
-        }),
-      });
-      setSelectedIds(new Set());
-      await loadHodRequests();
-    } catch (error) {
-      setPopup({
-        open: true,
-        title: "Request Failed",
-        message: error instanceof Error ? error.message : "Failed to update HoD decisions.",
-        status: "pending",
-      });
-      setSubmitting(false);
-      return;
-    } finally {
-      setSubmitting(false);
-    }
-
-    setPopup({
-      open: true,
-      title: kind === "approve" ? "Approved" : "Rejected",
-      message:
-        count === 1
-          ? `1 request has been marked as ${kind === "approve" ? "Approved" : "Rejected"}.`
-          : `${count} requests have been marked as ${
-              kind === "approve" ? "Approved" : "Rejected"
-            }.`,
-      status: kind === "approve" ? "approved" : "rejected",
-    });
-  }
-
-  async function handleDecisionForId(kind: "approve" | "reject", id: number, note: string) {
-    setSubmitting(true);
-    try {
-      await apiJson(`/api/supervisor/workload-requests/${id}/decision/`, {
-        method: "POST",
-        body: JSON.stringify({
-          decision: kind === "approve" ? "approved" : "rejected",
-          note: note.trim(),
-          breakdown: detailsBreakdown,
-        }),
-      });
-      await loadHodRequests();
-      setSelectedIds((prev) => {
-        if (!prev.has(id)) return prev;
-        const next = new Set(prev);
-        next.delete(id);
-        return next;
-      });
-      if (detailsItem) {
-        const refreshed = await loadHodDetail(id);
-        setDetailsItem(refreshed);
-        setDetailsBreakdown(refreshed.detailSnapshot?.breakdown ?? normalizeHodBreakdown());
-      }
-    } catch (error) {
-      setPopup({
-        open: true,
-        title: "Request Failed",
-        message: error instanceof Error ? error.message : "Failed to update HoD decision.",
-        status: "pending",
-      });
-      return;
-    } finally {
-      setSubmitting(false);
-    }
-
-    setPopup({
-      open: true,
-      title: kind === "approve" ? "Approved" : "Rejected",
-      message: `The request has been marked as ${
-        kind === "approve" ? "Approved" : "Rejected"
-      }.`,
-      status: kind === "approve" ? "approved" : "rejected",
-    });
-  }
-
-  function openNoteModal(kind: "approve" | "reject", id: number) {
-    if (detailsBreakdown) {
-      const hasEmptyRow = (Object.keys(detailsBreakdown) as BreakdownCategory[]).some((tab) =>
-        detailsBreakdown[tab].some((row) => row.name.trim() === "")
-      );
-      if (hasEmptyRow) {
-        setDetailsModalError("Empty breakdown rows must be completed or deleted first.");
-        return;
-      }
-    }
-    setNoteDecision(kind);
-    setNoteTargetId(id);
-    setNoteDraft("");
-    setNoteError("");
-    setNoteModalOpen(true);
-  }
-
-  async function handleFinishNote() {
-    const trimmed = noteDraft.trim();
-    if (!trimmed) {
-      setNoteError("Supervisor note is required.");
-      return;
-    }
-    if (trimmed.length > 240) {
-      setNoteError("Supervisor note must be 240 characters or less.");
-      return;
-    }
-    if (noteTargetId === null) return;
-    await handleDecisionForId(noteDecision, noteTargetId, trimmed);
-    setNoteModalOpen(false);
-    closeDetails();
-  }
 
   function handleSearch() {
-    setSearchFilters({
+    const nextFilters: HodSearchFilters = {
       employeeId: searchEmployeeIdInput.trim().toLowerCase(),
       name: searchNameInput.trim().toLowerCase(),
       year: searchYearInput.trim().toLowerCase(),
-      semester: searchSemesterInput.trim().toLowerCase(),
-    });
+      semester: searchSemesterInput,
+    };
+    setSearchFilters(nextFilters);
     setPage(1);
     setSelectedIds(new Set());
     setDetailsOpen(false);
     setDetailsItem(null);
-    setDetailsBreakdown(null);
+    void loadHodRequests({ status: statusFilter, filters: nextFilters });
+  }
+
+  function applyStatusFilter(nextStatus: HodStatusFilter) {
+    setStatusFilter(nextStatus);
+    setSelectedIds(new Set());
+    setPage(1);
+    setDetailsOpen(false);
+    setDetailsItem(null);
+    void loadHodRequests({ status: nextStatus, filters: searchFilters });
   }
 
   async function openDetails(item: MockRequest) {
@@ -794,13 +659,9 @@ export default function Supervisor() {
       return;
     }
     try {
-      const detail = await loadHodDetail(item.id);
+      const detail = await loadHodDetail(item.id, item.backendId);
       setDetailsItem(detail);
-      setDetailsBreakdown(detail.detailSnapshot?.breakdown ?? normalizeHodBreakdown());
       setDetailsOpen(true);
-      setDetailsEditMode(false);
-      setDescriptionExpanded(false);
-      setDetailsModalError("");
     } catch (error) {
       setPopup({
         open: true,
@@ -811,68 +672,9 @@ export default function Supervisor() {
     }
   }
 
-  function requestCloseDetails() {
-    if (detailsEditMode && detailsBreakdown) {
-      const hasEmptyRow = (Object.keys(detailsBreakdown) as BreakdownCategory[]).some((tab) =>
-        detailsBreakdown[tab].some((row) => row.name.trim() === "")
-      );
-      if (hasEmptyRow) {
-        setDetailsModalError("Empty breakdown rows must be completed or deleted before closing.");
-        return;
-      }
-    }
-    closeDetails();
-  }
-
   function closeDetails() {
     setDetailsOpen(false);
     setDetailsItem(null);
-    setDetailsBreakdown(null);
-    setDetailsEditMode(false);
-    setDetailsModalError("");
-    setNoteModalOpen(false);
-    setNoteDraft("");
-    setNoteError("");
-    setNoteTargetId(null);
-  }
-
-  function updateBreakdownRow(tab: BreakdownCategory, idx: number, field: "name" | "hours", value: string) {
-    setDetailsModalError("");
-    setDetailsBreakdown((prev) => {
-      if (!prev) return prev;
-      const nextRows = prev[tab].map((row, rowIdx) => {
-        if (rowIdx !== idx) return row;
-        if (field === "name") return { ...row, name: value };
-        const parsedHours = Number.parseFloat(value);
-        const normalizedHours = Number.isFinite(parsedHours) ? parsedHours : 0;
-        return { ...row, hours: normalizedHours };
-      });
-      return { ...prev, [tab]: nextRows };
-    });
-  }
-
-  function addBreakdownRow(tab: BreakdownCategory) {
-    setDetailsModalError("");
-    setDetailsBreakdown((prev) => {
-      if (!prev) return prev;
-      return {
-        ...prev,
-        [tab]: [...prev[tab], { name: "", hours: 0 }],
-      };
-    });
-  }
-
-  function removeBreakdownRow(tab: BreakdownCategory, idx: number) {
-    setDetailsModalError("");
-    setDetailsBreakdown((prev) => {
-      if (!prev) return prev;
-      const currentRows = prev[tab];
-      if (currentRows.length <= 1) return prev;
-      return {
-        ...prev,
-        [tab]: currentRows.filter((_, rowIdx) => rowIdx !== idx),
-      };
-    });
   }
 
   function handleSearchKeyDown(event: React.KeyboardEvent<HTMLInputElement | HTMLSelectElement>) {
@@ -1109,7 +911,7 @@ export default function Supervisor() {
 
           {/* Report title */}
           <div className="mt-6 text-lg font-semibold text-slate-700">
-            Workload Report Sem 1 - 2025
+            {workloadReportTitle}
           </div>
 
           {/* Table */}
@@ -1123,13 +925,7 @@ export default function Supervisor() {
                 <div className="flex flex-wrap items-center justify-start gap-4">
                 <button
                   type="button"
-                  onClick={() => {
-                    setStatusFilter("all");
-                    setSelectedIds(new Set());
-                    setPage(1);
-                    setDetailsOpen(false);
-                    setDetailsItem(null);
-                  }}
+                  onClick={() => applyStatusFilter("all")}
                   className={`rounded-md border px-5 py-2 text-base font-semibold ${
                     statusFilter === "all"
                       ? "border-[#2f4d9c] bg-[#2f4d9c] text-white"
@@ -1141,13 +937,7 @@ export default function Supervisor() {
 
                 <button
                   type="button"
-                  onClick={() => {
-                    setStatusFilter("pending");
-                    setSelectedIds(new Set());
-                    setPage(1);
-                    setDetailsOpen(false);
-                    setDetailsItem(null);
-                  }}
+                  onClick={() => applyStatusFilter("pending")}
                   className={`relative rounded-md border px-5 py-2 text-base font-semibold ${
                     statusFilter === "pending"
                       ? "border-[#d97706] bg-[#d97706] text-white"
@@ -1164,13 +954,7 @@ export default function Supervisor() {
 
                 <button
                   type="button"
-                  onClick={() => {
-                    setStatusFilter("approved");
-                    setSelectedIds(new Set());
-                    setPage(1);
-                    setDetailsOpen(false);
-                    setDetailsItem(null);
-                  }}
+                  onClick={() => applyStatusFilter("approved")}
                   className={`rounded-md border px-5 py-2 text-base font-semibold ${
                     statusFilter === "approved"
                       ? "border-[#16a34a] bg-[#16a34a] text-white"
@@ -1182,13 +966,7 @@ export default function Supervisor() {
 
                 <button
                   type="button"
-                  onClick={() => {
-                    setStatusFilter("rejected");
-                    setSelectedIds(new Set());
-                    setPage(1);
-                    setDetailsOpen(false);
-                    setDetailsItem(null);
-                  }}
+                  onClick={() => applyStatusFilter("rejected")}
                   className={`rounded-md border px-5 py-2 text-base font-semibold ${
                     statusFilter === "rejected"
                       ? "border-[#dc2626] bg-[#dc2626] text-white"
@@ -1325,361 +1103,38 @@ export default function Supervisor() {
               disableNext={page >= totalPages || submitting}
             />
 
-            {/* Details Modal (placeholder format for now) */}
             {detailsOpen && detailsItem && (
-              <div
-                className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 p-4"
-                onClick={requestCloseDetails}
-              >
-                <div
-                  className="w-full max-w-2xl rounded-sm bg-white p-0 shadow"
-                  onClick={(e) => e.stopPropagation()}
-                >
-                  <div className="rounded-sm border border-black">
-                    {/* Header */}
-                    <div className="flex items-center justify-between rounded-t-sm bg-[#2f4d9c] px-5 py-3 text-white">
-                      <div className="text-lg font-bold">
-                        {(() => {
-                          const matched = detailsItem.periodLabel.match(/^(\d{4})-(1|2)$/);
-                          const period = matched ? `${matched[1]}-${matched[2] === "1" ? "S1" : "S2"}` : detailsItem.semesterLabel;
-                          return `${period}-${detailsItem.department}-Academic`;
-                        })()}
-                      </div>
-                      <button
-                        type="button"
-                        onClick={requestCloseDetails}
-                        className="inline-flex h-9 w-9 items-center justify-center rounded-md bg-white/10 hover:bg-white/20"
-                      >
-                        <span className="text-xl leading-none">×</span>
-                      </button>
-                    </div>
-
-                    {/* Form body */}
-                    <form
-                      className="space-y-4 px-6 py-5"
-                      onSubmit={(e) => e.preventDefault()}
-                    >
-                      <div className="grid grid-cols-2 gap-5">
-                        <div className="flex items-center gap-3">
-                          <div className="w-32 rounded-sm bg-[#2f4d9c] px-3 py-2 text-center text-base font-semibold text-white">
-                            Name
-                          </div>
-                          <input readOnly value={detailsItem.name} className="w-full flex-1 rounded-sm border border-[#2f4d9c] px-3 py-2 text-base" />
-                        </div>
-
-                        <div className="flex items-center gap-3">
-                          <div className="w-32 rounded-sm bg-[#2f4d9c] px-3 py-2 text-center text-base font-semibold text-white">
-                            Staff ID
-                          </div>
-                          <input readOnly value={detailsItem.studentId} className="w-full flex-1 rounded-sm border border-[#2f4d9c] px-3 py-2 text-base" />
-                        </div>
-
-                        <div className="flex items-center gap-3">
-                          <div className="w-32 rounded-sm bg-[#2f4d9c] px-3 py-2 text-center text-base font-semibold text-white">
-                            Target teaching ratio
-                          </div>
-                          <input
-                            readOnly
-                            value={
-                              typeof detailsItem.targetTeachingRatio === "number"
-                                ? `${detailsItem.targetTeachingRatio.toFixed(1)}%`
-                                : "—"
-                            }
-                            className="w-full flex-1 rounded-sm border border-[#2f4d9c] px-3 py-2 text-base"
-                          />
-                        </div>
-
-                        <div className="flex items-center gap-3">
-                          <div className="w-32 rounded-sm bg-[#2f4d9c] px-3 py-2 text-center text-base font-semibold text-white">
-                            Actual teaching ratio
-                          </div>
-                          {(() => {
-                            const source = detailsBreakdown ?? detailsItem.detailSnapshot?.breakdown ?? normalizeHodBreakdown();
-                            const teaching = source.Teaching.reduce((sum, row) => sum + row.hours, 0);
-                            const total = (["Teaching", "Assigned Roles", "HDR", "Service", "Research (residual)"] as BreakdownCategory[]).reduce(
-                              (tabSum, tab) => tabSum + source[tab].reduce((sum, row) => sum + row.hours, 0),
-                              0
-                            );
-                            const ratio =
-                              typeof detailsItem.actualTeachingRatio === "number" && !detailsEditMode
-                                ? `${detailsItem.actualTeachingRatio.toFixed(1)}%`
-                                : total <= 0
-                                  ? "0.0%"
-                                  : `${((teaching / total) * 100).toFixed(1)}%`;
-                            return (
-                              <input readOnly value={ratio} className="w-full flex-1 rounded-sm border border-[#2f4d9c] px-3 py-2 text-base tabular-nums font-sans" />
-                            );
-                          })()}
-                        </div>
-
-                        <div className="flex items-center gap-3">
-                          <div className="w-32 rounded-sm bg-[#2f4d9c] px-3 py-2 text-center text-base font-semibold text-white">
-                            Total work hours
-                          </div>
-                          {(() => {
-                            const totalHours = detailsBreakdown
-                              ? (["Teaching", "Assigned Roles", "HDR", "Service", "Research (residual)"] as BreakdownCategory[]).reduce(
-                                  (tabSum, tab) => tabSum + detailsBreakdown[tab].reduce((sum, row) => sum + row.hours, 0),
-                                  0
-                                )
-                              : detailsItem.hours;
-                            return (
-                              <input readOnly value={totalHours} className="w-full flex-1 rounded-sm border border-[#2f4d9c] px-3 py-2 text-base tabular-nums font-sans" />
-                            );
-                          })()}
-                        </div>
-
-                        <div className="flex items-center gap-3">
-                          <div className="w-32 rounded-sm bg-[#2f4d9c] px-3 py-2 text-center text-base font-semibold text-white">
-                            Employment type
-                          </div>
-                          {(() => {
-                            const totalHours = detailsBreakdown
-                              ? (["Teaching", "Assigned Roles", "HDR", "Service", "Research (residual)"] as BreakdownCategory[]).reduce(
-                                  (tabSum, tab) => tabSum + detailsBreakdown[tab].reduce((sum, row) => sum + row.hours, 0),
-                                  0
-                                )
-                              : detailsItem.hours;
-                            return (
-                              <input
-                                readOnly
-                                value={detailsItem.employmentType || "—"}
-                                className="w-full flex-1 rounded-sm border border-[#2f4d9c] px-3 py-2 text-base"
-                              />
-                            );
-                          })()}
-                        </div>
-
-                        <div className="flex items-center gap-3">
-                          <div className="w-32 rounded-sm bg-[#2f4d9c] px-3 py-2 text-center text-base font-semibold text-white">
-                            New Staff
-                          </div>
-                          <input readOnly value={detailsItem.newStaff || "—"} className="w-full flex-1 rounded-sm border border-[#2f4d9c] px-3 py-2 text-base" />
-                        </div>
-
-                        <div className="flex items-center gap-3">
-                          <div className="w-32 rounded-sm bg-[#2f4d9c] px-3 py-2 text-center text-base font-semibold text-white">
-                            HoD Review
-                          </div>
-                          <input
-                            readOnly
-                            value={typeof detailsItem.hodReviewRequired === "boolean" ? (detailsItem.hodReviewRequired ? "Yes" : "No") : "—"}
-                            className="w-full flex-1 rounded-sm border border-[#2f4d9c] px-3 py-2 text-base"
-                          />
-                        </div>
-                      </div>
-
-                      <div>
-                        <div className="flex items-center justify-between">
-                          <div className="text-sm font-semibold uppercase text-slate-700">Workload Breakdown</div>
-                          <button
-                            type="button"
-                            onClick={() => {
-                              setDetailsEditMode((v) => !v);
-                              setDetailsModalError("");
-                            }}
-                            className="rounded bg-[#2f4d9c] px-3 py-1 text-xs font-bold text-white hover:bg-[#264183]"
-                          >
-                            {detailsEditMode ? "Done" : "Edit"}
-                          </button>
-                        </div>
-                        <div className="mt-2 overflow-hidden rounded-sm border border-slate-300">
-                          <div className="flex flex-wrap gap-2 border-b border-slate-200 bg-slate-50 px-3 py-2">
-                            {(["Teaching", "Assigned Roles", "HDR", "Service", "Research (residual)"] as BreakdownCategory[]).map((tab) => (
-                              <button
-                                key={tab}
-                                type="button"
-                                onClick={() => setDetailsTab(tab)}
-                                className={`rounded px-3 py-1 text-xs font-semibold ${
-                                  detailsTab === tab
-                                    ? "bg-[#2f4d9c] text-white"
-                                    : "bg-white text-slate-700 ring-1 ring-slate-300 hover:bg-slate-100"
-                                }`}
-                              >
-                                {tab}
-                              </button>
-                            ))}
-                          </div>
-                          <table className="min-w-full">
-                            <thead className="bg-white">
-                              <tr className="text-left text-xs font-semibold uppercase text-slate-600">
-                                <th className="px-3 py-2">{detailsTab}</th>
-                                <th className="w-[120px] px-3 py-2 text-right">Hours</th>
-                                {detailsEditMode ? <th className="w-[88px] px-3 py-2 text-center">Action</th> : null}
-                              </tr>
-                            </thead>
-                            <tbody className="divide-y divide-slate-200 bg-white text-sm text-slate-700">
-                              {(detailsBreakdown?.[detailsTab] ?? detailsItem.detailSnapshot?.breakdown?.[detailsTab] ?? []).map((row, idx) => (
-                                <tr key={`${detailsItem.id}-${detailsTab}-${idx}`}>
-                                  <td className="px-3 py-2">
-                                    {detailsEditMode ? (
-                                      <input
-                                        value={row.name}
-                                        onChange={(e) => updateBreakdownRow(detailsTab, idx, "name", e.target.value)}
-                                        maxLength={60}
-                                        className="w-[240px] max-w-full overflow-hidden text-ellipsis whitespace-nowrap rounded border border-slate-300 px-2 py-1 text-sm"
-                                      />
-                                    ) : (
-                                      <span className="block px-1 py-1">{row.name}</span>
-                                    )}
-                                  </td>
-                                  <td className="px-3 py-2">
-                                    {detailsEditMode ? (
-                                      <input
-                                        type="text"
-                                        inputMode="decimal"
-                                        maxLength={8}
-                                        value={String(row.hours)}
-                                        onChange={(e) => updateBreakdownRow(detailsTab, idx, "hours", e.target.value)}
-                                        className="ml-auto w-24 rounded border border-slate-300 px-2 py-1 text-right tabular-nums font-sans text-sm"
-                                      />
-                                    ) : (
-                                      <div className="text-right tabular-nums font-sans">{row.hours}</div>
-                                    )}
-                                  </td>
-                                  {detailsEditMode ? (
-                                    <td className="px-3 py-2 text-center">
-                                      <button
-                                        type="button"
-                                        onClick={() => removeBreakdownRow(detailsTab, idx)}
-                                        className="rounded bg-slate-200 px-2 py-1 text-xs font-semibold text-slate-700 hover:bg-slate-300 disabled:opacity-50"
-                                        disabled={(detailsBreakdown?.[detailsTab] ?? []).length <= 1}
-                                      >
-                                        Delete
-                                      </button>
-                                    </td>
-                                  ) : null}
-                                </tr>
-                              ))}
-                              {detailsEditMode ? (
-                                <tr>
-                                  <td colSpan={3} className="px-3 py-2">
-                                    <button
-                                      type="button"
-                                      onClick={() => addBreakdownRow(detailsTab)}
-                                      className="rounded bg-[#2f4d9c] px-3 py-1 text-xs font-semibold text-white hover:bg-[#264183]"
-                                    >
-                                      + Add Row
-                                    </button>
-                                  </td>
-                                </tr>
-                              ) : null}
-                              <tr className="bg-slate-50">
-                                <td className="px-3 py-2 font-semibold">Total</td>
-                                <td className="px-3 py-2 text-right font-semibold tabular-nums font-sans">
-                                  {(detailsBreakdown?.[detailsTab] ?? detailsItem.detailSnapshot?.breakdown?.[detailsTab] ?? []).reduce(
-                                    (sum, row) => sum + row.hours,
-                                    0
-                                  )}
-                                </td>
-                                {detailsEditMode ? <td /> : null}
-                              </tr>
-                            </tbody>
-                          </table>
-                        </div>
-                      </div>
-
-                      <div>
-                        <button
-                          type="button"
-                          onClick={() => setDescriptionExpanded((v) => !v)}
-                          className="flex w-full items-center justify-between rounded-sm border border-slate-300 bg-slate-50 px-3 py-2 text-left text-sm font-semibold uppercase text-slate-700"
-                        >
-                          <span>School of Operations notes</span>
-                          <span className="text-base leading-none">{descriptionExpanded ? "−" : "+"}</span>
-                        </button>
-                        {descriptionExpanded && (
-                          <textarea
-                            readOnly
-                            value={workloadModalNotes(detailsItem)}
-                            className="mt-2 h-28 w-full resize-none rounded-sm border border-slate-300 bg-white px-4 py-3 text-sm text-slate-700"
-                          />
-                        )}
-                      </div>
-
-                      <div>
-                        <div className="text-sm font-semibold text-slate-700">Application Reason</div>
-                        <textarea
-                          readOnly
-                          value={requestReasonText(detailsItem) || "- no reason provided -"}
-                          className="mt-2 h-24 w-full resize-none rounded-sm border border-slate-300 bg-white px-4 py-3 text-sm text-slate-700"
-                        />
-                      </div>
-                      {detailsModalError && (
-                        <div className="text-sm font-semibold text-[#dc2626]">{detailsModalError}</div>
-                      )}
-
-                      {detailsItem.status === "pending" && (
-                        <div className="flex items-center justify-center gap-24 pt-2">
-                          <button
-                            type="button"
-                            disabled={submitting}
-                            onClick={() => openNoteModal("approve", detailsItem.id)}
-                            className="w-56 rounded-sm bg-[#4a9a3d] py-3 text-center text-lg font-semibold text-white shadow-sm disabled:opacity-60"
-                          >
-                            Approve
-                          </button>
-                          <button
-                            type="button"
-                            disabled={submitting}
-                            onClick={() => openNoteModal("reject", detailsItem.id)}
-                            className="w-56 rounded-sm bg-[#e53935] py-3 text-center text-lg font-semibold text-white shadow-sm disabled:opacity-60"
-                          >
-                            Decline
-                          </button>
-                        </div>
-                      )}
-                    </form>
-                  </div>
-                </div>
-              </div>
-            )}
-            {noteModalOpen && (
-              <div className="fixed inset-0 z-[80] flex items-center justify-center bg-black/40 p-4">
-                <div className="w-full max-w-lg rounded-md bg-white shadow-lg">
-                  <div className="flex items-center justify-between rounded-t-md bg-[#2f4d9c] px-5 py-3 text-white">
-                    <div className="text-base font-bold">
-                      {noteDecision === "approve" ? "Approved Notes" : "Rejected Notes"}
-                    </div>
-                    <button
-                      type="button"
-                      className="inline-flex h-8 w-8 items-center justify-center rounded bg-white/10 text-lg hover:bg-white/20"
-                      onClick={() => {
-                        setNoteModalOpen(false);
-                        setNoteError("");
-                      }}
-                    >
-                      ×
-                    </button>
-                  </div>
-                  <div className="space-y-3 p-5">
-                    <div className="text-sm font-semibold text-slate-700">Notes for Academic</div>
-                    <textarea
-                      value={noteDraft}
-                      onChange={(e) => {
-                        setNoteDraft(e.target.value);
-                        if (noteError) setNoteError("");
-                      }}
-                      maxLength={240}
-                      placeholder="Write your feedback..."
-                      className="h-32 w-full resize-none rounded border border-slate-300 px-3 py-2 text-sm text-slate-800 outline-none focus:border-[#2f4d9c]"
-                    />
-                    <div className="flex items-center justify-between text-xs text-slate-500">
-                      <span>{noteError ? <span className="text-[#dc2626]">{noteError}</span> : " "}</span>
-                      <span>{noteDraft.length}/240</span>
-                    </div>
-                    <div className="flex justify-center">
-                      <button
-                        type="button"
-                        onClick={handleFinishNote}
-                        className="rounded bg-[#2f4d9c] px-6 py-2 text-sm font-semibold text-white hover:bg-[#264183]"
-                      >
-                        Finished
-                      </button>
-                    </div>
-                  </div>
-                </div>
-              </div>
+              <WorkloadApprovalModal
+                item={{
+                  periodLabel: detailsItem.periodLabel,
+                  semesterLabel: detailsItem.semesterLabel,
+                  department: detailsItem.department,
+                  name: detailsItem.name,
+                  studentId: detailsItem.studentId,
+                  targetTeachingRatio: detailsItem.targetTeachingRatio,
+                  actualTeachingRatio: detailsItem.actualTeachingRatio,
+                  hours: detailsItem.hours,
+                  expectedMinHours: detailsItem.expectedMinHours,
+                  expectedMaxHours: detailsItem.expectedMaxHours,
+                  employmentType: detailsItem.employmentType,
+                  newStaff: detailsItem.newStaff,
+                  reviewRequired: detailsItem.hodReviewRequired,
+                  notes: detailsItem.notes,
+                  requestReason: detailsItem.requestReason,
+                  status: detailsItem.status,
+                  version: detailsItem.version,
+                  detailSnapshot: detailsItem.detailSnapshot,
+                }}
+                itemId={String(detailsItem.backendId ?? detailsItem.id)}
+                decisionApiPath="/api/hod/workload-requests/:id/decision/"
+                reviewLabel="HoD Review"
+                noteRecipientLabel="Academic"
+                onClose={closeDetails}
+                onDecisionComplete={async () => {
+                  closeDetails();
+                  await loadHodRequests();
+                }}
+              />
             )}
             </div>
             </section>
@@ -1743,7 +1198,7 @@ export default function Supervisor() {
                 </div>
                 {visualError && <div className="mt-3 text-sm font-semibold text-[#dc2626]">{visualError}</div>}
                 <div className="mt-2 text-sm font-semibold text-[#2f4d9c]">
-                  For readability, Visualization supports up to 3 years. Export more data in Export Excel.
+                  For readability, the chart displays the latest 6 semesters in the selected range.
                 </div>
               </div>
 

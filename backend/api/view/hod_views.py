@@ -24,12 +24,17 @@ from rest_framework.response import Response
 from api.models import AuditLog, WorkloadItem, WorkloadReport
 from api.permissions import IsHoD
 from api.services.workload_service import (
+    WORKLOAD_REQUEST_KINDS,
     _filter_reports_by_range,
     _parse_year_range,
     _reporting_period_label,
     evaluate_mvp_anomaly,
     get_workload_queryset,
+    report_research_hours,
+    report_total_hours,
+    semester_sort_key,
     stale_report_response_payload,
+    workload_item_hours_for_totals,
 )
 
 
@@ -57,7 +62,7 @@ def _first(request_data, *keys, default=''):
 
 def _get_workload_request_meta(report):
     log = (
-        AuditLog.objects.filter(report=report, changes__kind='WORKLOAD_REQUEST')
+        AuditLog.objects.filter(report=report, changes__kind__in=WORKLOAD_REQUEST_KINDS)
         .order_by('-created_at')
         .first()
     )
@@ -77,7 +82,7 @@ def _get_workload_request_meta_map(reports):
         return meta
 
     logs = (
-        AuditLog.objects.filter(report_id__in=report_ids, changes__kind='WORKLOAD_REQUEST')
+        AuditLog.objects.filter(report_id__in=report_ids, changes__kind__in=WORKLOAD_REQUEST_KINDS)
         .order_by('-created_at')
     )
     for log in logs:
@@ -107,6 +112,14 @@ def _get_reviewer_note(report):
         .first()
     )
     return log.comment if log else ''
+
+
+def _report_item_hours(items) -> Decimal:
+    return sum((workload_item_hours_for_totals(item) for item in items), Decimal('0.00'))
+
+
+def _report_research_hours(report) -> Decimal:
+    return report_research_hours(report)
 
 
 def _serialize_breakdown(items, report=None):
@@ -176,7 +189,13 @@ def _hod_visible_qs(staff):
     """
     self_submit_subq = AuditLog.objects.filter(
         report=OuterRef('pk'),
-        changes__kind='HOD_SELF_WORKLOAD_REQUEST',
+    ).filter(
+        Q(changes__kind='HOD_SELF_WORKLOAD_REQUEST') |
+        Q(
+            changes__kind='WORKLOAD_REQUEST',
+            action_by=OuterRef('staff'),
+            action_by__user__groups__name='HOD',
+        )
     )
     return (
         get_workload_queryset(staff)
@@ -216,7 +235,7 @@ def _serialize_row(report, request_meta_map=None):
     items = list(report.items.all())
     staff_user = report.staff.user
     full_name = staff_user.get_full_name().strip() or staff_user.username
-    total = sum((i.allocated_hours for i in items), Decimal('0.00'))
+    total = _report_total_hours(report, items=items)
     request_meta = (
         request_meta_map.get(str(report.report_id), {'reason': '', 'submittedAt': None})
         if request_meta_map is not None
@@ -246,7 +265,16 @@ def _serialize_detail(report):
     staff = report.staff
     staff_user = staff.user
     full_name = staff_user.get_full_name().strip() or staff_user.username
-    total_hours = sum((i.allocated_hours for i in items), Decimal('0.00'))
+    items_hours = _report_item_hours(items)
+
+    # Include research residual so total matches Academic/Ops views
+    anomaly_result = evaluate_mvp_anomaly(report)
+    research_hours = anomaly_result['metrics']['research_pts'] * Decimal('17.25')
+    total_hours = items_hours + research_hours
+
+    fte = float(report.snapshot_fte or Decimal('1.00'))
+    expected_min_hours = round(856 * fte, 2)
+    expected_max_hours = round(864 * fte, 2)
 
     # actualTeachingRatio: teaching hours / total hours, as percentage (0-100).
     teaching_hours = sum(
@@ -275,6 +303,8 @@ def _serialize_detail(report):
         'targetTeachingRatio': target_tr,
         'actualTeachingRatio': actual_tr,
         'totalWorkHours': _to_hours(total_hours),
+        'expectedMinHours': expected_min_hours,
+        'expectedMaxHours': expected_max_hours,
         'employmentType': employment_type,
         'isNewStaff': False,
         # hodReviewRequired / schoolOperationsNotes are not modelled yet; exposed as defaults
@@ -291,8 +321,8 @@ def _serialize_detail(report):
     }
 
 
-def _report_total_hours(report) -> Decimal:
-    return sum((item.allocated_hours for item in report.items.all()), Decimal('0.00'))
+def _report_total_hours(report, items=None) -> Decimal:
+    return report_total_hours(report, items)
 
 
 def _report_period_id(prefix: str, year, semester, department='') -> str:
@@ -411,18 +441,43 @@ def _analytics_payload(qs, year_from, year_to, semester_filter, scope_label):
     trend = {}
     status_distribution = {'pending': 0, 'approved': 0, 'rejected': 0, 'initial': 0}
     hours_distribution = {}
+    department_stats = {}
+    department_trend = {}
     for report in reports:
         label = _period_label(report.academic_year, report.semester)
+        semester_label = f"{report.academic_year} {report.semester}"
+        dept_name = report.snapshot_department.name
+        total = _report_total_hours(report)
         bucket = trend.setdefault(label, {'period': label, 'totalWorkHours': Decimal('0.00'), 'staff': set()})
-        bucket['totalWorkHours'] += _report_total_hours(report)
+        bucket['totalWorkHours'] += total
         bucket['staff'].add(report.staff_id)
         status_distribution[report.status.lower()] = status_distribution.get(report.status.lower(), 0) + 1
-        dept_name = report.snapshot_department.name
-        hours_distribution[dept_name] = hours_distribution.get(dept_name, Decimal('0.00')) + _report_total_hours(report)
+        hours_distribution[dept_name] = hours_distribution.get(dept_name, Decimal('0.00')) + total
+
+        dept_bucket = department_stats.setdefault(dept_name, {
+            'department': dept_name,
+            'academics': set(),
+            'totalHours': Decimal('0.00'),
+            'pending': 0,
+            'approved': 0,
+            'rejected': 0,
+        })
+        dept_bucket['academics'].add(report.staff_id)
+        dept_bucket['totalHours'] += total
+        status_key = report.status.lower()
+        if status_key == 'pending':
+            dept_bucket['pending'] += 1
+        elif status_key == 'approved':
+            dept_bucket['approved'] += 1
+        elif status_key == 'rejected':
+            dept_bucket['rejected'] += 1
+
+        trend_row = department_trend.setdefault(semester_label, {'semester': semester_label})
+        trend_row[dept_name] = _to_hours(Decimal(str(trend_row.get(dept_name, 0))) + total)
 
     total_work_hours_trend = []
     average_work_hours_by_semester = []
-    for label in sorted(trend):
+    for label in sorted(trend, key=semester_sort_key):
         row = trend[label]
         hours = _to_hours(row['totalWorkHours'])
         staff_count = len(row['staff'])
@@ -439,6 +494,21 @@ def _analytics_payload(qs, year_from, year_to, semester_filter, scope_label):
         'totalWorkHoursTrend': total_work_hours_trend,
         'averageWorkHoursBySemester': average_work_hours_by_semester,
         'statusDistribution': status_distribution,
+        'departmentStats': [
+            {
+                'department': dept,
+                'academics': len(row['academics']),
+                'totalHours': _to_hours(row['totalHours']),
+                'pending': row['pending'],
+                'approved': row['approved'],
+                'rejected': row['rejected'],
+            }
+            for dept, row in sorted(department_stats.items())
+        ],
+        'departmentWorkloadTrend': [
+            department_trend[key]
+            for key in sorted(department_trend.keys(), key=semester_sort_key)
+        ],
         'workloadHoursDistribution': [
             {'department': dept, 'totalWorkHours': _to_hours(hours)}
             for dept, hours in sorted(hours_distribution.items())

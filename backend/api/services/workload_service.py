@@ -3,6 +3,8 @@ from decimal import Decimal, ROUND_HALF_UP
 from api.models import WorkloadReport
 
 POINT_TO_HOURS = Decimal('17.25')
+HDR_DISPLAY_ROW_PREFIXES = ('Full time students', 'Part time students')
+WORKLOAD_REQUEST_KINDS = ('WORKLOAD_REQUEST', 'HOD_SELF_WORKLOAD_REQUEST')
 
 STALE_REPORT_ERROR = {
     'success': False,
@@ -18,6 +20,30 @@ def stale_report_response_payload(extra=None):
     return payload
 
 
+def staff_has_role(staff, *role_names) -> bool:
+    """Return True when a staff member effectively has any of the given roles.
+
+    Mixed-role accounts can carry extra Django auth groups beyond Staff.role.
+    HOD/HoS/School Ops views already authorize by group membership, so queryset
+    scoping and workflow branching must follow the same effective-role check.
+    """
+    if staff is None:
+        return False
+
+    wanted = {str(name).strip().upper() for name in role_names if str(name).strip()}
+    if not wanted:
+        return False
+
+    if str(getattr(staff, 'role', '')).strip().upper() in wanted:
+        return True
+
+    user = getattr(staff, 'user', None)
+    if user is None or getattr(staff, 'user_id', None) is None:
+        return False
+
+    return user.groups.filter(name__in=wanted).exists()
+
+
 def get_workload_queryset(staff):
     """
     Returns a WorkloadReport queryset scoped to what `staff` is allowed to see.
@@ -29,15 +55,43 @@ def get_workload_queryset(staff):
     qs = WorkloadReport.objects.filter(is_current=True).select_related(
         'staff__user', 'staff__department', 'snapshot_department'
     )
-    if staff.role == 'ACADEMIC':
-        return qs.filter(staff=staff)
-    if staff.role == 'HOD':
+    if staff_has_role(staff, 'SCHOOL_OPS', 'HOS'):
+        return qs
+    if staff_has_role(staff, 'HOD'):
         return qs.filter(snapshot_department=staff.department)
-    return qs
+    if staff_has_role(staff, 'ACADEMIC'):
+        return qs.filter(staff=staff)
+    return qs.none()
 
 
 def _quantize_2(value: Decimal) -> Decimal:
     return value.quantize(Decimal('0.01'), rounding=ROUND_HALF_UP)
+
+
+def workload_item_counts_toward_total(item) -> bool:
+    """Display-only HDR count rows should not affect workload totals."""
+    if item.category != 'HDR_SUPERVISION':
+        return True
+    description = (item.description or '').strip()
+    return not description.startswith(HDR_DISPLAY_ROW_PREFIXES)
+
+
+def workload_item_hours_for_totals(item) -> Decimal:
+    if not workload_item_counts_toward_total(item):
+        return Decimal('0.00')
+    return item.allocated_hours or Decimal('0.00')
+
+
+def report_research_hours(report) -> Decimal:
+    """Calculated display hours for the Research (residual) breakdown row."""
+    return evaluate_mvp_anomaly(report)['metrics']['research_pts'] * POINT_TO_HOURS
+
+
+def report_total_hours(report, items=None) -> Decimal:
+    """Return the chart/list total using the same 5-tab workload breakdown as the UI."""
+    report_items = list(items) if items is not None else list(report.items.all())
+    item_hours = sum((workload_item_hours_for_totals(item) for item in report_items), Decimal('0.00'))
+    return item_hours + report_research_hours(report)
 
 
 def _teaching_band(calc_tr: Decimal) -> str:
@@ -72,7 +126,7 @@ def evaluate_mvp_anomaly(report, department_conflict=False):
     assigned_roles_pts = Decimal('0.00')
 
     for item in items:
-        hours = item.allocated_hours or Decimal('0.00')
+        hours = workload_item_hours_for_totals(item)
         pts = hours / POINT_TO_HOURS
         if item.category == 'TEACHING':
             teaching_pts += pts
@@ -185,6 +239,29 @@ def _filter_reports_by_range(qs, year_from, year_to, semester_filter):
 
 def _build_semester_label(year: int, semester: str) -> str:
     return f"{year} {semester}"
+
+
+def semester_sort_key(label_or_pair):
+    sem_order = {'S1': 0, 'S2': 1, 'FULL_YEAR': 2}
+    if isinstance(label_or_pair, tuple):
+        year, semester = label_or_pair
+        return int(year or 0), sem_order.get(str(semester or '').upper(), 9)
+
+    parts = str(label_or_pair or '').replace('-', ' ').split()
+    year = 0
+    semester = ''
+    if parts:
+        try:
+            year = int(parts[0])
+        except (TypeError, ValueError):
+            year = 0
+    if len(parts) > 1:
+        raw_sem = parts[1].upper()
+        if raw_sem in {'1', '2'}:
+            semester = f"S{raw_sem}"
+        else:
+            semester = f"S{raw_sem[-1]}" if raw_sem.startswith('SEM') and raw_sem[-1].isdigit() else raw_sem
+    return year, sem_order.get(semester, 9)
 
 
 def _reporting_period_label(year_from, year_to, semester_filter) -> str:
