@@ -121,45 +121,6 @@ type MockRequest = {
   detailSnapshot?: WorkloadDetailSnapshot;
 };
 
-type DepartmentVisualizationStat = {
-  department: string;
-  academics: number;
-  totalHours: number;
-  pending: number;
-  approved: number;
-  rejected: number;
-};
-
-type SchoolVisualizationData = {
-  reportingPeriodLabel: string;
-  scopeLabel: string;
-  summary: {
-    totalDepartments: number;
-    totalAcademics: number;
-    totalWorkHours: number;
-    pendingRequests: number;
-    approvedRequests: number;
-    rejectedRequests: number;
-  };
-  departmentStats: DepartmentVisualizationStat[];
-  trend: Array<Record<string, string | number | null>>;
-};
-
-const EMPTY_SCHOOL_VISUALIZATION: SchoolVisualizationData = {
-  reportingPeriodLabel: "N/A",
-  scopeLabel: "All Departments",
-  summary: {
-    totalDepartments: 0,
-    totalAcademics: 0,
-    totalWorkHours: 0,
-    pendingRequests: 0,
-    approvedRequests: 0,
-    rejectedRequests: 0,
-  },
-  departmentStats: [],
-  trend: [],
-};
-
 type WorkloadListQuery = {
   employeeId: string;
   name: string;
@@ -1313,37 +1274,28 @@ export default function SchoolofOperations() {
     department: "All Departments",
   });
   const [adminVisualization, setAdminVisualization] = useState<AdminVisualizationPayload | null>(null);
-
-  async function loadAdminVisualization(filters = visualFilters) {
-    const params = new URLSearchParams();
-    if (filters.fromYear) params.set("year_from", filters.fromYear);
-    if (filters.toYear) params.set("year_to", filters.toYear);
-    params.set("semester", filters.semester);
-    if (filters.department !== "All Departments") params.set("department", filters.department);
-    const response = await apiJson<{
-      success: boolean;
-      data: AdminVisualizationPayload;
-    }>(`/api/school-operations/visualization?${params.toString()}`);
-    if (response.success) {
-      setAdminVisualization(response.data);
-  const [visualizationData, setVisualizationData] = useState<SchoolVisualizationData>(EMPTY_SCHOOL_VISUALIZATION);
   const [visualizationLoading, setVisualizationLoading] = useState(false);
 
-  async function loadSchoolVisualization(filters = visualFilters) {
+  async function loadAdminVisualization(filters = visualFilters) {
     setVisualizationLoading(true);
     try {
       const params = new URLSearchParams();
-      if (filters.fromYear) params.set("fromYear", filters.fromYear);
-      if (filters.toYear) params.set("toYear", filters.toYear);
+      if (filters.fromYear) params.set("year_from", filters.fromYear);
+      if (filters.toYear) params.set("year_to", filters.toYear);
       params.set("semester", filters.semester);
-      params.set("department", filters.department);
-      const response = await apiJson<{ success: boolean; data: SchoolVisualizationData }>(
+      if (filters.department !== "All Departments") params.set("department", filters.department);
+      const response = await apiJson<{
+        success: boolean;
+        data: AdminVisualizationPayload;
+      }>(
         `/api/school-operations/visualization?${params.toString()}`
       );
-      setVisualizationData(response.data ?? EMPTY_SCHOOL_VISUALIZATION);
+      if (response.success) {
+        setAdminVisualization(response.data);
+      }
       setVisualFilterError((prev) => (prev.startsWith("Load failed") ? "" : prev));
     } catch (error) {
-      setVisualizationData(EMPTY_SCHOOL_VISUALIZATION);
+      setAdminVisualization(null);
       const message = error instanceof Error ? error.message : "Could not load visualization.";
       setVisualFilterError(`Load failed: ${message}`);
     } finally {
@@ -2051,22 +2003,12 @@ export default function SchoolofOperations() {
   );
 
   const schoolSummary = useMemo(() => {
-    if (visualFilters.department === "All Departments") {
-      return {
-        totalDepartments: visualizationData.summary.totalDepartments,
-        totalAcademics: visualizationData.summary.totalAcademics,
-        totalWorkHours: Number(visualizationData.summary.totalWorkHours.toFixed(1)),
-        pendingRequests: visualizationData.summary.pendingRequests,
-        approvedRequests: visualizationData.summary.approvedRequests,
-        rejectedRequests: visualizationData.summary.rejectedRequests,
-      };
-    }
     const totalAcademics = filteredDepartmentStats.reduce((sum, item) => sum + item.academics, 0);
     const totalWorkHours = filteredDepartmentStats.reduce((sum, item) => sum + item.totalHours, 0);
     const pendingRequests = filteredDepartmentStats.reduce((sum, item) => sum + item.pending, 0);
     const approvedRequests = filteredDepartmentStats.reduce((sum, item) => sum + item.approved, 0);
     const rejectedRequests = filteredDepartmentStats.reduce((sum, item) => sum + item.rejected, 0);
-    return {
+    const fallbackSummary = {
       totalDepartments: filteredDepartmentStats.length,
       totalAcademics,
       totalWorkHours: Number(totalWorkHours.toFixed(1)),
@@ -2074,7 +2016,20 @@ export default function SchoolofOperations() {
       approvedRequests,
       rejectedRequests,
     };
-  }, [filteredDepartmentStats, visualizationData, visualFilters.department]);
+
+    if (visualFilters.department === "All Departments") {
+      const summary = adminVisualization?.summary;
+      return {
+        totalDepartments: Number(summary?.totalDepartments ?? fallbackSummary.totalDepartments),
+        totalAcademics: Number(summary?.totalAcademics ?? fallbackSummary.totalAcademics),
+        totalWorkHours: Number(Number(summary?.totalWorkHours ?? fallbackSummary.totalWorkHours).toFixed(1)),
+        pendingRequests: Number(summary?.pendingRequests ?? fallbackSummary.pendingRequests),
+        approvedRequests: Number(summary?.approvedRequests ?? fallbackSummary.approvedRequests),
+        rejectedRequests: Number(summary?.rejectedRequests ?? fallbackSummary.rejectedRequests),
+      };
+    }
+    return fallbackSummary;
+  }, [adminVisualization, filteredDepartmentStats, visualFilters.department]);
   const workloadPerAcademicByDepartment = useMemo(
     () =>
       filteredDepartmentStats.map((item) => ({
