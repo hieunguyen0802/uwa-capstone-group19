@@ -21,11 +21,20 @@ services:
     volumes:
       - ./backend:/app
     environment:
-      POSTGRES_DB: ${POSTGRES_DB:-workload_db}
-      POSTGRES_USER: ${POSTGRES_USER:-admin}
-      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-password}
-      POSTGRES_HOST: db
+      # LOCAL DEV CONNECTION
+      # POSTGRES_DB: ${POSTGRES_DB:-workload_db}
+      # POSTGRES_USER: ${POSTGRES_USER:-admin}
+      # POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-password}
+      # POSTGRES_HOST: db
+      # POSTGRES_PORT: 5432
+
+      # AZURE CONNECTION (uncomment and fill with your values)
+      POSTGRES_DB: workload_db
+      POSTGRES_USER: admin_group19
+      POSTGRES_PASSWORD: P@ssword
+      POSTGRES_HOST: uwa-capstone-group19-db.postgres.database.azure.com
       POSTGRES_PORT: 5432
+
       DJANGO_DEBUG: ${DJANGO_DEBUG:-false}
       DJANGO_ALLOWED_HOSTS: ${DJANGO_ALLOWED_HOSTS:-localhost,127.0.0.1}
       DJANGO_CORS_ORIGINS: ${DJANGO_CORS_ORIGINS:-}
