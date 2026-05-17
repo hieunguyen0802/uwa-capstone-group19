@@ -44,6 +44,8 @@ from api.services.workload_service import (
     _filter_reports_by_range,
     _parse_year_range,
     evaluate_mvp_anomaly,
+    report_total_hours,
+    semester_sort_key,
     stale_report_response_payload,
     workload_item_counts_toward_total,
     workload_item_hours_for_totals,
@@ -538,7 +540,7 @@ def _build_visualization_payload(reports_queryset, year_from, year_to, semester_
             'rejected': 0,
         })
         bucket['academics'].add(report.staff_id)
-        total_h = sum((workload_item_hours_for_totals(i) for i in report.items.all()), Decimal('0.00'))
+        total_h = report_total_hours(report)
         bucket['total_hours'] += total_h
         status_key = report.status.lower()
         if status_key == 'pending':
@@ -565,14 +567,14 @@ def _build_visualization_payload(reports_queryset, year_from, year_to, semester_
         label = f"{report.academic_year} {report.semester}"
         entry = trend_map.setdefault(label, {'semester': label})
         dept_name = report.snapshot_department.name
-        hrs = sum((workload_item_hours_for_totals(i) for i in report.items.all()), Decimal('0.00'))
+        hrs = report_total_hours(report)
         entry[dept_name] = float(round(Decimal(str(entry.get(dept_name, 0))) + hrs, 2))
 
-    workload_trend = [trend_map[key] for key in sorted(trend_map.keys())]
+    workload_trend = [trend_map[key] for key in sorted(trend_map.keys(), key=semester_sort_key)]
 
     total_hours_all = Decimal('0.00')
     for report in reports_queryset:
-        total_hours_all += sum((workload_item_hours_for_totals(i) for i in report.items.all()), Decimal('0.00'))
+        total_hours_all += report_total_hours(report)
     academics_union = set()
     pending_total = approved_total = rejected_total = 0
     for report in reports_queryset:

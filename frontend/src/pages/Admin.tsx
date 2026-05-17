@@ -121,6 +121,45 @@ type MockRequest = {
   detailSnapshot?: WorkloadDetailSnapshot;
 };
 
+type DepartmentVisualizationStat = {
+  department: string;
+  academics: number;
+  totalHours: number;
+  pending: number;
+  approved: number;
+  rejected: number;
+};
+
+type SchoolVisualizationData = {
+  reportingPeriodLabel: string;
+  scopeLabel: string;
+  summary: {
+    totalDepartments: number;
+    totalAcademics: number;
+    totalWorkHours: number;
+    pendingRequests: number;
+    approvedRequests: number;
+    rejectedRequests: number;
+  };
+  departmentStats: DepartmentVisualizationStat[];
+  trend: Array<Record<string, string | number | null>>;
+};
+
+const EMPTY_SCHOOL_VISUALIZATION: SchoolVisualizationData = {
+  reportingPeriodLabel: "N/A",
+  scopeLabel: "All Departments",
+  summary: {
+    totalDepartments: 0,
+    totalAcademics: 0,
+    totalWorkHours: 0,
+    pendingRequests: 0,
+    approvedRequests: 0,
+    rejectedRequests: 0,
+  },
+  departmentStats: [],
+  trend: [],
+};
+
 type WorkloadListQuery = {
   employeeId: string;
   name: string;
@@ -1287,6 +1326,28 @@ export default function SchoolofOperations() {
     }>(`/api/school-operations/visualization?${params.toString()}`);
     if (response.success) {
       setAdminVisualization(response.data);
+  const [visualizationData, setVisualizationData] = useState<SchoolVisualizationData>(EMPTY_SCHOOL_VISUALIZATION);
+  const [visualizationLoading, setVisualizationLoading] = useState(false);
+
+  async function loadSchoolVisualization(filters = visualFilters) {
+    setVisualizationLoading(true);
+    try {
+      const params = new URLSearchParams();
+      if (filters.fromYear) params.set("fromYear", filters.fromYear);
+      if (filters.toYear) params.set("toYear", filters.toYear);
+      params.set("semester", filters.semester);
+      params.set("department", filters.department);
+      const response = await apiJson<{ success: boolean; data: SchoolVisualizationData }>(
+        `/api/school-operations/visualization?${params.toString()}`
+      );
+      setVisualizationData(response.data ?? EMPTY_SCHOOL_VISUALIZATION);
+      setVisualFilterError((prev) => (prev.startsWith("Load failed") ? "" : prev));
+    } catch (error) {
+      setVisualizationData(EMPTY_SCHOOL_VISUALIZATION);
+      const message = error instanceof Error ? error.message : "Could not load visualization.";
+      setVisualFilterError(`Load failed: ${message}`);
+    } finally {
+      setVisualizationLoading(false);
     }
   }
 
@@ -1921,6 +1982,11 @@ export default function SchoolofOperations() {
       })),
     [adminVisualization]
   );
+  const visualDepartmentOptions = useMemo(() => {
+    const names = new Set<string>(ACADEMIC_IMPORT_DEPARTMENTS);
+    departmentStats.forEach((item) => names.add(item.department));
+    return Array.from(names).sort((a, b) => a.localeCompare(b));
+  }, [departmentStats]);
   const filteredDepartmentStats = useMemo(() => {
     if (visualFilters.department === "All Departments") return departmentStats;
     return departmentStats.filter((item) => item.department === visualFilters.department);
@@ -1985,6 +2051,16 @@ export default function SchoolofOperations() {
   );
 
   const schoolSummary = useMemo(() => {
+    if (visualFilters.department === "All Departments") {
+      return {
+        totalDepartments: visualizationData.summary.totalDepartments,
+        totalAcademics: visualizationData.summary.totalAcademics,
+        totalWorkHours: Number(visualizationData.summary.totalWorkHours.toFixed(1)),
+        pendingRequests: visualizationData.summary.pendingRequests,
+        approvedRequests: visualizationData.summary.approvedRequests,
+        rejectedRequests: visualizationData.summary.rejectedRequests,
+      };
+    }
     const totalAcademics = filteredDepartmentStats.reduce((sum, item) => sum + item.academics, 0);
     const totalWorkHours = filteredDepartmentStats.reduce((sum, item) => sum + item.totalHours, 0);
     const pendingRequests = filteredDepartmentStats.reduce((sum, item) => sum + item.pending, 0);
@@ -1998,7 +2074,7 @@ export default function SchoolofOperations() {
       approvedRequests,
       rejectedRequests,
     };
-  }, [filteredDepartmentStats]);
+  }, [filteredDepartmentStats, visualizationData, visualFilters.department]);
   const workloadPerAcademicByDepartment = useMemo(
     () =>
       filteredDepartmentStats.map((item) => ({
@@ -2072,12 +2148,6 @@ export default function SchoolofOperations() {
     }
     const startYear = Math.min(fromYear, toYear);
     const endYear = Math.max(fromYear, toYear);
-    const yearSpan = endYear - startYear;
-    const maxYearSpan = 2;
-    if (yearSpan > maxYearSpan) {
-      setVisualFilterError("Maximum range is 3 years.");
-      return;
-    }
     setVisualFilterError("");
     const nextFilters = {
       fromYear: String(startYear),
@@ -4581,9 +4651,9 @@ export default function SchoolofOperations() {
                       className="w-full rounded border border-slate-300 bg-white px-3 py-2 text-sm text-slate-800"
                     >
                       <option value="All Departments">All Departments</option>
-                      {departmentStats.map((item) => (
-                        <option key={item.department} value={item.department}>
-                          {item.department}
+                      {visualDepartmentOptions.map((department) => (
+                        <option key={department} value={department}>
+                          {department}
                         </option>
                       ))}
                     </select>
@@ -4600,11 +4670,13 @@ export default function SchoolofOperations() {
                   </div>
                 </div>
                 <div className="mt-3 text-sm font-semibold text-[#2f4d9c]">
-                  For readability, the dashboard displays up to 3 full academic years at a time. You can export more
-                  data in the Export Excel tab.
+                  For readability, the chart displays the latest 6 semesters in the selected range.
                 </div>
                 {visualFilterError && (
                   <div className="mt-3 text-sm font-semibold text-[#dc2626]">{visualFilterError}</div>
+                )}
+                {visualizationLoading && (
+                  <div className="mt-3 text-sm font-semibold text-slate-500">Loading visualization...</div>
                 )}
               </div>
               <div className="mt-3">
@@ -4950,9 +5022,9 @@ export default function SchoolofOperations() {
                     className="w-full rounded border border-slate-300 bg-white px-3 py-2 text-sm text-slate-800"
                   >
                     <option value="All Departments">All Departments</option>
-                    {departmentStats.map((item) => (
-                      <option key={`export-dept-${item.department}`} value={item.department}>
-                        {item.department}
+                    {visualDepartmentOptions.map((department) => (
+                      <option key={`export-dept-${department}`} value={department}>
+                        {department}
                       </option>
                     ))}
                   </select>

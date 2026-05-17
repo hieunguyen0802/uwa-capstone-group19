@@ -23,6 +23,8 @@ from api.services.workload_service import (
     WORKLOAD_REQUEST_KINDS,
     get_workload_queryset,
     stale_report_response_payload,
+    report_total_hours,
+    semester_sort_key,
     _parse_year_range,
     _filter_reports_by_range,
     _build_semester_label,
@@ -470,18 +472,17 @@ def supervisor_visualization(request):
     rejected_count = qs_submitted.filter(status='REJECTED').count()
 
     # Build ordered (year, semester) buckets
-    SEM_ORDER = {'S1': 0, 'S2': 1, 'FULL_YEAR': 2}
     seen = {}
     for r in reports:
         seen[(r.academic_year, r.semester)] = True
-    ordered_keys = sorted(seen.keys(), key=lambda k: (k[0], SEM_ORDER.get(k[1], 9)))
+    ordered_keys = sorted(seen.keys(), key=semester_sort_key)
 
     # Aggregate total hours and staff count per bucket
     bucket_hours = {}   # key -> total hours (Decimal)
     bucket_staff = {}   # key -> set of staff_ids
     for r in reports:
         key = (r.academic_year, r.semester)
-        total = sum(i.allocated_hours for i in r.items.all())
+        total = report_total_hours(r)
         bucket_hours[key] = bucket_hours.get(key, Decimal('0.00')) + total
         bucket_staff.setdefault(key, set()).add(r.staff_id)
 
