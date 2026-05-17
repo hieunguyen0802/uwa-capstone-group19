@@ -17,6 +17,7 @@ from pathlib import Path
 from django.conf import settings
 from django.contrib.auth.models import User
 from django.core.cache import cache
+from django.core.mail import send_mail
 from django.core.paginator import Paginator
 from django.db import models, transaction
 from django.http import HttpResponse
@@ -284,10 +285,10 @@ def _coerce_import_bool(value, default=None):
 
 
 def _get_distributed_time(report):
-    """Return the local-timezone timestamp when this report was distributed."""
+    """Return UTC ISO string for distributed_at; frontend localises via formatLocalDateTime."""
     if not report.distributed_at:
         return ''
-    return timezone.localtime(report.distributed_at).strftime('%Y-%m-%d %H:%M')
+    return report.distributed_at.isoformat()
 
 
 def _get_operated_by_actor(report):
@@ -943,9 +944,11 @@ def admin_distribute_workloads(request):
         )
 
     # ── Check 2: all workloads must exist and be visible to this user ──────────
+    # select_for_update() prevents concurrent distribute calls from double-distributing
+    # the same workload when the user clicks Confirm multiple times.
     qs = _admin_reports_qs(request.staff).select_related(
         'staff__user', 'staff__department', 'snapshot_department'
-    ).prefetch_related('items')
+    ).prefetch_related('items').select_for_update()
     reports = list(qs.filter(report_id__in=workload_ids))
 
     if len(reports) != len(workload_ids):
@@ -1057,17 +1060,27 @@ def admin_distribute_workloads(request):
                 },
             )
 
-            # ── Check 8: send notification message (non-fatal) ─────────────────
+            # ── Check 8: send in-app message + email notification (non-fatal) ──
             try:
                 from api.models import Message
+                notification_body = (
+                    f'Your workload for {report.academic_year} {report.semester} '
+                    f'has been distributed by {operated_by}.'
+                )
                 Message.objects.create(
                     thread_key=f'{report.staff.staff_number}:admin',
                     sender=request.staff,
-                    body=(
-                        f'Your workload for {report.academic_year} {report.semester} '
-                        f'has been distributed by {operated_by}.'
-                    ),
+                    body=notification_body,
                 )
+                recipient_email = report.staff.user.email
+                if recipient_email:
+                    send_mail(
+                        subject=f'Workload Distributed — {report.academic_year} {report.semester}',
+                        message=notification_body,
+                        from_email=None,
+                        recipient_list=[recipient_email],
+                        fail_silently=True,
+                    )
             except Exception:
                 pass
 

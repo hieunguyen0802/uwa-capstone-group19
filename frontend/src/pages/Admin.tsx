@@ -2222,7 +2222,7 @@ export default function SchoolofOperations() {
       return;
     }
     const selectedPendingRows = pending.filter(
-      (it) => selectedIds.has(it.id) && !it.cancelled && it.status === "pending"
+      (it) => selectedIds.has(it.id) && !it.cancelled && it.status === "initial" && !it.distributedTime
     );
     if (!selectedPendingRows.length) {
       setDistributeError("Please select at least one pending workload.");
@@ -3834,7 +3834,7 @@ export default function SchoolofOperations() {
                               {statusFilter !== "all" && (
                                 <td className="px-3 py-3 text-right tabular-nums font-sans font-semibold text-slate-800">
                                   {statusFilter === "distributed"
-                                    ? (item.distributedTime || itemDisplayTime(item))
+                                    ? (item.distributedTime ? formatLocalDateTime(item.distributedTime) : itemDisplayTime(item))
                                     : itemDisplayTime(item)}
                                 </td>
                               )}
@@ -4297,9 +4297,10 @@ export default function SchoolofOperations() {
                         <button
                           type="button"
                           onClick={handleConfirmDistributeWorkload}
-                          className="rounded bg-[#2f4d9c] px-4 py-2 text-sm font-semibold text-white hover:bg-[#264183]"
+                          disabled={submitting}
+                          className="rounded bg-[#2f4d9c] px-4 py-2 text-sm font-semibold text-white hover:bg-[#264183] disabled:cursor-not-allowed disabled:bg-slate-400"
                         >
-                          Confirm
+                          {submitting ? "Distributing…" : "Confirm"}
                         </button>
                       </div>
                     </div>

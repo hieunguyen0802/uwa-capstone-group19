@@ -6,6 +6,15 @@ import { requestOtp, verifyOtp } from "../api/auth";
 import { ACCESS_TOKEN_KEY, REFRESH_TOKEN_KEY } from "../api/client";
 import { useAuth } from "../auth/AuthContext";
 
+function classifyVerifyError(err: unknown): string {
+  const axiosErr = err as AxiosError<{ error?: string }>;
+  const serverMsg = axiosErr?.response?.data?.error;
+  if (serverMsg) return serverMsg;
+  // Network / timeout — don't blame the code itself
+  if (!axiosErr?.response) return "Network error. Please check your connection and try again.";
+  return "Invalid or expired code.";
+}
+
 const MAX_IDENTIFIER_LENGTH = 254;
 
 export default function Login() {
@@ -73,7 +82,7 @@ export default function Login() {
       await reload();
       navigate(homeRouteForRole(result.role), { replace: true });
     } catch (err) {
-      setLoginError(extractErrorMessage(err, "Invalid or expired code."));
+      setLoginError(classifyVerifyError(err));
     } finally {
       setBusy(false);
     }

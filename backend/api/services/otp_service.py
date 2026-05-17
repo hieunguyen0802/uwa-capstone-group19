@@ -86,10 +86,6 @@ def verify_otp(email: str, code: str) -> dict:
     if token is None:
         raise ValueError("Invalid or expired code.")
 
-    # Mark as used immediately to prevent replay.
-    token.used_at = now
-    token.save(update_fields=['used_at'])
-
     try:
         user = User.objects.get(email__iexact=email, is_active=True)
     except User.DoesNotExist:
@@ -104,6 +100,11 @@ def verify_otp(email: str, code: str) -> dict:
         staff_id = None
 
     refresh = RefreshToken.for_user(user)
+
+    # Mark as used only after JWT generation succeeds, so a backend error
+    # doesn't burn the token without issuing credentials.
+    token.used_at = now
+    token.save(update_fields=['used_at'])
 
     return {
         "access": str(refresh.access_token),
