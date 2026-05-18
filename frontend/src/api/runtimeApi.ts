@@ -1,6 +1,12 @@
 import { ACCESS_TOKEN_KEY } from "./client";
 
-const API_BASE = process.env.REACT_APP_API_BASE_URL ?? "http://localhost:8000";
+
+// Local backend
+//const API_BASE = process.env.REACT_APP_API_BASE_URL ?? "http://localhost:8000";
+
+// Azure backend
+const API_BASE = process.env.REACT_APP_API_BASE_URL ?? "https://uwa-capstone-group19-be-hpbgh5eygzeufmh3.australiaeast-01.azurewebsites.net";
+
 
 function parseStoredJson(raw: string | null): Record<string, unknown> | null {
   if (!raw) return null;

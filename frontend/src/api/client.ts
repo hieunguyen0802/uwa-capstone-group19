@@ -8,8 +8,15 @@
  */
 import axios, { AxiosError, AxiosInstance, InternalAxiosRequestConfig } from "axios";
 
-const API_ROOT = (process.env.REACT_APP_API_BASE_URL ?? "http://localhost:8000").replace(/\/api\/?$/, "");
+// Local backend
+//const API_ROOT = (process.env.REACT_APP_API_BASE_URL ?? "http://localhost:8000").replace(/\/api\/?$/, "");
+
+// Azure backend
+const API_ROOT = (process.env.REACT_APP_API_BASE_URL ?? "https://uwa-capstone-group19-be-hpbgh5eygzeufmh3.australiaeast-01.azurewebsites.net").replace(/\/api\/?$/, "");
+
 const BASE_URL = `${API_ROOT}/api`;
+
+
 
 export const ACCESS_TOKEN_KEY = "access_token";
 export const REFRESH_TOKEN_KEY = "refresh_token";
