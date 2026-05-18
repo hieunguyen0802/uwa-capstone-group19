@@ -17,6 +17,7 @@ from pathlib import Path
 from django.conf import settings
 from django.contrib.auth.models import User
 from django.core.cache import cache
+from django.core.mail import send_mail
 from django.core.paginator import Paginator
 from django.db import models, transaction
 from django.http import HttpResponse
@@ -314,7 +315,7 @@ def _coerce_import_bool(value, default=None):
 
 
 def _get_distributed_time(report):
-    """Return UTC ISO timestamp for distribution; the frontend converts to local timezone."""
+    """Return UTC ISO string for distributed_at; frontend localises via formatLocalDateTime."""
     if not report.distributed_at:
         return ''
     return report.distributed_at.isoformat()
@@ -394,7 +395,7 @@ def _serialize_workload_row(report, items):
         'periodLabel': period_label,
         'name': full_name,
         'unit': first_teaching.unit_code if first_teaching else '',
-        'notes': _get_request_reason(report),
+        'notes': report.notes,
         'requestReason': _get_request_reason(report),
         'title': report.staff.title or '',
         'department': report.snapshot_department.name,
@@ -485,7 +486,9 @@ def _serialize_workload_detail(report, items):
         'hodReview': _effective_hod_review(report, calculated_band),
         'staffRole': report.staff.role,
         'cancelled': False,
-        'notes': _get_request_reason(report),
+        'notes': report.notes,
+        'requestReason': _get_request_reason(report),
+        'supervisorNote': _get_supervisor_note(report),
         'validation': {
             'teachingRatioOutOfRange': teaching_ratio_out_of_range,
             'bandMismatch': band_mismatch,
@@ -998,9 +1001,11 @@ def admin_distribute_workloads(request):
         )
 
     # ── Check 2: all workloads must exist and be visible to this user ──────────
+    # select_for_update() prevents concurrent distribute calls from double-distributing
+    # the same workload when the user clicks Confirm multiple times.
     qs = _admin_reports_qs(request.staff).select_related(
         'staff__user', 'staff__department', 'snapshot_department'
-    ).prefetch_related('items')
+    ).prefetch_related('items').select_for_update()
     reports = list(qs.filter(report_id__in=workload_ids))
 
     if len(reports) != len(workload_ids):
@@ -1133,17 +1138,27 @@ def admin_distribute_workloads(request):
                 },
             )
 
-            # ── Check 8: send notification message (non-fatal) ─────────────────
+            # ── Check 8: send in-app message + email notification (non-fatal) ──
             try:
                 from api.models import Message
+                notification_body = (
+                    f'Your workload for {report.academic_year} {report.semester} '
+                    f'has been distributed by {operated_by}.'
+                )
                 Message.objects.create(
                     thread_key=f'{report.staff.staff_number}:admin',
                     sender=request.staff,
-                    body=(
-                        f'Your workload for {report.academic_year} {report.semester} '
-                        f'has been distributed by {operated_by}.'
-                    ),
+                    body=notification_body,
                 )
+                recipient_email = report.staff.user.email
+                if recipient_email:
+                    send_mail(
+                        subject=f'Workload Distributed — {report.academic_year} {report.semester}',
+                        message=notification_body,
+                        from_email=None,
+                        recipient_list=[recipient_email],
+                        fail_silently=True,
+                    )
             except Exception:
                 pass
 
@@ -1355,6 +1370,7 @@ def admin_workload_import(request):
                     'targetTeachingPct': cells.get('J'),
                     'hodReview': str(cells.get('F') or '').strip().lower(),
                     'newStaff': str(cells.get('D') or '').strip().lower(),
+                    'notes': str(cells.get('E') or '').strip(),
                 }
 
         # Collect all staff IDs from this sheet
@@ -1417,6 +1433,7 @@ def admin_workload_import(request):
                     if _has_target_band_mismatch(target_band_val, calculated_band_val):
                         hod_review_val = 'yes'
                     new_staff_val = str(rm.get('newStaff') or '').strip().lower() in ('yes', 'true', '1', 'y')
+                    notes_val = str(rm.get('notes') or '').strip()
 
                     # Always force INITIAL — import must never bypass the approval workflow.
                     report = WorkloadReport.objects.create(
@@ -1429,6 +1446,7 @@ def admin_workload_import(request):
                         assigned_by=request.staff,
                         import_batch_id=batch_id,
                         is_current=True,
+                        notes=notes_val,
                         target_band=str(target_band_val) if target_band_val else None,
                         target_teaching_pct=target_teaching_pct,
                         hod_review=hod_review_val,
@@ -1730,7 +1748,9 @@ def admin_staff_import(request):
 @permission_classes([IsAuthenticated, CanAccessSchoolOpsApi])
 def admin_staff_list(request):
     """GET /api/school-operations/staff  (also /api/admin/staff/)"""
-    queryset = Staff.objects.select_related('user', 'department').filter(role='ACADEMIC').order_by('staff_number')
+    queryset = Staff.objects.select_related('user', 'department').filter(
+        role__in=['ACADEMIC', 'HOD', 'SCHOOL_OPS']
+    ).order_by('staff_number')
 
     # New contract query params
     staff_id = request.GET.get('staff_id', '').strip()

@@ -305,6 +305,9 @@ class WorkloadReport(models.Model):
     target_band = models.CharField(max_length=50, null=True, blank=True)
     target_teaching_pct = models.DecimalField(max_digits=5, decimal_places=2, null=True, blank=True)
 
+    # Excel column E — Notes/flags imported from the workload template.
+    notes = models.TextField(blank=True, default='')
+
     # Excel column F — HoD Review flag imported from the workload template.
     hod_review = models.CharField(max_length=3, choices=[('yes', 'Yes'), ('no', 'No')], default='no')
 

@@ -34,6 +34,7 @@ from api.services.workload_service import (
     report_total_hours,
     semester_sort_key,
     stale_report_response_payload,
+    workload_item_counts_toward_total,
     workload_item_hours_for_totals,
 )
 
@@ -127,10 +128,13 @@ def _serialize_breakdown(items, report=None):
     for item in items:
         label = CATEGORY_LABELS.get(item.category)
         if label:
-            grouped[label].append({
+            row = {
                 'name': item.unit_code or item.description or item.category,
                 'hours': _to_hours(item.allocated_hours),
-            })
+            }
+            if not workload_item_counts_toward_total(item):
+                row['displayOnly'] = True
+            grouped[label].append(row)
     if report is not None:
         research_hours = evaluate_mvp_anomaly(report)['metrics']['research_pts'] * Decimal('17.25')
         if research_hours > 0:
@@ -205,7 +209,7 @@ def _hod_visible_qs(staff):
             Q(status__in=['PENDING', 'APPROVED', 'REJECTED'])
             | Q(status='INITIAL', confirmation_status='CONFIRMED')
         )
-        .exclude(staff=staff, is_hod_self_submission=True)
+        .exclude(staff=staff)
     )
 
 
@@ -307,10 +311,8 @@ def _serialize_detail(report):
         'expectedMaxHours': expected_max_hours,
         'employmentType': employment_type,
         'isNewStaff': False,
-        # hodReviewRequired / schoolOperationsNotes are not modelled yet; exposed as defaults
-        # so the frontend contract stays stable. Backed by real data once models catch up.
         'hodReviewRequired': False,
-        'schoolOperationsNotes': '',
+        'schoolOperationsNotes': report.notes,
         'applicationReason': _get_request_reason(report),
         'status': report.status.lower(),
         'breakdown': _serialize_breakdown(items, report),

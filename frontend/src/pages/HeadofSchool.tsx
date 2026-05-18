@@ -92,7 +92,7 @@ type MockRequest = {
 };
 
 type BreakdownCategory = "Teaching" | "Assigned Roles" | "HDR" | "Service" | "Research (residual)";
-type BreakdownEntry = { name: string; hours: number };
+type BreakdownEntry = { name: string; hours: number; displayOnly?: boolean };
 type BreakdownData = Record<BreakdownCategory, BreakdownEntry[]>;
 
 function displayNameWithoutComma(raw: string): string {
@@ -169,6 +169,7 @@ function normalizeBreakdown(raw?: HosBreakdown): BreakdownData {
       ? rows.map((row) => ({
           name: String(row.name ?? ""),
           hours: Number(row.hours) || 0,
+          ...(row.displayOnly ? { displayOnly: true } : {}),
         }))
       : [];
   });
@@ -1558,6 +1559,7 @@ export default function HeadofSchool() {
                     reviewRequired: detailsItem.reviewRequired,
                     notes: detailsItem.notes ?? workloadModalNotes(detailsItem),
                     requestReason: detailsItem.requestReason ?? requestReasonText(detailsItem),
+                    supervisorNote: detailsItem.supervisorNote,
                     status: detailsItem.status,
                     version: detailsItem.version,
                     detailSnapshot: detailsItem.detailSnapshot,

@@ -1,8 +1,12 @@
+import logging
+
 from rest_framework.decorators import api_view, permission_classes
 from rest_framework.permissions import AllowAny
 from rest_framework.response import Response
 
 from api.services.otp_service import request_otp, verify_otp
+
+logger = logging.getLogger(__name__)
 
 
 @api_view(['POST'])
@@ -23,7 +27,12 @@ def otp_request_view(request):
     if not email:
         return Response({"error": "email is required"}, status=400)
 
-    result = request_otp(email)
+    try:
+        result = request_otp(email)
+    except Exception:
+        logger.exception("OTP send failed for %s", email)
+        return Response({"error": "Failed to send verification code. Please try again."}, status=500)
+
     return Response(result, status=200)
 
 
@@ -57,5 +66,8 @@ def otp_verify_view(request):
         result = verify_otp(email, code)
     except ValueError as exc:
         return Response({"error": str(exc)}, status=400)
+    except Exception:
+        logger.exception("OTP verify failed for %s", email)
+        return Response({"error": "Verification failed. Please request a new code and try again."}, status=500)
 
     return Response(result, status=200)

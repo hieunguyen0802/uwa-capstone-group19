@@ -167,9 +167,15 @@ DEFAULT_AUTO_FIELD = 'django.db.models.BigAutoField'
 # In production, set DJANGO_CORS_ORIGINS=https://your-frontend.com
 _cors_origins = os.environ.get('DJANGO_CORS_ORIGINS', '')
 if _cors_origins:
-    CORS_ALLOWED_ORIGINS = [o.strip() for o in _cors_origins.split(',')]
+    CORS_ALLOWED_ORIGINS = [o.strip() for o in _cors_origins.split(',') if o.strip()]
+elif DEBUG:
+    CORS_ALLOW_ALL_ORIGINS = True
 else:
-    CORS_ALLOW_ALL_ORIGINS = DEBUG  # only allow all origins in dev mode
+    # Non-debug without explicit origins: allow localhost so Docker dev works.
+    CORS_ALLOWED_ORIGINS = [
+        'http://localhost:3000',
+        'http://127.0.0.1:3000',
+    ]
 
 # AUTH_USER_MODEL = 'yourapp.User'
 
