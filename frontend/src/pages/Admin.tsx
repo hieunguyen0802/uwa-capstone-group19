@@ -1694,7 +1694,8 @@ export default function SchoolofOperations() {
       if (statusFilter === "all") return !it.cancelled && it.status === "initial" && !it.distributedTime;
       if (statusFilter === "superseded") return Boolean(it.cancelled);
       if (statusFilter === "failed")
-        return Boolean(it.backendId && distributionFailedWorkloadIds.has(it.backendId)) ||
+        return !it.distributedTime && (
+          Boolean(it.backendId && distributionFailedWorkloadIds.has(it.backendId)) ||
           rowMatchesWorkloadFailedTab(
             it,
             workloadAnomalyImportByStaffId,
@@ -1702,7 +1703,7 @@ export default function SchoolofOperations() {
             workloadTeachingImportLinesByStaffId,
             workloadHdrImportByStaffId,
             workloadServiceImportByStaffId
-          );
+          ));
       // "distributed" = items that have been distributed (distributedTime set),
       // regardless of the academic→HoD workflow status
       if (statusFilter === "distributed") {
@@ -1761,15 +1762,17 @@ export default function SchoolofOperations() {
   const workloadFailedFilterCount = useMemo(
     () =>
       pending.filter((it) =>
-        Boolean(it.backendId && distributionFailedWorkloadIds.has(it.backendId)) ||
-        rowMatchesWorkloadFailedTab(
-            it,
-            workloadAnomalyImportByStaffId,
-            workloadAssignedRoleImportByStaffId,
-            workloadTeachingImportLinesByStaffId,
-            workloadHdrImportByStaffId,
-            workloadServiceImportByStaffId
-          )
+        !it.distributedTime && (
+          Boolean(it.backendId && distributionFailedWorkloadIds.has(it.backendId)) ||
+          rowMatchesWorkloadFailedTab(
+              it,
+              workloadAnomalyImportByStaffId,
+              workloadAssignedRoleImportByStaffId,
+              workloadTeachingImportLinesByStaffId,
+              workloadHdrImportByStaffId,
+              workloadServiceImportByStaffId
+            )
+        )
       ).length,
     [
       pending,
@@ -4081,13 +4084,30 @@ export default function SchoolofOperations() {
                     tooltipClassName: "border-yellow-300 bg-yellow-50 text-amber-900",
                   },
                 ];
+                const isInitialStatus = detailsItem.status === "initial";
+                const opsNotesVal = workloadModalNotes(detailsItem).trim();
                 const notesSections: WorkloadDetailNoteSection[] = [
                   {
-                    label: "NOTES",
-                    value: workloadModalNotes(detailsItem).trim(),
-                    placeholder: STAFF_PROFILE_NOTES_PLACEHOLDER,
-                    rows: 4,
+                    label: "School of Operations notes",
+                    value: opsNotesVal,
+                    rows: 4 as const,
+                    collapsible: true,
+                    defaultExpanded: Boolean(opsNotesVal),
                   },
+                  ...(!isInitialStatus ? [{
+                    label: "Application Reasons",
+                    value: detailsItem.requestReason?.trim() || "— no reason provided —",
+                    rows: 3 as const,
+                    collapsible: true as const,
+                    defaultExpanded: false,
+                  }] : []),
+                  ...(!isInitialStatus ? [{
+                    label: "Head of Department notes",
+                    value: detailsItem.supervisorNote?.trim() || "— no notes yet —",
+                    rows: 3 as const,
+                    collapsible: true as const,
+                    defaultExpanded: false,
+                  }] : []),
                 ];
                 const historyAction =
                   statusFilter === "distributed" ? (

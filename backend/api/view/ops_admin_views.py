@@ -395,7 +395,7 @@ def _serialize_workload_row(report, items):
         'periodLabel': period_label,
         'name': full_name,
         'unit': first_teaching.unit_code if first_teaching else '',
-        'notes': _get_request_reason(report),
+        'notes': report.notes,
         'requestReason': _get_request_reason(report),
         'title': report.staff.title or '',
         'department': report.snapshot_department.name,
@@ -486,7 +486,9 @@ def _serialize_workload_detail(report, items):
         'hodReview': _effective_hod_review(report, calculated_band),
         'staffRole': report.staff.role,
         'cancelled': False,
-        'notes': _get_request_reason(report),
+        'notes': report.notes,
+        'requestReason': _get_request_reason(report),
+        'supervisorNote': _get_supervisor_note(report),
         'validation': {
             'teachingRatioOutOfRange': teaching_ratio_out_of_range,
             'bandMismatch': band_mismatch,
@@ -1368,6 +1370,7 @@ def admin_workload_import(request):
                     'targetTeachingPct': cells.get('J'),
                     'hodReview': str(cells.get('F') or '').strip().lower(),
                     'newStaff': str(cells.get('D') or '').strip().lower(),
+                    'notes': str(cells.get('E') or '').strip(),
                 }
 
         # Collect all staff IDs from this sheet
@@ -1430,6 +1433,7 @@ def admin_workload_import(request):
                     if _has_target_band_mismatch(target_band_val, calculated_band_val):
                         hod_review_val = 'yes'
                     new_staff_val = str(rm.get('newStaff') or '').strip().lower() in ('yes', 'true', '1', 'y')
+                    notes_val = str(rm.get('notes') or '').strip()
 
                     # Always force INITIAL — import must never bypass the approval workflow.
                     report = WorkloadReport.objects.create(
@@ -1442,6 +1446,7 @@ def admin_workload_import(request):
                         assigned_by=request.staff,
                         import_batch_id=batch_id,
                         is_current=True,
+                        notes=notes_val,
                         target_band=str(target_band_val) if target_band_val else None,
                         target_teaching_pct=target_teaching_pct,
                         hod_review=hod_review_val,
@@ -1743,7 +1748,9 @@ def admin_staff_import(request):
 @permission_classes([IsAuthenticated, CanAccessSchoolOpsApi])
 def admin_staff_list(request):
     """GET /api/school-operations/staff  (also /api/admin/staff/)"""
-    queryset = Staff.objects.select_related('user', 'department').filter(role='ACADEMIC').order_by('staff_number')
+    queryset = Staff.objects.select_related('user', 'department').filter(
+        role__in=['ACADEMIC', 'HOD', 'SCHOOL_OPS']
+    ).order_by('staff_number')
 
     # New contract query params
     staff_id = request.GET.get('staff_id', '').strip()

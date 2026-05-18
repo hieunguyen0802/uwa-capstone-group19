@@ -162,8 +162,9 @@ def evaluate_mvp_anomaly(report, department_conflict=False):
         target_teaching_pts = _quantize_2(
             (Decimal(target_teaching_pct) / Decimal('100')) * Decimal('50') * (report.snapshot_fte or Decimal('0.00'))
         )
-        if abs(teaching_pts - target_teaching_pts) > Decimal('0.01'):
-            reasons.append('teaching_mismatch')
+        # Calculate the mismatch for reference but do not treat it as an anomaly —
+        # band mismatch (tr_discrepancy) is the authoritative flag.
+        _ = abs(teaching_pts - target_teaching_pts)
 
     # Rule 3 (tr_denominator_invalid)
     if denominator <= Decimal('0'):

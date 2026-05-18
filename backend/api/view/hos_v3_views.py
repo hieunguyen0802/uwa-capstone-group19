@@ -9,6 +9,7 @@ Legacy `/api/headofschool/*` endpoints stay live during cutover.
 
 from decimal import Decimal
 from urllib.parse import urlencode
+from zoneinfo import ZoneInfo
 
 from django.contrib.auth.models import User
 from django.core.paginator import Paginator
@@ -66,6 +67,7 @@ def _hos_visible_qs():
         WorkloadReport.objects.filter(is_current=True)
         .select_related('staff__user', 'staff__department', 'snapshot_department')
         .annotate(is_hod_self_submission=Exists(hod_self_subq))
+        .filter(is_hod_self_submission=True)
         .filter(
             Q(status__in=['PENDING', 'APPROVED', 'REJECTED'])
             | Q(status='INITIAL', confirmation_status='CONFIRMED')
@@ -107,7 +109,7 @@ def _serialize_assignment(assignment):
         'role': assignment.role_code,
         'department': assignment.department_scope,
         'permissions': assignment.permissions or [],
-        'assignedAt': assignment.created_at.isoformat() if assignment.created_at else None,
+        'assignedAt': assignment.created_at.astimezone(ZoneInfo('Australia/Perth')).strftime('%Y-%m-%d %H:%M') if assignment.created_at else None,
         'status': assignment.status,
     }
 

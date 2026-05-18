@@ -56,6 +56,10 @@ type AcademicItem = {
   newStaff?: "Yes" | "No" | string;
   /** Display-only field for Academic detail modal (mirrors School Ops detail layout). */
   hodReview?: "Yes" | "No" | string;
+  /** Ops/Excel import notes — visible as "School of Operations notes". */
+  opsNotes?: string;
+  /** Reason the academic gave when submitting to HoD. */
+  applicationReason?: string;
   /** When true (from API), row is read-only and detail is blocked — superseded by a newer version. */
   cancelled?: boolean;
   detailSnapshot?: WorkloadDetailSnapshot;
@@ -179,7 +183,7 @@ type AcademicWorkloadDetailResponse = AcademicWorkloadRowResponse & {
   employmentType?: string | null;
   isNewStaff?: boolean | null;
   hodReviewRequired?: boolean | null;
-  schoolOperationsNotes?: string | null;
+  opsNotes?: string | null;
   applicationReason?: string | null;
   breakdown?: Partial<Record<BreakdownCategory, BreakdownEntry[]>>;
   validation?: {
@@ -253,7 +257,8 @@ function mapAcademicDetailToItem(detail: AcademicWorkloadDetailResponse, userDep
   return {
     ...base,
     department: detail.department ?? base.department,
-    notes: detail.schoolOperationsNotes ?? detail.notes ?? "",
+    notes: detail.opsNotes ?? "",
+    applicationReason: detail.applicationReason ?? "",
     newStaff: typeof detail.isNewStaff === "boolean" ? (detail.isNewStaff ? "Yes" : "No") : "—",
     hodReview: typeof detail.hodReviewRequired === "boolean" ? (detail.hodReviewRequired ? "Yes" : "No") : "—",
     employmentType: detail.employmentType ?? undefined,
@@ -370,11 +375,6 @@ function AcademicDetailModal({
     () => item.detailSnapshot?.breakdown ?? normalizeAcademicBreakdown(),
     [item.detailSnapshot]
   );
-  const hasHodReviewContent = useMemo(() => {
-    const note = item.supervisorNote?.trim() ?? "";
-    return Boolean(note) || item.status === "approved" || item.status === "rejected";
-  }, [item.status, item.supervisorNote]);
-
   const displayTargetTeachingRatio =
     item.targetTeachingRatio != null ? `${(Math.round(item.targetTeachingRatio * 10) / 10).toFixed(1)}%` : "-";
   const displayActualTeachingRatio =
@@ -441,21 +441,30 @@ function AcademicDetailModal({
     },
   ];
 
+  const isInitial = item.status === "" || item.status === "initial";
+  const opsNotesValue = item.notes?.trim() || "";
   const notesSections: WorkloadDetailNoteSection[] = [
     {
       label: "School of Operations notes",
-      value: item.notes,
-      rows: 4,
+      value: opsNotesValue,
+      rows: 4 as const,
       collapsible: true,
-      defaultExpanded: true,
+      defaultExpanded: Boolean(opsNotesValue),
     },
-    {
+    ...(!isInitial ? [{
+      label: "Application Reasons",
+      value: item.applicationReason?.trim() || "— no reason provided —",
+      rows: 3 as const,
+      collapsible: true,
+      defaultExpanded: false,
+    }] : []),
+    ...(!isInitial ? [{
       label: "Head of Department notes",
-      value: item.supervisorNote?.trim() ? item.supervisorNote : "- no notes yet -",
-      rows: 3,
+      value: item.supervisorNote?.trim() || "— no notes yet —",
+      rows: 3 as const,
       collapsible: true,
-      defaultExpanded: hasHodReviewContent,
-    },
+      defaultExpanded: false,
+    }] : []),
   ];
 
   return (

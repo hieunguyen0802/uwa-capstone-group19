@@ -3,7 +3,7 @@ import WorkloadDetailModal, { type WorkloadBreakdownCategory } from "./WorkloadD
 import { apiJson } from "../../api/client";
 
 type BreakdownCategory = "Teaching" | "Assigned Roles" | "HDR" | "Service" | "Research (residual)";
-type BreakdownEntry = { name: string; hours: number };
+type BreakdownEntry = { name: string; hours: number; displayOnly?: boolean };
 type BreakdownData = Record<BreakdownCategory, BreakdownEntry[]>;
 
 const APPROVAL_BREAKDOWN_TABS: BreakdownCategory[] = [
@@ -40,6 +40,7 @@ export type WorkloadApprovalItem = {
   reviewRequired?: boolean;
   notes?: string;
   requestReason?: string;
+  supervisorNote?: string;
   status: "pending" | "approved" | "rejected";
   version?: string | null;
   detailSnapshot?: { breakdown: BreakdownData };
@@ -87,18 +88,17 @@ export default function WorkloadApprovalModal({
     if (typeof item.actualTeachingRatio === "number" && !editMode) {
       return `${item.actualTeachingRatio.toFixed(1)}%`;
     }
-    const teaching = breakdown.Teaching.reduce((s, r) => s + r.hours, 0);
-    const total = APPROVAL_BREAKDOWN_TABS.reduce(
-      (s, tab) => s + breakdown[tab].reduce((ts, r) => ts + r.hours, 0),
-      0
-    );
+    const countableHours = (tab: BreakdownCategory) =>
+      breakdown[tab].reduce((s, r) => s + (r.displayOnly ? 0 : r.hours), 0);
+    const teaching = countableHours("Teaching");
+    const total = APPROVAL_BREAKDOWN_TABS.reduce((s, tab) => s + countableHours(tab), 0);
     return total <= 0 ? "0.0%" : `${((teaching / total) * 100).toFixed(1)}%`;
   }, [breakdown, editMode, item.actualTeachingRatio]);
 
   const totalHoursDisplay = useMemo(() => {
     const raw = editMode
       ? APPROVAL_BREAKDOWN_TABS.reduce(
-          (s, tab) => s + breakdown[tab].reduce((ts, r) => ts + r.hours, 0),
+          (s, tab) => s + breakdown[tab].reduce((ts, r) => ts + (r.displayOnly ? 0 : r.hours), 0),
           0
         )
       : item.hours;
@@ -142,19 +142,28 @@ export default function WorkloadApprovalModal({
     },
   ];
 
+  const opsNotesValue = item.notes?.trim() || "";
   const notesSections = [
     {
       label: "School of Operations notes",
-      value: item.notes?.trim() || "",
+      value: opsNotesValue,
       rows: 4 as const,
       collapsible: true,
-      defaultExpanded: true,
+      defaultExpanded: Boolean(opsNotesValue),
     },
     {
-      label: "Application Reason",
+      label: "Application Reasons",
       value: item.requestReason?.trim() || "— no reason provided —",
       rows: 3 as const,
-      collapsible: false,
+      collapsible: true,
+      defaultExpanded: false,
+    },
+    {
+      label: "Head of Department notes",
+      value: item.supervisorNote?.trim() || "— no notes yet —",
+      rows: 3 as const,
+      collapsible: true,
+      defaultExpanded: false,
     },
   ];
 

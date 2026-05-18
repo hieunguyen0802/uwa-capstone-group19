@@ -16,7 +16,7 @@ export type HosWorkloadRow = {
   version?: string | null;
 };
 
-export type HosBreakdown = Record<string, Array<{ name: string; hours: number }>>;
+export type HosBreakdown = Record<string, Array<{ name: string; hours: number; displayOnly?: boolean }>>;
 
 export type HosWorkloadDetail = HosWorkloadRow & {
   applicationReason?: string;

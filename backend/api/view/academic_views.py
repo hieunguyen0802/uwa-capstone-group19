@@ -294,7 +294,8 @@ def academic_workload_detail(request, id):
         'studentId': report.staff.staff_number,
         'department': ops_detail.get('department'),
         'title': '',
-        'notes': _get_request_reason(report),
+        'opsNotes': report.notes,
+        'applicationReason': _get_request_reason(report),
         'hours': ops_detail.get('hours'),
         'academicYear': report.academic_year,
         'semester': report.semester,
@@ -333,9 +334,11 @@ def academic_workload_detail(request, id):
 def academic_confirm_workload(request, id):
     """POST /api/academic/workloads/{id}/confirm/  — no request body required."""
     report = get_object_or_404(_own_reports_qs(request.staff), report_id=id)
-    # Skip anomaly check when HoD has already reviewed and approved the report —
-    # the anomaly was examined during HoD review, so the academic may now confirm.
-    if report.status != 'APPROVED':
+    # Anomaly blocks self-confirm only when hod_review='yes' and HoD hasn't approved yet.
+    # hod_review='no' means HoD review is optional — the academic may confirm directly.
+    # HoD staff confirming their own workload also bypass this check.
+    hod_review_required = str(report.hod_review or '').strip().lower() == 'yes'
+    if report.status != 'APPROVED' and hod_review_required and not staff_has_role(request.staff, 'HOD'):
         anomaly_result = evaluate_mvp_anomaly(
             report,
             department_conflict=_is_department_conflict(report),
@@ -432,12 +435,16 @@ def academic_submit_workload_requests(request):
             status=status.HTTP_409_CONFLICT,
         )
 
+    # HoD submitting their own workload to HoS skips the self-confirm requirement.
     # Academic must confirm before submit — unless HoD review is required,
     # in which case the confirmation button is disabled on the frontend and
     # the academic submits directly to HoD without self-confirming.
+    is_hod_self_submit = staff_has_role(request.staff, 'HOD')
     unconfirmed = [
         str(r.report_id) for r in reports
-        if r.confirmation_status != 'CONFIRMED' and str(r.hod_review or '').strip().lower() != 'yes'
+        if not is_hod_self_submit
+        and r.confirmation_status != 'CONFIRMED'
+        and str(r.hod_review or '').strip().lower() != 'yes'
     ]
     if unconfirmed:
         return Response(
@@ -450,9 +457,10 @@ def academic_submit_workload_requests(request):
 
     # Re-evaluate anomaly on submit to prevent bypassing the confirm endpoint.
     # Skip anomaly block for hod_review=yes reports — the HoD will review them directly.
+    # Also skip for HoD self-submissions — the HoS reviews anomalies in that workflow.
     anomaly_map = {}
     for report in reports:
-        if str(report.hod_review or '').strip().lower() == 'yes':
+        if is_hod_self_submit or str(report.hod_review or '').strip().lower() == 'yes':
             continue
         anomaly_result = evaluate_mvp_anomaly(report, department_conflict=_is_department_conflict(report))
         if anomaly_result['is_anomaly']:
