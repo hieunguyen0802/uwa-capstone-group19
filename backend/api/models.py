@@ -437,6 +437,7 @@ class AuditLog(models.Model):
         ('IMPORTED', 'Imported from Excel'),
         ('MODIFIED_BY_REIMPORT', 'Modified by Re-import'),
         ('IMPORT_SKIP', 'Skipped by Re-import (protected)'),
+        ('DISTRIBUTED', 'Distributed to Academic'),
         ('APPROVE', 'Approved'),
         ('REJECT', 'Rejected'),
         ('CONFIRMATION', 'Confirmed by Academic'),

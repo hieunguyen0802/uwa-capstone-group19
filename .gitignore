@@ -4,6 +4,8 @@ __pycache__/
 *.pyc
 *.pyo
 *.pyd
+e2e/.pytest_cache/
+e2e/__pycache__/
 
 # Django
 db.sqlite3

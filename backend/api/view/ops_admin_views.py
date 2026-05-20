@@ -47,6 +47,7 @@ from api.services.workload_service import (
     evaluate_mvp_anomaly,
     report_total_hours,
     semester_sort_key,
+    staff_has_role,
     stale_report_response_payload,
     workload_item_counts_toward_total,
     workload_item_hours_for_totals,
@@ -72,6 +73,7 @@ OPS_CURRENT_YEAR_CONFIG_KEY = 'OPS_CURRENT_WORKLOAD_YEAR'
 OPS_CURRENT_SEMESTER_CONFIG_KEY = 'OPS_CURRENT_WORKLOAD_SEMESTER'
 OPS_CURRENT_YEAR_DESCRIPTION = 'Active School Ops workload cycle year shown by default in the workload management tab.'
 OPS_CURRENT_SEMESTER_DESCRIPTION = 'Active School Ops workload cycle semester shown by default in the workload management tab.'
+OPS_DISTRIBUTION_PROGRESS_TTL_SECONDS = 60 * 30
 
 
 class AdminImportThrottle(UserRateThrottle):
@@ -82,12 +84,63 @@ class AdminExportThrottle(UserRateThrottle):
     rate = '60/hour'
 
 
+def _distribution_progress_cache_key(progress_id):
+    return f'ops_distribution_progress:{progress_id}'
+
+
+def _set_distribution_progress(progress_id, payload):
+    if not progress_id:
+        return
+    cache.set(_distribution_progress_cache_key(progress_id), payload, OPS_DISTRIBUTION_PROGRESS_TTL_SECONDS)
+
+
+def _get_distribution_progress(progress_id):
+    if not progress_id:
+        return None
+    return cache.get(_distribution_progress_cache_key(progress_id))
+
+
 def _normalized_band(value):
-    return str(value or '').strip().lower()
+    text = str(value or '').strip().lower()
+    if 'research focused' in text:
+        return 'research focused'
+    if 'balanced' in text:
+        return 'balanced teaching & research'
+    if 'teaching focused' in text:
+        return 'teaching focused'
+    return text
 
 
 def _has_target_band_mismatch(target_band, calculated_band):
     return bool(target_band and calculated_band and _normalized_band(target_band) != _normalized_band(calculated_band))
+
+
+def _expected_range_for_band(band):
+    normalized = _normalized_band(band)
+    if normalized == 'research focused':
+        return '<= 20.0%'
+    if normalized == 'balanced teaching & research':
+        return '> 20.0% and <= 79.0%'
+    if normalized == 'teaching focused':
+        return '> 79.0% and <= 100.0%'
+    return 'unknown'
+
+
+def _format_ratio_percent(ratio):
+    try:
+        return f"{float(ratio) * 100:.1f}%"
+    except (TypeError, ValueError):
+        return 'N/A'
+
+
+def _contract_band_mismatch_message(staff_number, target_band, calculated_band, calculated_ratio):
+    expected = _expected_range_for_band(target_band)
+    actual = _format_ratio_percent(calculated_ratio)
+    return (
+        f'Staff {staff_number}: calculated T:R is {actual}, which maps to "{calculated_band}", '
+        f'but contract band is "{target_band}" (expected {expected}). '
+        'Please correct the workload components or contract band and re-import.'
+    )
 
 
 def _effective_hod_review(report, calculated_band=None):
@@ -114,12 +167,49 @@ def _ensure_media_subdir(segment: str) -> Path:
     return base
 
 
+def _ops_all_reports_qs(staff):
+    """
+    School Ops / HoS can inspect all workload rows, including staged imports and
+    historical superseded versions.
+    """
+    if not staff_has_role(staff, 'SCHOOL_OPS', 'HOS'):
+        return WorkloadReport.objects.none()
+    return WorkloadReport.objects.select_related(
+        'staff__user', 'staff__department', 'snapshot_department'
+    )
+
+
 def _admin_reports_qs(staff):
     """
     Ops/HoS can see every current report (no Hod visibility gate).
     This matches school-wide dashboards while keeping academic/Hod isolation intact.
     """
-    return get_workload_queryset(staff).filter(is_current=True)
+    return _ops_all_reports_qs(staff).filter(is_current=True)
+
+
+def _ops_staged_import_qs(staff):
+    """
+    Imported-but-not-yet-distributed workload rows.
+    These should remain visible to School Ops in Pending Distribution, but must not
+    replace the current Academic/HoD-visible workflow until distribution succeeds.
+    """
+    return _ops_all_reports_qs(staff).filter(
+        is_current=False,
+        distributed_at__isnull=True,
+        superseded_by__isnull=True,
+    )
+
+
+def _ops_visible_reports_qs(staff):
+    """
+    Rows visible in the School Ops workload table:
+    - current reports
+    - staged imports waiting for manual distribution
+    """
+    return _ops_all_reports_qs(staff).filter(
+        models.Q(is_current=True)
+        | models.Q(is_current=False, distributed_at__isnull=True, superseded_by__isnull=True)
+    )
 
 
 def _parse_semester_filter(request):
@@ -359,6 +449,21 @@ def _get_pending_assignee(report):
     return fallback_log.action_by if fallback_log else None
 
 
+def _is_distribution_failed(report):
+    """Return True when the latest distribution-related audit on this report is a failed attempt."""
+    latest_distribution_log = (
+        AuditLog.objects
+        .filter(report=report, action_type__in=['DISTRIBUTED', 'DISTRIBUTION_FAILED'])
+        .order_by('-created_at')
+        .first()
+    )
+    return bool(
+        latest_distribution_log
+        and latest_distribution_log.action_type == 'DISTRIBUTION_FAILED'
+        and report.distributed_at is None
+    )
+
+
 def _serialize_workload_row(report, items):
     """Serialize a WorkloadReport to the school-operations contract list shape."""
     staff_user = report.staff.user
@@ -388,6 +493,23 @@ def _serialize_workload_row(report, items):
     total_hours = round(_to_decimal_hours(items_hours) + research_hrs, 2)
     calculated_band = anomaly_result['metrics'].get('calculated_band')
 
+    is_staged_import = (
+        not report.is_current
+        and report.distributed_at is None
+        and report.superseded_by_id is None
+    )
+    overwrites_existing_workflow = (
+        report.supersedes.exists()
+        or WorkloadReport.objects.filter(
+            staff=report.staff,
+            academic_year=report.academic_year,
+            semester=report.semester,
+            is_current=True,
+        )
+        .exclude(report_id=report.report_id)
+        .exists()
+    )
+
     return {
         'id': str(report.report_id),
         'studentId': report.staff.staff_number,
@@ -411,7 +533,9 @@ def _serialize_workload_row(report, items):
         'assignedByStaffId': assigned_staff_number,
         'targetTeachingRatio': float(report.target_teaching_pct) if report.target_teaching_pct is not None else None,
         'teachingTargetHours': None,
-        'cancelled': False,
+        'cancelled': not report.is_current and not is_staged_import,
+        'distributionFailed': _is_distribution_failed(report),
+        'overwritesExistingWorkflow': overwrites_existing_workflow,
         'importedFromTemplate': report.import_batch_id is not None,
         'targetBand': report.target_band,
         'workloadNewStaff': report.new_staff,
@@ -421,6 +545,34 @@ def _serialize_workload_row(report, items):
         'distributedTime': _get_distributed_time(report),
         'createdAt': report.created_at.isoformat(),
     }
+
+
+def _send_distribution_notification(report, sender_staff, operated_by: str, *, redistributed: bool = False):
+    """Send the in-app message + email used after workload distribution."""
+    try:
+        from api.models import Message
+
+        action_phrase = 're-distributed' if redistributed else 'distributed'
+        notification_body = (
+            f'Your workload for {report.academic_year} {report.semester} '
+            f'has been {action_phrase} by {operated_by}.'
+        )
+        Message.objects.create(
+            thread_key=f'{report.staff.staff_number}:admin',
+            sender=sender_staff,
+            body=notification_body,
+        )
+        recipient_email = report.staff.user.email
+        if recipient_email:
+            send_mail(
+                subject=f'Workload {"Re-distributed" if redistributed else "Distributed"} — {report.academic_year} {report.semester}',
+                message=notification_body,
+                from_email=None,
+                recipient_list=[recipient_email],
+                fail_silently=True,
+            )
+    except Exception:
+        pass
 
 
 def _serialize_workload_detail(report, items):
@@ -468,8 +620,6 @@ def _serialize_workload_detail(report, items):
     # Backend-computed visual indicator flags (frontend only displays, never computes)
     teaching_ratio_out_of_range = calc_tr < 0 or calc_tr > 1
     band_mismatch = _has_target_band_mismatch(target_band, calculated_band)
-    hours_out_of_range = (total_with_research <= 856 * fte or total_with_research > 864 * fte) if fte > 0 else False
-
     return {
         'id': str(report.report_id),
         'studentId': report.staff.staff_number,
@@ -492,7 +642,7 @@ def _serialize_workload_detail(report, items):
         'validation': {
             'teachingRatioOutOfRange': teaching_ratio_out_of_range,
             'bandMismatch': band_mismatch,
-            'hoursOutOfRange': hours_out_of_range,
+            'hoursOutOfRange': False,
             'expectedMinHours': round(856 * fte, 2),
             'expectedMaxHours': round(864 * fte, 2),
             'failedReasons': failed_reasons,
@@ -624,11 +774,22 @@ def _staff_from_body_or_path(request, lookup_id: str):
 def admin_workload_requests(request):
     """GET /api/school-operations/workloads  (also /api/admin/workload-requests/)"""
     cycle = _resolve_ops_period(request, request.staff)
-    base_qs = _admin_reports_qs(request.staff).prefetch_related('items').select_related(
+    current_qs = _admin_reports_qs(request.staff).prefetch_related('items').select_related(
         'staff__user', 'staff__department', 'snapshot_department'
     )
+    staged_qs = _ops_staged_import_qs(request.staff).prefetch_related('items').select_related(
+        'staff__user', 'staff__department', 'snapshot_department'
+    )
+    base_qs = _ops_all_reports_qs(request.staff).prefetch_related('items').select_related(
+        'staff__user', 'staff__department', 'snapshot_department'
+    )
+
+    current_qs = current_qs.filter(academic_year=cycle['effective_year'])
+    staged_qs = staged_qs.filter(academic_year=cycle['effective_year'])
     base_qs = base_qs.filter(academic_year=cycle['effective_year'])
     if cycle['effective_semester']:
+        current_qs = current_qs.filter(semester=cycle['effective_semester'])
+        staged_qs = staged_qs.filter(semester=cycle['effective_semester'])
         base_qs = base_qs.filter(semester=cycle['effective_semester'])
 
     qs = base_qs
@@ -636,19 +797,24 @@ def admin_workload_requests(request):
     # New contract uses status_filter; legacy used status — accept both.
     status_filter = (request.GET.get('status_filter') or request.GET.get('status') or 'all').lower()
     if status_filter == 'pending':
-        qs = qs.filter(status='PENDING')
+        qs = current_qs.filter(status='PENDING')
     elif status_filter == 'distributed':
-        qs = qs.filter(distributed_at__isnull=False)
+        qs = current_qs.filter(distributed_at__isnull=False)
     elif status_filter == 'failed':
-        qs = qs.filter(status='REJECTED')
+        qs = current_qs.filter(status='REJECTED')
     elif status_filter == 'superseded':
-        # superseded = non-current; override base_qs which already filters is_current=True
-        qs = get_workload_queryset(request.staff).filter(is_current=False).prefetch_related('items').select_related(
+        # superseded = archived historical rows, excluding staged imports that are waiting
+        # for distribution and therefore are not history yet.
+        qs = _ops_all_reports_qs(request.staff).filter(is_current=False).exclude(
+            distributed_at__isnull=True,
+            superseded_by__isnull=True,
+        ).prefetch_related('items').select_related(
             'staff__user', 'staff__department', 'snapshot_department'
         )
     elif status_filter == 'initial':
-        # Pending Distribution = INITIAL status AND not yet distributed
-        qs = qs.filter(status='INITIAL', distributed_at__isnull=True)
+        # Pending Distribution = INITIAL status AND not yet distributed, including
+        # staged imports that have not replaced the current workflow yet.
+        qs = base_qs.filter(status='INITIAL', distributed_at__isnull=True)
     # 'all' → no additional filter
 
     # New contract query params
@@ -670,10 +836,13 @@ def admin_workload_requests(request):
     qs = qs.order_by('created_at')
 
     counts = {
-        'pending': base_qs.filter(status='PENDING').count(),
-        'distributed': base_qs.filter(distributed_at__isnull=False).count(),
-        'failed': base_qs.filter(status='REJECTED').count(),
-        'superseded': get_workload_queryset(request.staff).filter(is_current=False).count(),
+        'pending': current_qs.filter(status='PENDING').count(),
+        'distributed': current_qs.filter(distributed_at__isnull=False).count(),
+        'failed': current_qs.filter(status='REJECTED').count(),
+        'superseded': _ops_all_reports_qs(request.staff).filter(is_current=False).exclude(
+            distributed_at__isnull=True,
+            superseded_by__isnull=True,
+        ).count(),
     }
 
     try:
@@ -720,9 +889,8 @@ def admin_workload_requests(request):
 def admin_workload_request_detail(request, id):
     """GET /api/school-operations/workloads/{id}  (also /api/admin/workload-requests/{id}/)"""
     qs = (
-        _admin_reports_qs(request.staff)
+        _ops_all_reports_qs(request.staff)
         .prefetch_related('items')
-        .select_related('staff__user', 'staff__department', 'snapshot_department')
     )
     report = get_object_or_404(qs, report_id=id)
     items = list(report.items.all())
@@ -738,14 +906,28 @@ def admin_workload_request_detail(request, id):
 @permission_classes([IsAuthenticated, CanAccessSchoolOpsApi])
 def admin_workload_history(request, id):
     """GET /api/school-operations/workloads/{id}/history"""
-    qs = _admin_reports_qs(request.staff)
+    qs = _ops_all_reports_qs(request.staff)
     report = get_object_or_404(qs, report_id=id)
+
+    chain_ids = {report.report_id}
+    frontier = {report.report_id}
+    for _ in range(50):
+        predecessors = set(
+            WorkloadReport.objects
+            .filter(superseded_by_id__in=frontier)
+            .exclude(report_id__in=chain_ids)
+            .values_list('report_id', flat=True)
+        )
+        if not predecessors:
+            break
+        chain_ids |= predecessors
+        frontier = predecessors
 
     logs = (
         AuditLog.objects
-        .filter(report=report)
+        .filter(report_id__in=chain_ids)
         .select_related('action_by__user')
-        .order_by('created_at')
+        .order_by('-created_at')
     )
 
     _ACTION_LABEL = {
@@ -760,6 +942,82 @@ def admin_workload_history(request, id):
         'CONTACT_STAFF': 'Contacted staff',
     }
 
+    def _status_label(value):
+        normalized = str(value or '').strip().upper()
+        return {
+            'INITIAL': 'Initial',
+            'PENDING': 'Pending',
+            'APPROVED': 'Approved',
+            'REJECTED': 'Rejected',
+        }.get(normalized, str(value or '').strip())
+
+    def _confirmation_label(value):
+        normalized = str(value or '').strip().upper()
+        return {
+            'UNCONFIRMED': 'Unconfirmed',
+            'CONFIRMED': 'Confirmed',
+        }.get(normalized, str(value or '').strip())
+
+    def _format_history_value(value):
+        if value is None:
+            return ''
+        return str(value)
+
+    def _synthetic_diffs(log, changes, ts):
+        action_type = log.action_type
+        if action_type == 'APPROVE':
+            return [{'field': 'Status', 'before': 'Pending', 'after': 'Approved'}]
+        if action_type == 'REJECT':
+            return [{'field': 'Status', 'before': 'Pending', 'after': 'Rejected'}]
+        if action_type == 'CONFIRMATION':
+            return [{'field': 'Confirmation', 'before': 'Unconfirmed', 'after': 'Confirmed'}]
+        if action_type == 'DISTRIBUTED':
+            diffs = [{'field': 'Distribution', 'before': 'Not distributed', 'after': 'Distributed'}]
+            distributed_by = changes.get('distributed_by') or ''
+            distributed_at = changes.get('distributed_at') or ts
+            if distributed_by:
+                diffs.append({'field': 'Distributed By', 'before': '', 'after': _format_history_value(distributed_by)})
+            if distributed_at:
+                diffs.append({'field': 'Distributed Time', 'before': '', 'after': _format_history_value(distributed_at)})
+            return diffs
+        if action_type == 'IMPORTED':
+            return [{'field': 'Status', 'before': '', 'after': 'Initial'}]
+        if action_type == 'MODIFIED_BY_REIMPORT':
+            after_label = 'Superseded by re-distribution' if str(changes.get('action') or '').strip().lower() == 'redistribute' else 'Superseded by re-import'
+            return [{'field': 'Record Version', 'before': 'Current', 'after': after_label}]
+        if action_type == 'COMMENT' and str(changes.get('status') or '').strip().lower() == 'pending':
+            return [{'field': 'Status', 'before': '', 'after': 'Pending'}]
+
+        before_map = changes.get('before') if isinstance(changes.get('before'), dict) else None
+        after_map = changes.get('after') if isinstance(changes.get('after'), dict) else None
+        if before_map and after_map:
+            synthetic = []
+            all_keys = sorted(set(before_map.keys()) | set(after_map.keys()))
+            for key in all_keys:
+                before_value = before_map.get(key, '')
+                after_value = after_map.get(key, '')
+                if str(before_value) == str(after_value):
+                    continue
+                label = {
+                    'status': 'Status',
+                    'confirmation_status': 'Confirmation',
+                    'confirmation': 'Confirmation',
+                }.get(key, key.replace('_', ' ').title())
+                if key == 'status':
+                    before_value = _status_label(before_value)
+                    after_value = _status_label(after_value)
+                elif key in {'confirmation_status', 'confirmation'}:
+                    before_value = _confirmation_label(before_value)
+                    after_value = _confirmation_label(after_value)
+                synthetic.append({
+                    'field': label,
+                    'before': _format_history_value(before_value),
+                    'after': _format_history_value(after_value),
+                })
+            if synthetic:
+                return synthetic
+        return []
+
     entries = []
     for log in logs:
         actor = log.action_by
@@ -767,16 +1025,21 @@ def admin_workload_history(request, id):
             actor.user.get_full_name().strip() or actor.user.username
             if actor and actor.user else 'System'
         )
-        action_label = _ACTION_LABEL.get(log.action_type, log.action_type)
         changes = log.changes or {}
+        action_label = _ACTION_LABEL.get(log.action_type, log.action_type)
+        if log.action_type == 'MODIFIED_BY_REIMPORT' and str(changes.get('action') or '').strip().lower() == 'redistribute':
+            action_label = 'Re-distributed'
+        if log.action_type == 'COMMENT' and str(changes.get('status') or '').strip().lower() == 'pending':
+            action_label = 'Approval request submitted'
         diffs = changes.get('diffs') or []
         ts = log.created_at.strftime('%Y-%m-%d %H:%M')
+        rendered_diffs = diffs or _synthetic_diffs(log, changes, ts)
 
-        if diffs:
-            for d in diffs:
+        if rendered_diffs:
+            for idx, d in enumerate(rendered_diffs):
                 entries.append({
-                    'changeId': f"{log.id}-{d.get('field', '')}",
-                    'reportId': str(report.report_id),
+                    'changeId': f"{log.log_id}-{idx}",
+                    'reportId': str(log.report_id or report.report_id),
                     'action': action_label,
                     'fieldName': d.get('field', ''),
                     'oldValue': d.get('before', ''),
@@ -787,8 +1050,8 @@ def admin_workload_history(request, id):
                 })
         else:
             entries.append({
-                'changeId': str(log.id),
-                'reportId': str(report.report_id),
+                'changeId': str(log.log_id),
+                'reportId': str(log.report_id or report.report_id),
                 'action': action_label,
                 'fieldName': '',
                 'oldValue': '',
@@ -965,6 +1228,7 @@ def admin_distribute_workloads(request):
     # Permission is enforced by the DRF permission class above.
 
     workload_ids = request.data.get('workloadIds') or []
+    progress_id = str(request.data.get('progressId') or '').strip()
     year = request.data.get('academicYear') or request.data.get('year')
     semester = (request.data.get('semester') or '').strip().upper()
 
@@ -1003,7 +1267,7 @@ def admin_distribute_workloads(request):
     # ── Check 2: all workloads must exist and be visible to this user ──────────
     # select_for_update() prevents concurrent distribute calls from double-distributing
     # the same workload when the user clicks Confirm multiple times.
-    qs = _admin_reports_qs(request.staff).select_related(
+    qs = _ops_visible_reports_qs(request.staff).select_related(
         'staff__user', 'staff__department', 'snapshot_department'
     ).prefetch_related('items').select_for_update()
     reports = list(qs.filter(report_id__in=workload_ids))
@@ -1020,159 +1284,209 @@ def admin_distribute_workloads(request):
 
     succeeded = []
     failed = []
+    total_count = len(reports)
+
+    _set_distribution_progress(progress_id, {
+        'progressId': progress_id,
+        'totalCount': total_count,
+        'processedCount': 0,
+        'successCount': 0,
+        'failedCount': 0,
+        'status': 'running',
+    })
+
+    def update_progress():
+        processed_count = len(succeeded) + len(failed)
+        status = 'running'
+        if processed_count >= total_count:
+            if failed and succeeded:
+                status = 'partial_failed'
+            elif failed:
+                status = 'failed'
+            else:
+                status = 'completed'
+        _set_distribution_progress(progress_id, {
+            'progressId': progress_id,
+            'totalCount': total_count,
+            'processedCount': processed_count,
+            'successCount': len(succeeded),
+            'failedCount': len(failed),
+            'status': status,
+        })
 
     for report in reports:
         try:
-            if report.academic_year != year_int or report.semester != semester:
-                failed.append({
-                    'workloadId': str(report.report_id),
-                    'staffId': report.staff.staff_number,
-                    'name': report.staff.user.get_full_name(),
-                    'error': (
-                        f'Workload period is {report.academic_year}-{report.semester}, '
-                        f'but the selected cycle is {year_int}-{semester}'
-                    ),
-                    'errorCode': 'PERIOD_MISMATCH',
-                })
-                continue
+            with transaction.atomic():
+                if report.academic_year != year_int or report.semester != semester:
+                    failed.append({
+                        'workloadId': str(report.report_id),
+                        'staffId': report.staff.staff_number,
+                        'name': report.staff.user.get_full_name(),
+                        'error': (
+                            f'Workload period is {report.academic_year}-{report.semester}, '
+                            f'but the selected cycle is {year_int}-{semester}'
+                        ),
+                        'errorCode': 'PERIOD_MISMATCH',
+                    })
+                    continue
 
-            # ── Check 3: must be Pending Distribution (INITIAL, not yet distributed) ─
-            if report.status != 'INITIAL':
-                failed.append({
-                    'workloadId': str(report.report_id),
-                    'staffId': report.staff.staff_number,
-                    'name': report.staff.user.get_full_name(),
-                    'error': f'Workload is not in Pending Distribution state (current: {report.status})',
-                    'errorCode': 'NOT_PENDING',
-                })
-                continue
+                # ── Check 3: must be Pending Distribution (INITIAL, not yet distributed) ─
+                if report.status != 'INITIAL':
+                    failed.append({
+                        'workloadId': str(report.report_id),
+                        'staffId': report.staff.staff_number,
+                        'name': report.staff.user.get_full_name(),
+                        'error': f'Workload is not in Pending Distribution state (current: {report.status})',
+                        'errorCode': 'NOT_PENDING',
+                    })
+                    continue
 
-            if report.distributed_at is not None:
-                failed.append({
-                    'workloadId': str(report.report_id),
-                    'staffId': report.staff.staff_number,
-                    'name': report.staff.user.get_full_name(),
-                    'error': 'Workload has already been distributed',
-                    'errorCode': 'ALREADY_DISTRIBUTED',
-                })
-                continue
+                if report.distributed_at is not None:
+                    failed.append({
+                        'workloadId': str(report.report_id),
+                        'staffId': report.staff.staff_number,
+                        'name': report.staff.user.get_full_name(),
+                        'error': 'Workload has already been distributed',
+                        'errorCode': 'ALREADY_DISTRIBUTED',
+                    })
+                    continue
 
-            # ── Check 4: staff must be active ──────────────────────────────────
-            if not report.staff.is_active:
-                failed.append({
-                    'workloadId': str(report.report_id),
-                    'staffId': report.staff.staff_number,
-                    'name': report.staff.user.get_full_name(),
-                    'error': 'Staff member is not active',
-                    'errorCode': 'STAFF_INACTIVE',
-                })
-                continue
-
-            # ── Check 5: required fields must be present ────────────────────────
-            if not (report.academic_year and report.semester and
-                    report.snapshot_fte is not None and report.snapshot_department_id):
-                failed.append({
-                    'workloadId': str(report.report_id),
-                    'staffId': report.staff.staff_number,
-                    'name': report.staff.user.get_full_name(),
-                    'error': 'Workload is missing required fields (year, semester, FTE, or department)',
-                    'errorCode': 'MISSING_FIELDS',
-                })
-                continue
-
-            # ── Check 6: total work hours must be within valid range ────────────
-            items = list(report.items.all())
-            anomaly_result = evaluate_mvp_anomaly(report)
-            research_hrs = float(anomaly_result['metrics']['research_pts']) * 17.25
-            items_hours = float(sum((workload_item_hours_for_totals(i) for i in items), Decimal('0.00')))
-            total_hours = round(items_hours + research_hrs, 2)
-            fte = float(report.snapshot_fte)
-            if fte > 0 and (total_hours <= 856 * fte or total_hours > 864 * fte):
-                failed.append({
-                    'workloadId': str(report.report_id),
-                    'staffId': report.staff.staff_number,
-                    'name': report.staff.user.get_full_name(),
-                    'error': (
-                        f'Total work hours ({total_hours}h) is outside the valid range '
-                        f'({856 * fte:.2f}h – {864 * fte:.2f}h)'
-                    ),
-                    'errorCode': 'HOURS_OUT_OF_RANGE',
-                })
-                continue
-
-            # ── Check 7: record distribution timestamp, do NOT change status ──
-            # Status (INITIAL→PENDING→APPROVED/REJECTED) belongs to the
-            # academic→HoD workflow.  Distribution is a separate event tracked
-            # via distributed_at so the workflow status is never contaminated.
-            previous_assigned_by = report.assigned_by
-            report.distributed_at = now
-            report.assigned_by = request.staff
-            report.save(update_fields=['distributed_at', 'assigned_by', 'updated_at'])
-
-            academic_visible = WorkloadReport.objects.filter(
-                report_id=report.report_id,
-                staff=report.staff,
-                is_current=True,
-                distributed_at__isnull=False,
-            ).exists()
-            if not academic_visible:
-                report.distributed_at = None
-                report.assigned_by = previous_assigned_by
-                report.save(update_fields=['distributed_at', 'assigned_by', 'updated_at'])
-                failed.append({
-                    'workloadId': str(report.report_id),
-                    'staffId': report.staff.staff_number,
-                    'name': report.staff.user.get_full_name(),
-                    'error': 'Distribution did not create an Academic-visible workload record',
-                    'errorCode': 'ACADEMIC_VISIBILITY_FAILED',
-                })
-                continue
-            AuditLog.objects.create(
-                report=report,
-                action_by=request.staff,
-                action_type='DISTRIBUTED',
-                changes={
-                    'action': 'distribute',
-                    'distributed_by': operated_by,
-                    'distributed_at': now.isoformat(),
-                },
-            )
-
-            # ── Check 8: send in-app message + email notification (non-fatal) ──
-            try:
-                from api.models import Message
-                notification_body = (
-                    f'Your workload for {report.academic_year} {report.semester} '
-                    f'has been distributed by {operated_by}.'
-                )
-                Message.objects.create(
-                    thread_key=f'{report.staff.staff_number}:admin',
-                    sender=request.staff,
-                    body=notification_body,
-                )
-                recipient_email = report.staff.user.email
-                if recipient_email:
-                    send_mail(
-                        subject=f'Workload Distributed — {report.academic_year} {report.semester}',
-                        message=notification_body,
-                        from_email=None,
-                        recipient_list=[recipient_email],
-                        fail_silently=True,
+                # ── Check 4: staff must be active ──────────────────────────────────
+                if not report.staff.is_active:
+                    AuditLog.objects.create(
+                        report=report,
+                        action_by=request.staff,
+                        action_type='DISTRIBUTION_FAILED',
+                        changes={
+                            'error': 'Staff member is not active',
+                            'errorCode': 'STAFF_INACTIVE',
+                            'distributed_by': operated_by,
+                            'attempted_at': now.isoformat(),
+                        },
                     )
-            except Exception:
-                pass
+                    failed.append({
+                        'workloadId': str(report.report_id),
+                        'staffId': report.staff.staff_number,
+                        'name': report.staff.user.get_full_name(),
+                        'error': 'Staff member is not active',
+                        'errorCode': 'STAFF_INACTIVE',
+                    })
+                    continue
 
-            succeeded.append({
-                'workloadId': str(report.report_id),
-                'staffId': report.staff.staff_number,
-                'name': report.staff.user.get_full_name(),
-                'status': 'approved',
-                'distributedTime': now_str,
-                'operatedBy': operated_by,
-            })
+                # ── Check 5: required fields must be present ────────────────────────
+                if not (report.academic_year and report.semester and
+                        report.snapshot_fte is not None and report.snapshot_department_id):
+                    failed.append({
+                        'workloadId': str(report.report_id),
+                        'staffId': report.staff.staff_number,
+                        'name': report.staff.user.get_full_name(),
+                        'error': 'Workload is missing required fields (year, semester, FTE, or department)',
+                        'errorCode': 'MISSING_FIELDS',
+                    })
+                    continue
+
+                previous_assigned_by = report.assigned_by
+                previous_is_current = report.is_current
+                replaced_reports = list(
+                    WorkloadReport.objects.select_for_update().filter(
+                        staff=report.staff,
+                        academic_year=report.academic_year,
+                        semester=report.semester,
+                        is_current=True,
+                    ).exclude(report_id=report.report_id)
+                )
+
+                # ── Check 7: activate this staged import and record distribution ──
+                # Status (INITIAL→PENDING→APPROVED/REJECTED) belongs to the
+                # academic→HoD workflow. Distribution is a separate event tracked
+                # via distributed_at so the workflow status is never contaminated.
+                report.is_current = True
+                report.distributed_at = now
+                report.assigned_by = request.staff
+                report.save(update_fields=['is_current', 'distributed_at', 'assigned_by', 'updated_at'])
+
+                academic_visible = WorkloadReport.objects.filter(
+                    report_id=report.report_id,
+                    staff=report.staff,
+                    is_current=True,
+                    distributed_at__isnull=False,
+                ).exists()
+                if not academic_visible:
+                    report.is_current = previous_is_current
+                    report.distributed_at = None
+                    report.assigned_by = previous_assigned_by
+                    report.save(update_fields=['is_current', 'distributed_at', 'assigned_by', 'updated_at'])
+                    AuditLog.objects.create(
+                        report=report,
+                        action_by=request.staff,
+                        action_type='DISTRIBUTION_FAILED',
+                        changes={
+                            'error': 'Distribution did not create an Academic-visible workload record',
+                            'errorCode': 'ACADEMIC_VISIBILITY_FAILED',
+                            'distributed_by': operated_by,
+                            'attempted_at': now.isoformat(),
+                        },
+                    )
+                    failed.append({
+                        'workloadId': str(report.report_id),
+                        'staffId': report.staff.staff_number,
+                        'name': report.staff.user.get_full_name(),
+                        'error': 'Distribution did not create an Academic-visible workload record',
+                        'errorCode': 'ACADEMIC_VISIBILITY_FAILED',
+                    })
+                    continue
+
+                for old in replaced_reports:
+                    old.is_current = False
+                    old.superseded_by = report
+                    old.save(update_fields=['is_current', 'superseded_by', 'updated_at'])
+                    AuditLog.objects.create(
+                        report=old,
+                        action_by=request.staff,
+                        action_type='MODIFIED_BY_REIMPORT',
+                        changes={
+                            'superseded_by': str(report.report_id),
+                            'batch': str(report.import_batch_id) if report.import_batch_id else '',
+                        },
+                    )
+
+                AuditLog.objects.create(
+                    report=report,
+                    action_by=request.staff,
+                    action_type='DISTRIBUTED',
+                    changes={
+                        'action': 'distribute',
+                        'distributed_by': operated_by,
+                        'distributed_at': now.isoformat(),
+                        'replaced': [str(old.report_id) for old in replaced_reports],
+                    },
+                )
+
+                # ── Check 8: send in-app message + email notification (non-fatal) ──
+                _send_distribution_notification(report, request.staff, operated_by)
+
+                succeeded.append({
+                    'workloadId': str(report.report_id),
+                    'staffId': report.staff.staff_number,
+                    'name': report.staff.user.get_full_name(),
+                    'status': 'approved',
+                    'distributedTime': now_str,
+                    'operatedBy': operated_by,
+                })
 
         except Exception as exc:
             # ── Check 9: unknown error fallback ────────────────────────────────
+            AuditLog.objects.create(
+                report=report,
+                action_by=request.staff,
+                action_type='DISTRIBUTION_FAILED',
+                changes={
+                    'error': f'Unexpected error: {exc}',
+                    'errorCode': 'UNKNOWN_ERROR',
+                    'distributed_by': operated_by if 'operated_by' in locals() else '',
+                    'attempted_at': now.isoformat() if 'now' in locals() else timezone.now().isoformat(),
+                },
+            )
             failed.append({
                 'workloadId': str(report.report_id),
                 'staffId': report.staff.staff_number,
@@ -1180,6 +1494,8 @@ def admin_distribute_workloads(request):
                 'error': f'Unexpected error: {exc}',
                 'errorCode': 'UNKNOWN_ERROR',
             })
+        finally:
+            update_progress()
 
     cycle_advanced = False
     if succeeded:
@@ -1219,6 +1535,227 @@ def admin_distribute_workloads(request):
             'cycleAdvanced': cycle_advanced,
         },
     }, status=http_status.HTTP_201_CREATED)
+
+
+@api_view(['GET'])
+@permission_classes([IsAuthenticated, CanAccessSchoolOpsApi])
+def admin_distribution_progress(request, progress_id):
+    payload = _get_distribution_progress(progress_id)
+    if not payload:
+        return Response(
+            {'success': False, 'message': 'Distribution progress was not found or has expired.'},
+            status=http_status.HTTP_404_NOT_FOUND,
+        )
+    return Response({'success': True, 'data': payload})
+
+
+@api_view(['POST'])
+@permission_classes([IsAuthenticated, CanAccessSchoolOpsApi])
+@transaction.atomic
+def admin_redistribute_single_workload(request, id):
+    """POST /api/school-operations/workloads/{id}/redistribute"""
+    qs = (
+        _ops_visible_reports_qs(request.staff)
+        .select_related('staff__user', 'staff__department', 'snapshot_department')
+        .prefetch_related('items')
+        .select_for_update()
+    )
+    report = qs.filter(report_id=id).first()
+    if report is None:
+        stale = WorkloadReport.objects.filter(report_id=id, is_current=False).first()
+        if stale is not None:
+            return Response(stale_report_response_payload(), status=http_status.HTTP_409_CONFLICT)
+        return Response(
+            {'success': False, 'message': 'Report not found'},
+            status=http_status.HTTP_404_NOT_FOUND,
+        )
+
+    is_failed_retry = report.distributed_at is None and _is_distribution_failed(report)
+
+    if report.distributed_at is None and not is_failed_retry:
+        return Response(
+            {'success': False, 'message': 'Only distributed workloads can be re-distributed individually'},
+            status=http_status.HTTP_409_CONFLICT,
+        )
+
+    if not report.staff.is_active:
+        return Response(
+            {'success': False, 'message': 'Staff member is not active'},
+            status=http_status.HTTP_409_CONFLICT,
+        )
+
+    now = timezone.now()
+    operated_by = request.staff.user.get_full_name().strip() or request.staff.user.username
+
+    if is_failed_retry:
+        previous_assigned_by = report.assigned_by
+        previous_is_current = report.is_current
+        replaced_reports = list(
+            WorkloadReport.objects.select_for_update().filter(
+                staff=report.staff,
+                academic_year=report.academic_year,
+                semester=report.semester,
+                is_current=True,
+            ).exclude(report_id=report.report_id)
+        )
+
+        report.is_current = True
+        report.distributed_at = now
+        report.assigned_by = request.staff
+        report.save(update_fields=['is_current', 'distributed_at', 'assigned_by', 'updated_at'])
+
+        academic_visible = WorkloadReport.objects.filter(
+            report_id=report.report_id,
+            staff=report.staff,
+            is_current=True,
+            distributed_at__isnull=False,
+        ).exists()
+        if not academic_visible:
+            report.is_current = previous_is_current
+            report.distributed_at = None
+            report.assigned_by = previous_assigned_by
+            report.save(update_fields=['is_current', 'distributed_at', 'assigned_by', 'updated_at'])
+            AuditLog.objects.create(
+                report=report,
+                action_by=request.staff,
+                action_type='DISTRIBUTION_FAILED',
+                changes={
+                    'error': 'Distribution did not create an Academic-visible workload record',
+                    'errorCode': 'ACADEMIC_VISIBILITY_FAILED',
+                    'distributed_by': operated_by,
+                    'attempted_at': now.isoformat(),
+                    'retriedFailedWorkload': True,
+                },
+            )
+            return Response(
+                {'success': False, 'message': 'Distribution did not create an Academic-visible workload record'},
+                status=http_status.HTTP_409_CONFLICT,
+            )
+
+        for old in replaced_reports:
+            old.is_current = False
+            old.superseded_by = report
+            old.save(update_fields=['is_current', 'superseded_by', 'updated_at'])
+            AuditLog.objects.create(
+                report=old,
+                action_by=request.staff,
+                action_type='MODIFIED_BY_REIMPORT',
+                changes={
+                    'action': 'redistribute',
+                    'redistributed': True,
+                    'superseded_by': str(report.report_id),
+                },
+            )
+
+        AuditLog.objects.create(
+            report=report,
+            action_by=request.staff,
+            action_type='DISTRIBUTED',
+            changes={
+                'action': 'redistribute',
+                'redistributed': True,
+                'retriedFailedWorkload': True,
+                'distributed_by': operated_by,
+                'distributed_at': now.isoformat(),
+                'replaced': [str(old.report_id) for old in replaced_reports],
+            },
+        )
+
+        _send_distribution_notification(report, request.staff, operated_by, redistributed=True)
+
+        return Response({
+            'success': True,
+            'message': 'Workload re-distributed',
+            'data': {
+                'id': str(report.report_id),
+                'status': 'initial',
+                'confirmation': 'unconfirmed',
+                'distributedTime': now.isoformat(),
+                'operatedBy': operated_by,
+                'operatedByStaffId': request.staff.staff_number,
+                'assignedBy': operated_by,
+                'assignedByStaffId': request.staff.staff_number,
+                'requestReason': '',
+                'supervisorNote': '',
+            },
+        })
+
+    replacement = WorkloadReport.objects.create(
+        staff=report.staff,
+        academic_year=report.academic_year,
+        semester=report.semester,
+        snapshot_fte=report.snapshot_fte,
+        snapshot_department=report.snapshot_department,
+        status='INITIAL',
+        confirmation_status='UNCONFIRMED',
+        confirmation_at=None,
+        assigned_by=request.staff,
+        distributed_at=now,
+        target_band=report.target_band,
+        target_teaching_pct=report.target_teaching_pct,
+        notes=report.notes,
+        hod_review=report.hod_review,
+        new_staff=report.new_staff,
+        is_current=True,
+    )
+
+    WorkloadItem.objects.bulk_create([
+        WorkloadItem(
+            report=replacement,
+            category=item.category,
+            unit_code=item.unit_code,
+            description=item.description,
+            allocated_hours=item.allocated_hours,
+        )
+        for item in report.items.all()
+    ])
+
+    report.is_current = False
+    report.superseded_by = replacement
+    report.save(update_fields=['is_current', 'superseded_by', 'updated_at'])
+
+    AuditLog.objects.create(
+        report=report,
+        action_by=request.staff,
+        action_type='MODIFIED_BY_REIMPORT',
+        changes={
+            'action': 'redistribute',
+            'redistributed': True,
+            'superseded_by': str(replacement.report_id),
+        },
+    )
+
+    AuditLog.objects.create(
+        report=replacement,
+        action_by=request.staff,
+        action_type='DISTRIBUTED',
+        changes={
+            'action': 'redistribute',
+            'redistributed': True,
+            'distributed_by': operated_by,
+            'distributed_at': now.isoformat(),
+            'replaced': [str(report.report_id)],
+        },
+    )
+
+    _send_distribution_notification(replacement, request.staff, operated_by, redistributed=True)
+
+    return Response({
+        'success': True,
+        'message': 'Workload re-distributed',
+        'data': {
+            'id': str(replacement.report_id),
+            'status': 'initial',
+            'confirmation': 'unconfirmed',
+            'distributedTime': now.isoformat(),
+            'operatedBy': operated_by,
+            'operatedByStaffId': request.staff.staff_number,
+            'assignedBy': operated_by,
+            'assignedByStaffId': request.staff.staff_number,
+            'requestReason': '',
+            'supervisorNote': '',
+        },
+    })
 
 
 def _write_workbook(headers, rows):
@@ -1324,6 +1861,7 @@ def admin_workload_import(request):
     """
     body = request.data or {}
     sheets = body.get('sheets')
+    preview_only = bool(body.get('previewOnly'))
     if not isinstance(sheets, list) or not sheets:
         return Response(
             {'success': False, 'message': 'sheets must be a non-empty list'},
@@ -1367,6 +1905,7 @@ def admin_workload_import(request):
             sid = str(cells.get('C') or '').strip()
             if sid and sid not in row_meta_by_staff:
                 row_meta_by_staff[sid] = {
+                    'rowIndex': raw_row.get('rowIndex'),
                     'targetTeachingPct': cells.get('J'),
                     'hodReview': str(cells.get('F') or '').strip().lower(),
                     'newStaff': str(cells.get('D') or '').strip().lower(),
@@ -1393,18 +1932,6 @@ def admin_workload_import(request):
 
             try:
                 with transaction.atomic():
-                    # Block re-import if a non-INITIAL/REJECTED report already exists
-                    conflicts = WorkloadReport.objects.filter(
-                        staff=staff_row,
-                        academic_year=year_int,
-                        semester=semester,
-                        is_current=True,
-                    ).exclude(status__in=['INITIAL', 'REJECTED'])
-                    if conflicts.exists():
-                        failures.append({'staffId': staff_number, 'sheet': sheet_name, 'message': 'Report locked; rollback required'})
-                        failed_count += 1
-                        continue
-
                     orphan_reports = list(WorkloadReport.objects.select_for_update().filter(
                         staff=staff_row,
                         academic_year=year_int,
@@ -1419,6 +1946,24 @@ def admin_workload_import(request):
                     target_pct = rm.get('targetTeachingPct')
                     target_band_val = am.get('targetBand')
                     calculated_band_val = am.get('calculatedBand')
+                    calculated_tr_val = am.get('calculatedTeachingRatio')
+                    if _has_target_band_mismatch(target_band_val, calculated_band_val):
+                        failures.append({
+                            'staffId': staff_number,
+                            'sheet': sheet_name,
+                            'row': rm.get('rowIndex'),
+                            'column': 'I',
+                            'field': 'Contract Band',
+                            'errorType': 'Contract Band Mismatch',
+                            'message': _contract_band_mismatch_message(
+                                staff_number,
+                                target_band_val,
+                                calculated_band_val,
+                                calculated_tr_val,
+                            ),
+                        })
+                        failed_count += 1
+                        continue
                     try:
                         snapshot_fte = Decimal(str(fte_val)) if fte_val is not None else (staff_row.fte if hasattr(staff_row, 'fte') else Decimal('1.00'))
                     except Exception:
@@ -1435,6 +1980,13 @@ def admin_workload_import(request):
                     new_staff_val = str(rm.get('newStaff') or '').strip().lower() in ('yes', 'true', '1', 'y')
                     notes_val = str(rm.get('notes') or '').strip()
 
+                    if preview_only:
+                        if orphan_reports:
+                            updated_count += 1
+                        else:
+                            created_count += 1
+                        continue
+
                     # Always force INITIAL — import must never bypass the approval workflow.
                     report = WorkloadReport.objects.create(
                         staff=staff_row,
@@ -1445,7 +1997,7 @@ def admin_workload_import(request):
                         status='INITIAL',
                         assigned_by=request.staff,
                         import_batch_id=batch_id,
-                        is_current=True,
+                        is_current=False,
                         notes=notes_val,
                         target_band=str(target_band_val) if target_band_val else None,
                         target_teaching_pct=target_teaching_pct,
@@ -1453,23 +2005,13 @@ def admin_workload_import(request):
                         new_staff=new_staff_val,
                     )
 
-                    for old in orphan_reports:
-                        old.is_current = False
-                        old.superseded_by = report
-                        old.save(update_fields=['is_current', 'superseded_by', 'updated_at'])
-                        AuditLog.objects.create(
-                            report=old,
-                            action_by=request.staff,
-                            action_type='MODIFIED_BY_REIMPORT',
-                            changes={'superseded_by': str(report.report_id), 'batch': str(batch_id)},
-                        )
-
                     AuditLog.objects.create(
                         report=report,
                         action_by=request.staff,
                         action_type='IMPORTED',
                         changes={'batch': str(batch_id), 'kind': 'JSON_WORKLOAD_IMPORT',
-                                 'superseded': [str(r.report_id) for r in orphan_reports]},
+                                 'superseded': [str(r.report_id) for r in orphan_reports],
+                                 'staged': True},
                     )
 
                     # Create WorkloadItems from the parsed sheet data
@@ -1576,6 +2118,7 @@ def admin_workload_import(request):
 
     return Response({
         'ok': True,
+        'previewOnly': preview_only,
         'referenceId': str(batch_id),
         'created': created_count,
         'updated': updated_count,

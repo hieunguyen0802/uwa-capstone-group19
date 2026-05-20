@@ -1168,7 +1168,7 @@ export default function HeadofSchool() {
               onClick={(e) => e.stopPropagation()}
             >
               <div className="-mx-6 -mt-6 mb-4 flex items-center justify-between rounded-t-2xl bg-[#2f4d9c] px-6 py-4 text-white">
-                <div className="text-2xl font-semibold">Semester Distribution Reports</div>
+                <div className="text-2xl font-semibold">Semester Reports</div>
                 <button
                   type="button"
                   aria-label="Close report inbox"

@@ -3,11 +3,8 @@ import { useNavigate } from "react-router-dom";
 import { useAuth } from "../auth/AuthContext";
 
 /**
- * Role landing — only HOD sees a chooser (HoD pages vs personal Academic
- * page). Every other role is forwarded directly to its single home page.
- *
- * Routing rules driven by `profile.role` (DB authority), not by guessing
- * from the menu array — menu is for permission-gated rendering elsewhere.
+ * Task landing — HOD users can choose between their department review work and
+ * their own workload. Other roles are forwarded directly to their single home.
  */
 
 const HOME_ROUTE_BY_ROLE: Record<string, string> = {
@@ -20,18 +17,22 @@ const HOME_ROUTE_BY_ROLE: Record<string, string> = {
 const HOD_CHOICES = [
   {
     key: "department-head",
-    label: "Head of Department",
-    subtitle: "Manage and review departmental workloads",
+    eyebrow: "Department work",
+    label: "Review Department Workloads",
+    subtitle: "Check staff submissions, adjust workload details, and record approval decisions.",
     color: "bg-[#2f4d9c]",
-    icon: "HoD",
+    accent: "border-[#2f4d9c]",
+    badge: "01",
     route: "/department-head",
   },
   {
     key: "academic",
-    label: "Academic",
-    subtitle: "Submit and review your own workload",
+    eyebrow: "My workload",
+    label: "Review My Workload",
+    subtitle: "Open your own workload, submit a request, and confirm final changes.",
     color: "bg-[#9a8538]",
-    icon: "AC",
+    accent: "border-[#9a8538]",
+    badge: "02",
     route: "/workload-platform",
   },
 ];
@@ -65,39 +66,57 @@ export default function Role() {
     return null;
   }
 
+  const displayName = profile.full_name || profile.email;
+  const department = profile.department || "Department not assigned";
+
   return (
-    <div className="min-h-screen bg-[#eef3ff] px-6 py-20">
-      <div className="mx-auto flex min-h-[calc(100vh-10rem)] w-full max-w-6xl items-start rounded-md bg-[#f7f9fc] px-8 py-16 shadow-sm">
+    <div className="min-h-screen bg-[#eef3ff] px-6 py-16">
+      <div className="mx-auto flex min-h-[calc(100vh-8rem)] w-full max-w-6xl items-start rounded-md bg-[#f7f9fc] px-8 py-14 shadow-sm">
         <div className="w-full">
-          <div className="mt-8 text-center">
+          <div className="text-center">
             <h1 className="text-5xl font-semibold text-[#2f4d9c] [text-shadow:0_2px_2px_rgba(47,77,156,0.2)]">
               Workload Verification System
             </h1>
-            <h2 className="mt-10 text-4xl font-semibold text-[#2f4d9c]">
-              Choose your role
+            <h2 className="mt-9 text-4xl font-semibold text-[#2f4d9c]">
+              Welcome, {displayName}
             </h2>
-            <p className="mt-2 text-base text-slate-500">
-              Signed in as {profile.full_name || profile.email}
+            <div className="mt-4 flex flex-wrap items-center justify-center gap-3">
+              <span className="rounded bg-[#2f4d9c] px-3 py-1 text-xs font-bold text-white">
+                Department
+              </span>
+              <span className="rounded border border-slate-300 bg-white px-4 py-1.5 text-sm font-semibold text-slate-600">
+                {department}
+              </span>
+            </div>
+            <p className="mt-5 text-base text-slate-500">
+              Choose what you want to work on today.
             </p>
           </div>
 
-          <div className="mx-auto mt-14 grid max-w-3xl grid-cols-1 gap-16 md:grid-cols-2">
+          <div className="mx-auto mt-12 grid max-w-4xl grid-cols-1 gap-10 md:grid-cols-2">
             {HOD_CHOICES.map((card) => (
               <button
                 key={card.key}
                 type="button"
                 onClick={() => navigate(card.route)}
-                className={`${card.color} mx-auto flex min-h-[300px] w-full max-w-[280px] flex-col items-center justify-center rounded-lg px-6 py-8 text-white shadow-md transition hover:scale-[1.01]`}
+                className={`mx-auto flex min-h-[280px] w-full max-w-[340px] flex-col rounded-md border-2 ${card.accent} bg-white p-0 text-left shadow-md transition hover:-translate-y-0.5 hover:shadow-lg`}
               >
-                <div className="mb-5 flex h-24 w-24 items-center justify-center rounded-full bg-white text-3xl font-bold text-slate-700">
-                  {card.icon}
+                <div className={`${card.color} flex items-center justify-between rounded-t-[3px] px-6 py-4 text-white`}>
+                  <span className="text-sm font-bold uppercase">
+                    {card.eyebrow}
+                  </span>
+                  <span className="flex h-10 w-10 items-center justify-center rounded-full bg-white text-sm font-bold text-slate-700">
+                    {card.badge}
+                  </span>
                 </div>
-                <div className="text-4xl font-semibold leading-tight">
-                  {card.label}
+                <div className="flex flex-1 flex-col justify-center px-6 py-8">
+                  <div className="text-3xl font-semibold leading-tight text-slate-800">
+                    {card.label}
+                  </div>
+                  <p className="mt-4 text-base leading-7 text-slate-600">
+                    {card.subtitle}
+                  </p>
                 </div>
-                <p className="mt-3 text-center text-sm text-white/90">
-                  {card.subtitle}
-                </p>
               </button>
             ))}
           </div>

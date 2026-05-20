@@ -10,12 +10,14 @@ import { TEACHING_HOURS_FACTOR } from "../workload/workloadSpreadsheetRules";
 export type PostWorkloadSpreadsheetImportBody = WorkloadImportParseResult & {
   teachingHoursFactor: typeof TEACHING_HOURS_FACTOR;
   importedAtIso: string;
+  previewOnly?: boolean;
 };
 
 export type PostWorkloadSpreadsheetImportResponse = {
   ok: boolean;
   /** Server job id / reference */
   referenceId?: string;
+  previewOnly?: boolean;
   created?: number;
   updated?: number;
   failed?: number;
@@ -32,12 +34,14 @@ export type PostWorkloadSpreadsheetImportResponse = {
  * Response: JSON matching {@link PostWorkloadSpreadsheetImportResponse}
  */
 export async function postWorkloadSpreadsheetImport(
-  parseResult: WorkloadImportParseResult
+  parseResult: WorkloadImportParseResult,
+  options?: { previewOnly?: boolean }
 ): Promise<PostWorkloadSpreadsheetImportResponse> {
   const payload: PostWorkloadSpreadsheetImportBody = {
     ...parseResult,
     teachingHoursFactor: TEACHING_HOURS_FACTOR,
     importedAtIso: new Date().toISOString(),
+    previewOnly: options?.previewOnly === true,
   };
 
   const response = await apiClient.post("/school-operations/workloads/import", payload);
