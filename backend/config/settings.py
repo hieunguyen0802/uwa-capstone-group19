@@ -186,8 +186,12 @@ REST_FRAMEWORK = {
         'rest_framework_simplejwt.authentication.JWTAuthentication',
     ),
     'DEFAULT_THROTTLE_RATES': {
-        # Login endpoint: 5 attempts per minute per IP (brute-force protection)
+        # Password login: 5 attempts/min per IP
         'login': '5/minute',
+        # OTP request: 5 sends/min per IP (prevents spam)
+        'otp_request': '5/minute',
+        # OTP verify: 10 attempts/min per IP (brute-force on 6-digit codes)
+        'otp_verify': '10/minute',
     },
 }
 
