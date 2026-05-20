@@ -1,10 +1,15 @@
+import ast
 from datetime import timedelta
 from decimal import Decimal
 from io import BytesIO
+from pathlib import Path
 
 from django.contrib.auth.models import Group, User
+from django.conf import settings
+from django.core.cache import cache
 from django.core.files.uploadedfile import SimpleUploadedFile
 from django.core.management import call_command
+from django.test import SimpleTestCase
 from django.utils import timezone
 from rest_framework.test import APITestCase, APIClient
 from rest_framework_simplejwt.tokens import RefreshToken
@@ -177,6 +182,64 @@ class TestOTPTokenModel(APITestCase):
 
 # ─── Test: DRF permission classes ────────────────────────────────────────────
 
+class TestApiPermissionDeclarations(SimpleTestCase):
+    """Static guardrail: every DRF function view must declare its auth boundary."""
+
+    PUBLIC_ALLOW_ANY_VIEWS = {
+        'login_view',
+        'otp_request_view',
+        'otp_verify_view',
+    }
+
+    def _api_views(self):
+        view_dir = Path(__file__).resolve().parent / 'view'
+        for path in sorted(view_dir.glob('*.py')):
+            tree = ast.parse(path.read_text())
+            for node in tree.body:
+                if not isinstance(node, ast.FunctionDef):
+                    continue
+                decorators = [ast.unparse(decorator) for decorator in node.decorator_list]
+                if any(decorator.startswith('api_view') for decorator in decorators):
+                    yield path.name, node.name, node.lineno, decorators
+
+    def test_all_api_views_declare_permissions(self):
+        api_views = list(self._api_views())
+        self.assertGreater(len(api_views), 0)
+
+        missing = []
+        for filename, function_name, line_number, decorators in api_views:
+            if not any(decorator.startswith('permission_classes') for decorator in decorators):
+                missing.append(f'{filename}:{line_number} {function_name}')
+
+        self.assertEqual(missing, [], f'API views missing @permission_classes: {missing}')
+
+    def test_allow_any_is_limited_to_explicit_public_auth_views(self):
+        allow_any_views = set()
+        non_public_without_auth = []
+
+        for filename, function_name, line_number, decorators in self._api_views():
+            permission_decorator = next(
+                decorator for decorator in decorators if decorator.startswith('permission_classes')
+            )
+            if 'AllowAny' in permission_decorator:
+                allow_any_views.add(function_name)
+                if function_name not in self.PUBLIC_ALLOW_ANY_VIEWS:
+                    non_public_without_auth.append(f'{filename}:{line_number} {function_name}')
+            elif 'IsAuthenticated' not in permission_decorator:
+                non_public_without_auth.append(f'{filename}:{line_number} {function_name}')
+
+        self.assertEqual(
+            allow_any_views,
+            self.PUBLIC_ALLOW_ANY_VIEWS,
+            'Only login and OTP endpoints should be public.',
+        )
+        self.assertEqual(
+            non_public_without_auth,
+            [],
+            f'Non-public API views must include IsAuthenticated: {non_public_without_auth}',
+        )
+
+
 class TestRolePermissions(BaseTestCase):
     """
     Verifies that DRF permission classes block wrong roles with 403.
@@ -199,6 +262,18 @@ class TestRolePermissions(BaseTestCase):
         res = self.client.get('/api/supervisor/requests/')
         self.assertEqual(res.status_code, 401)
 
+    def test_unauthenticated_internal_endpoints_get_401(self):
+        protected_get_endpoints = [
+            '/api/academic/workloads/',
+            '/api/admin/workload-requests/',
+            '/api/hos/workload-requests',
+            '/api/profile/me/',
+        ]
+        for endpoint in protected_get_endpoints:
+            with self.subTest(endpoint=endpoint):
+                res = self.client.get(endpoint)
+                self.assertEqual(res.status_code, 401)
+
     def test_hod_can_access_own_academic_endpoint(self):
         # HOD can act as Academic for their own workload, but must not see
         # another academic's report through the personal workload endpoint.
@@ -209,6 +284,7 @@ class TestRolePermissions(BaseTestCase):
             snapshot_fte=Decimal('1.00'),
             snapshot_department=self.hod_csse.department,
             status='INITIAL',
+            distributed_at=timezone.now(),
         )
         client = self._auth_client(self.hod_csse)
         res = client.get('/api/workloads/my/')
@@ -666,6 +742,265 @@ class TestAcademicOwnership(BaseTestCase):
             format='json',
         )
         self.assertEqual(res.status_code, 400)
+
+
+class TestMinimalIdorBoundaries(BaseTestCase):
+    """Low-cost IDOR guardrails for the highest-risk workload/report endpoints."""
+
+    def setUp(self):
+        super().setUp()
+
+        now = timezone.now()
+        self.report.distributed_at = now
+        self.report.save(update_fields=['distributed_at', 'updated_at'])
+
+        self.other_academic = self._make_staff('idor_academic_other', 'ACADEMIC', self.dept_csse)
+        self.other_report = self._make_clean_report(self.other_academic, year=2025, semester='S2')
+        self.other_report.distributed_at = now
+        self.other_report.save(update_fields=['distributed_at', 'updated_at'])
+
+        self.physics_academic = self._make_staff('idor_physics_academic', 'ACADEMIC', self.dept_physics)
+        self.physics_report = self._make_clean_report(self.physics_academic, year=2025, semester='S1')
+        self.physics_report.status = 'PENDING'
+        self.physics_report.distributed_at = now
+        self.physics_report.save(update_fields=['status', 'distributed_at', 'updated_at'])
+        AuditLog.objects.create(
+            report=self.physics_report,
+            action_by=self.physics_academic,
+            action_type='COMMENT',
+            comment='Physics report submitted for HoD review.',
+            changes={'kind': 'WORKLOAD_REQUEST', 'status': 'pending'},
+        )
+
+    def test_academic_cannot_read_other_academic_report_detail(self):
+        client = self._auth_client(self.academic)
+        res = client.get(f'/api/academic/workloads/{self.other_report.report_id}/')
+        self.assertEqual(res.status_code, 404)
+
+    def test_academic_cannot_confirm_other_academic_report(self):
+        client = self._auth_client(self.academic)
+        res = client.post(
+            f'/api/academic/workloads/{self.other_report.report_id}/confirm/',
+            format='json',
+        )
+        self.assertEqual(res.status_code, 404)
+
+    def test_academic_cannot_submit_other_academic_report_for_review(self):
+        client = self._auth_client(self.academic)
+        res = client.post(
+            '/api/academic/workload-requests/',
+            data={
+                'workloadIds': [str(self.other_report.report_id)],
+                'reason': 'Trying to submit a report owned by someone else.',
+            },
+            format='json',
+        )
+        self.assertEqual(res.status_code, 400)
+        self.assertIn('invalid or not accessible', res.data.get('detail', ''))
+
+    def test_hod_cannot_read_other_department_report_detail(self):
+        client = self._auth_client(self.hod_csse)
+        res = client.get(f'/api/hod/workload-requests/{self.physics_report.report_id}/')
+        self.assertEqual(res.status_code, 404)
+
+    def test_hod_cannot_decide_other_department_report(self):
+        client = self._auth_client(self.hod_csse)
+        res = client.post(
+            f'/api/hod/workload-requests/{self.physics_report.report_id}/decision/',
+            data={'decision': 'approve', 'note': 'Cross-department approval attempt.'},
+            format='json',
+        )
+        self.assertEqual(res.status_code, 404)
+
+    def test_academic_cannot_read_other_academic_report_history(self):
+        client = self._auth_client(self.academic)
+        res = client.get(f'/api/reports/{self.other_report.report_id}/history/')
+        self.assertEqual(res.status_code, 403)
+
+    def test_hod_cannot_read_other_department_report_history(self):
+        client = self._auth_client(self.hod_csse)
+        res = client.get(f'/api/reports/{self.physics_report.report_id}/history/')
+        self.assertEqual(res.status_code, 403)
+
+    def test_academic_cannot_read_school_ops_workload_detail(self):
+        client = self._auth_client(self.academic)
+        res = client.get(f'/api/admin/workload-requests/{self.other_report.report_id}/')
+        self.assertEqual(res.status_code, 403)
+
+
+class TestImportSafetyGuards(BaseTestCase):
+    """Low-cost import limits to reduce accidental or malicious oversized requests."""
+
+    def _staff_import_row(self, staff_number, **overrides):
+        row = {
+            'staffId': staff_number,
+            'firstName': 'Safe',
+            'lastName': 'Import',
+            'email': f'safe.{staff_number}@uwa.edu.au',
+            'department': self.dept_csse.name,
+        }
+        row.update(overrides)
+        return row
+
+    def test_staff_import_rejects_too_many_rows_before_persisting(self):
+        from api.view.ops_admin_views import MAX_STAFF_IMPORT_ROWS
+
+        client = self._auth_client(self.ops)
+        first_staff_number = '90000000'
+        rows = [
+            self._staff_import_row(f'{90000000 + index:08d}')
+            for index in range(MAX_STAFF_IMPORT_ROWS + 1)
+        ]
+
+        res = client.post('/api/admin/staff/import/', {'rows': rows}, format='json')
+
+        self.assertEqual(res.status_code, 400)
+        self.assertIn(f'At most {MAX_STAFF_IMPORT_ROWS} staff rows', res.data['message'])
+        self.assertFalse(Staff.objects.filter(staff_number=first_staff_number).exists())
+
+    def test_staff_import_rejects_non_object_rows(self):
+        client = self._auth_client(self.ops)
+
+        res = client.post('/api/admin/staff/import/', {'rows': ['not-a-row']}, format='json')
+
+        self.assertEqual(res.status_code, 400)
+        self.assertEqual(res.data['message'], 'rows[0] must be an object.')
+
+    def test_staff_import_rejects_oversized_json_payload(self):
+        from api.view.ops_admin_views import MAX_IMPORT_JSON_BYTES
+
+        client = self._auth_client(self.ops)
+        res = client.post(
+            '/api/admin/staff/import/',
+            {'rows': [self._staff_import_row('90000001')]},
+            format='json',
+            CONTENT_LENGTH=str(MAX_IMPORT_JSON_BYTES + 1),
+        )
+
+        self.assertEqual(res.status_code, 413)
+        self.assertIn('Import payload is too large', res.data['message'])
+        self.assertFalse(Staff.objects.filter(staff_number='90000001').exists())
+
+    def test_workload_import_rejects_too_many_raw_rows(self):
+        from api.view.ops_admin_views import MAX_WORKLOAD_IMPORT_ROWS
+
+        client = self._auth_client(self.ops)
+        rows = [
+            {'rowIndex': index + 1, 'cellsByColumn': {'C': self.academic.staff_number}}
+            for index in range(MAX_WORKLOAD_IMPORT_ROWS + 1)
+        ]
+
+        res = client.post(
+            '/api/admin/workloads/import/',
+            {'previewOnly': True, 'sheets': [{'sheetName': 'Sem1', 'rows': rows}]},
+            format='json',
+        )
+
+        self.assertEqual(res.status_code, 400)
+        self.assertIn(f'At most {MAX_WORKLOAD_IMPORT_ROWS} workload rows', res.data['message'])
+
+    def test_workload_import_rejects_non_object_metric_maps(self):
+        client = self._auth_client(self.ops)
+
+        res = client.post(
+            '/api/admin/workloads/import/',
+            {
+                'previewOnly': True,
+                'sheets': [{
+                    'sheetName': 'Sem1',
+                    'rows': [],
+                    'anomalyMetricsByStaffId': [],
+                }],
+            },
+            format='json',
+        )
+
+        self.assertEqual(res.status_code, 400)
+        self.assertEqual(res.data['message'], 'sheets[0].anomalyMetricsByStaffId must be an object.')
+
+
+class TestThrottleGuards(BaseTestCase):
+    """Regression checks for high-frequency endpoints that should resist casual abuse."""
+
+    def setUp(self):
+        super().setUp()
+        cache.clear()
+
+    def test_password_login_is_rate_limited(self):
+        client = APIClient()
+
+        responses = [
+            client.post(
+                '/api/login/',
+                {'email': 'missing@example.com', 'password': 'wrong'},
+                format='json',
+                REMOTE_ADDR='203.0.113.10',
+            )
+            for _ in range(6)
+        ]
+
+        self.assertEqual([res.status_code for res in responses[:5]], [400] * 5)
+        self.assertEqual(responses[-1].status_code, 429)
+
+    def test_otp_request_is_rate_limited(self):
+        client = APIClient()
+
+        responses = [
+            client.post(
+                '/api/login/request-otp/',
+                {'email': ''},
+                format='json',
+                REMOTE_ADDR='203.0.113.11',
+            )
+            for _ in range(6)
+        ]
+
+        self.assertEqual([res.status_code for res in responses[:5]], [400] * 5)
+        self.assertEqual(responses[-1].status_code, 429)
+
+    def test_otp_verify_is_rate_limited(self):
+        client = APIClient()
+
+        responses = [
+            client.post(
+                '/api/login/verify-otp/',
+                {'email': 'academic@example.com', 'code': '000000'},
+                format='json',
+                REMOTE_ADDR='203.0.113.12',
+            )
+            for _ in range(11)
+        ]
+
+        self.assertEqual([res.status_code for res in responses[:10]], [400] * 10)
+        self.assertEqual(responses[-1].status_code, 429)
+
+    def test_import_endpoint_is_rate_limited_per_user(self):
+        client = self._auth_client(self.ops)
+
+        responses = [
+            client.post('/api/admin/staff/import/', {'rows': []}, format='json')
+            for _ in range(31)
+        ]
+
+        self.assertEqual([res.status_code for res in responses[:30]], [400] * 30)
+        self.assertEqual(responses[-1].status_code, 429)
+
+
+class TestProductionSecuritySettings(SimpleTestCase):
+    """Guardrails for deployment-facing Django security defaults."""
+
+    def test_non_debug_defaults_are_not_wildcard_open(self):
+        if settings.DEBUG:
+            self.skipTest('Development DEBUG mode intentionally relaxes local CORS.')
+
+        self.assertNotIn('*', settings.ALLOWED_HOSTS)
+        self.assertFalse(getattr(settings, 'CORS_ALLOW_ALL_ORIGINS', False))
+
+    def test_security_cookie_and_frame_defaults_are_explicit(self):
+        self.assertTrue(settings.SESSION_COOKIE_HTTPONLY)
+        self.assertEqual(settings.SESSION_COOKIE_SAMESITE, 'Lax')
+        self.assertEqual(settings.CSRF_COOKIE_SAMESITE, 'Lax')
+        self.assertEqual(settings.X_FRAME_OPTIONS, 'DENY')
 
 
 # ─── Test: confirm success + idempotency ──────────────────────────────────────
@@ -1770,6 +2105,8 @@ class TestCodexAuditFixes(BaseTestCase):
     def test_p1_staff_import_rejects_bad_dept_without_persisting_user(self):
         # Row with valid email + invalid department must leave user_obj untouched.
         target = self.academic
+        target.staff_number = '90000002'
+        target.save(update_fields=['staff_number'])
         original_email = target.user.email
         client = self._auth_client(self.ops)
         res = client.post(

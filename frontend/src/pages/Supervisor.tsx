@@ -17,10 +17,10 @@ import { useAuth } from "../auth/AuthContext";
 import { profileFromAuth } from "../auth/profileFromAuth";
 
 type MockRequest = {
-  id: number;
+  id: string;
   /** Original UUID string from backend — used for API calls to avoid parseInt truncation. */
   backendId?: string;
-  sourceWorkloadId?: number;
+  sourceWorkloadId?: string;
   studentId: string;
   semesterLabel: string;
   periodLabel: string;
@@ -233,10 +233,10 @@ function normalizeHodBreakdown(
 }
 
 function mapHodRowToRequest(row: HodWorkloadRowResponse): MockRequest {
-  const numericId = Number.parseInt(String(row.id), 10);
+  const id = String(row.id);
   return {
-    id: Number.isFinite(numericId) ? numericId : Date.now(),
-    backendId: String(row.id),
+    id,
+    backendId: id,
     studentId: row.staffId,
     semesterLabel: row.semesterLabel || row.periodLabel,
     periodLabel: row.periodLabel,
@@ -321,7 +321,7 @@ export default function Supervisor() {
   const [loading, setLoading] = useState(true);
   const [pageError, setPageError] = useState("");
   const [pending, setPending] = useState<MockRequest[]>([]);
-  const [selectedIds, setSelectedIds] = useState<Set<number>>(new Set());
+  const [selectedIds, setSelectedIds] = useState<Set<string>>(new Set());
   const [page, setPage] = useState(1);
   const pageSize = 10; // Items per page
   const [submitting, setSubmitting] = useState(false);
@@ -478,11 +478,11 @@ export default function Supervisor() {
     }
   }
 
-  async function loadHodDetail(numericId: number, backendId?: string) {
-    const apiId = backendId || String(numericId);
+  async function loadHodDetail(itemId: string, backendId?: string) {
+    const apiId = backendId || itemId;
     const response = await apiJson<HodWorkloadDetailResponse>(`/api/hod/workload-requests/${apiId}/`);
     const mapped = mapHodDetailToRequest(response as HodWorkloadDetailPayload);
-    const existing = pending.find((row) => row.id === numericId);
+    const existing = pending.find((row) => row.id === itemId);
     const merged = existing
       ? {
           ...existing,
@@ -492,7 +492,7 @@ export default function Supervisor() {
           submittedAt: existing.submittedAt,
         }
       : mapped;
-    setPending((prev) => prev.map((row) => (row.id === numericId ? { ...row, ...merged } : row)));
+    setPending((prev) => prev.map((row) => (row.id === itemId ? { ...row, ...merged } : row)));
     return merged;
   }
 
@@ -586,7 +586,7 @@ export default function Supervisor() {
     return `Workload Report ${matched[1]} - Sem ${matched[2]}`;
   }, [pending]);
 
-  function toggleSelected(id: number) {
+  function toggleSelected(id: string) {
     setSelectedIds((prev) => {
       const next = new Set(prev);
       if (next.has(id)) next.delete(id);

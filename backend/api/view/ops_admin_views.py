@@ -66,6 +66,11 @@ ACADEMIC_IMPORT_DEPARTMENTS = (
 )
 SUPERSEDED_ROLE_REASON = 'Superseded by a newer role assignment.'
 MAX_EXCEL_UPLOAD_BYTES = 5 * 1024 * 1024
+MAX_IMPORT_JSON_BYTES = MAX_EXCEL_UPLOAD_BYTES
+MAX_STAFF_IMPORT_ROWS = 1000
+MAX_WORKLOAD_IMPORT_SHEETS = 8
+MAX_WORKLOAD_IMPORT_ROWS = 5000
+MAX_WORKLOAD_IMPORT_STAFF_IDS = 1000
 EXPORT_MEDIA_SUBDIR = 'exports'
 TEMPLATE_MEDIA_SUBDIR = 'templates'
 OPS_CURRENT_YEAR_CONFIG_KEY = 'OPS_CURRENT_WORKLOAD_YEAR'
@@ -81,6 +86,77 @@ class AdminImportThrottle(UserRateThrottle):
 
 class AdminExportThrottle(UserRateThrottle):
     rate = '60/hour'
+
+
+def _import_error(message, status_code=http_status.HTTP_400_BAD_REQUEST):
+    return Response({'success': False, 'message': message}, status=status_code)
+
+
+def _reject_large_import_payload(request):
+    raw_length = request.META.get('CONTENT_LENGTH')
+    if raw_length in (None, ''):
+        return None
+    try:
+        content_length = int(raw_length)
+    except (TypeError, ValueError):
+        return None
+    if content_length > MAX_IMPORT_JSON_BYTES:
+        max_mb = MAX_IMPORT_JSON_BYTES // (1024 * 1024)
+        return _import_error(
+            f'Import payload is too large. Maximum size is {max_mb}MB.',
+            http_status.HTTP_413_REQUEST_ENTITY_TOO_LARGE,
+        )
+    return None
+
+
+def _validate_workload_import_shape(sheets):
+    if len(sheets) > MAX_WORKLOAD_IMPORT_SHEETS:
+        return _import_error(f'At most {MAX_WORKLOAD_IMPORT_SHEETS} sheets can be imported at once.')
+
+    total_rows = 0
+    staff_ids = set()
+    metric_fields = (
+        'anomalyMetricsByStaffId',
+        'teachingLinesByStaffId',
+        'hdrMetricsByStaffId',
+        'serviceMetricsByStaffId',
+        'roleMetricsByStaffId',
+    )
+    for index, sheet in enumerate(sheets):
+        if not isinstance(sheet, dict):
+            return _import_error(f'sheets[{index}] must be an object.')
+
+        raw_rows = sheet.get('rows') or []
+        if not isinstance(raw_rows, list):
+            return _import_error(f'sheets[{index}].rows must be a list.')
+        total_rows += len(raw_rows)
+        if total_rows > MAX_WORKLOAD_IMPORT_ROWS:
+            return _import_error(f'At most {MAX_WORKLOAD_IMPORT_ROWS} workload rows can be imported at once.')
+        if any(not isinstance(row, dict) for row in raw_rows):
+            return _import_error(f'sheets[{index}].rows must contain objects only.')
+
+        for field in metric_fields:
+            metrics = sheet.get(field) if field in sheet else {}
+            if metrics is None:
+                metrics = {}
+            if not isinstance(metrics, dict):
+                return _import_error(f'sheets[{index}].{field} must be an object.')
+            staff_ids.update(str(key) for key in metrics.keys() if not str(key).startswith('__row:'))
+            if len(staff_ids) > MAX_WORKLOAD_IMPORT_STAFF_IDS:
+                return _import_error(
+                    f'At most {MAX_WORKLOAD_IMPORT_STAFF_IDS} staff records can be imported at once.'
+                )
+
+    return None
+
+
+def _validate_staff_import_rows(rows):
+    if len(rows) > MAX_STAFF_IMPORT_ROWS:
+        return _import_error(f'At most {MAX_STAFF_IMPORT_ROWS} staff rows can be imported at once.')
+    for index, row in enumerate(rows):
+        if not isinstance(row, dict):
+            return _import_error(f'rows[{index}] must be an object.')
+    return None
 
 
 def _distribution_progress_cache_key(progress_id):
@@ -1885,6 +1961,10 @@ def admin_workload_import(request):
     Accepts JSON body from the frontend (browser-parsed workbook data).
     The old Excel file-upload path is no longer the primary interface.
     """
+    oversized = _reject_large_import_payload(request)
+    if oversized is not None:
+        return oversized
+
     body = request.data or {}
     sheets = body.get('sheets')
     preview_only = bool(body.get('previewOnly'))
@@ -1893,6 +1973,9 @@ def admin_workload_import(request):
             {'success': False, 'message': 'sheets must be a non-empty list'},
             status=http_status.HTTP_400_BAD_REQUEST,
         )
+    shape_error = _validate_workload_import_shape(sheets)
+    if shape_error is not None:
+        return shape_error
 
     batch_id = uuid.uuid4()
     created_count = 0
@@ -2164,6 +2247,10 @@ def admin_staff_import(request):
     department, isActive } ] }
     Creates or updates ACADEMIC staff rows for Ops academic imports.
     """
+    oversized = _reject_large_import_payload(request)
+    if oversized is not None:
+        return oversized
+
     body = request.data or {}
     rows = body.get('rows')
     if not isinstance(rows, list) or not rows:
@@ -2171,6 +2258,9 @@ def admin_staff_import(request):
             {'success': False, 'message': 'rows must be a non-empty list'},
             status=http_status.HTTP_400_BAD_REQUEST,
         )
+    row_error = _validate_staff_import_rows(rows)
+    if row_error is not None:
+        return row_error
 
     created_count = 0
     updated_count = 0
