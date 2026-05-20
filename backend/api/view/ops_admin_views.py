@@ -17,7 +17,6 @@ from pathlib import Path
 from django.conf import settings
 from django.contrib.auth.models import User
 from django.core.cache import cache
-from django.core.mail import send_mail
 from django.core.paginator import Paginator
 from django.db import models, transaction
 from django.http import HttpResponse
@@ -547,32 +546,40 @@ def _serialize_workload_row(report, items):
     }
 
 
-def _send_distribution_notification(report, sender_staff, operated_by: str, *, redistributed: bool = False):
-    """Send the in-app message + email used after workload distribution."""
-    try:
-        from api.models import Message
+def _build_distribution_notification(report, sender_staff, operated_by: str, *, redistributed: bool = False):
+    """Return an unsaved Message ORM instance and an email dict — no DB or SMTP I/O.
 
-        action_phrase = 're-distributed' if redistributed else 'distributed'
-        notification_body = (
-            f'Your workload for {report.academic_year} {report.semester} '
-            f'has been {action_phrase} by {operated_by}.'
-        )
-        Message.objects.create(
-            thread_key=f'{report.staff.staff_number}:admin',
-            sender=sender_staff,
-            body=notification_body,
-        )
-        recipient_email = report.staff.user.email
-        if recipient_email:
-            send_mail(
-                subject=f'Workload {"Re-distributed" if redistributed else "Distributed"} — {report.academic_year} {report.semester}',
-                message=notification_body,
-                from_email=None,
-                recipient_list=[recipient_email],
-                fail_silently=True,
-            )
-    except Exception:
-        pass
+    Callers are responsible for saving the Message (individually or via bulk_create)
+    and for dispatching the email via email_service.send_distribution_emails_async.
+    """
+    from api.models import Message
+
+    action_phrase = 're-distributed' if redistributed else 'distributed'
+    body = (
+        f'Your workload for {report.academic_year} {report.semester} '
+        f'has been {action_phrase} by {operated_by}.'
+    )
+    msg = Message(
+        thread_key=f'{report.staff.staff_number}:admin',
+        sender=sender_staff,
+        body=body,
+        created_at=timezone.now(),
+    )
+    email_data = {
+        'to': report.staff.user.email or '',
+        'subject': (
+            f'Workload {"Re-distributed" if redistributed else "Distributed"} '
+            f'— {report.academic_year} {report.semester}'
+        ),
+        'body': body,
+    }
+    return msg, email_data
+
+
+def _send_notification_emails_async(email_list: list) -> None:
+    """Schedule async email delivery via email_service (fire-and-forget)."""
+    from api.services.email_service import send_distribution_emails_async
+    send_distribution_emails_async(email_list)
 
 
 def _serialize_workload_detail(report, items):
@@ -1284,6 +1291,8 @@ def admin_distribute_workloads(request):
 
     succeeded = []
     failed = []
+    pending_messages = []
+    pending_emails = []
     total_count = len(reports)
 
     _set_distribution_progress(progress_id, {
@@ -1462,8 +1471,10 @@ def admin_distribute_workloads(request):
                     },
                 )
 
-                # ── Check 8: send in-app message + email notification (non-fatal) ──
-                _send_distribution_notification(report, request.staff, operated_by)
+                # ── Check 8: collect notification data (batched after the loop) ──
+                msg, email_data = _build_distribution_notification(report, request.staff, operated_by)
+                pending_messages.append(msg)
+                pending_emails.append(email_data)
 
                 succeeded.append({
                     'workloadId': str(report.report_id),
@@ -1496,6 +1507,17 @@ def admin_distribute_workloads(request):
             })
         finally:
             update_progress()
+
+    # Batch-create all in-app Message records (1 INSERT instead of N).
+    if pending_messages:
+        from api.models import Message
+        Message.objects.bulk_create(pending_messages)
+
+    # Schedule async email delivery after the outer transaction commits.
+    # Using on_commit ensures emails fire only when all DB changes are durable,
+    # and SMTP work happens outside the transaction (no lock held during network I/O).
+    _pending = pending_emails
+    transaction.on_commit(lambda: _send_notification_emails_async(_pending))
 
     cycle_advanced = False
     if succeeded:
@@ -1661,7 +1683,9 @@ def admin_redistribute_single_workload(request, id):
             },
         )
 
-        _send_distribution_notification(report, request.staff, operated_by, redistributed=True)
+        msg, email_data = _build_distribution_notification(report, request.staff, operated_by, redistributed=True)
+        msg.save()
+        transaction.on_commit(lambda: _send_notification_emails_async([email_data]))
 
         return Response({
             'success': True,
@@ -1738,7 +1762,9 @@ def admin_redistribute_single_workload(request, id):
         },
     )
 
-    _send_distribution_notification(replacement, request.staff, operated_by, redistributed=True)
+    msg, email_data = _build_distribution_notification(replacement, request.staff, operated_by, redistributed=True)
+    msg.save()
+    transaction.on_commit(lambda: _send_notification_emails_async([email_data]))
 
     return Response({
         'success': True,
