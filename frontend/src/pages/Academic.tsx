@@ -127,19 +127,6 @@ const LEGACY_ACADEMIC_STORAGE_KEYS = [
   OPS_ACADEMIC_NOTIFICATION_KEY,
   OPS_ACADEMIC_DISTRIBUTED_KEY,
 ] as const;
-type AcademicNotification = {
-  id: string;
-  recipientStaffId: string;
-  recipientName: string;
-  recipientEmail: string;
-  fromName?: string;
-  fromEmail?: string;
-  subject: string;
-  body: string;
-  sentAt: string;
-  readAt?: string;
-};
-
 type AcademicWorkloadRowResponse = {
   id: string;
   name: string;
@@ -169,6 +156,16 @@ type AcademicWorkloadListResponse = {
     totalItems: number;
     totalPages: number;
   };
+};
+
+type AcademicSemesterReport = {
+  id: string;
+  year: number;
+  semester: "S1" | "S2";
+  title: string;
+  createdAt?: string | null;
+  downloadUrl?: string;
+  unread?: boolean;
 };
 
 type AcademicSearchFilters = {
@@ -406,8 +403,8 @@ function AcademicDetailModal({
   const hodReviewRequiresSubmission = String(item.hodReview ?? "")
     .trim()
     .toLowerCase() === "yes";
-  // Blocks confirm only while waiting for HoD — once approved the academic can self-confirm.
-  const hodReviewBlocksConfirm = hodReviewRequiresSubmission && item.status !== "approved";
+  // Confirm is blocked only while a HoD review is in flight (pending).
+  const confirmBlockedByPending = item.status === "pending";
 
   const fields: WorkloadDetailField[] = [
     { label: "Name", value: item.name },
@@ -433,11 +430,9 @@ function AcademicDetailModal({
     {
       label: "HoD Review",
       value: item.hodReview || "-",
-      inputClassName: hodReviewBlocksConfirm
-        ? "border-red-400 bg-red-100 font-semibold text-red-800"
-        : hodReviewRequiresSubmission
-          ? "border-green-400 bg-green-100 font-semibold text-green-800"
-          : "",
+      inputClassName: hodReviewRequiresSubmission
+        ? "border-green-400 bg-green-100 font-semibold text-green-800"
+        : "",
     },
   ];
 
@@ -481,11 +476,11 @@ function AcademicDetailModal({
           <button
             type="button"
             onClick={onConfirm}
-            disabled={item.status === "pending" || item.status === "rejected" || hodReviewBlocksConfirm}
+            disabled={confirmBlockedByPending}
             className={`rounded-md px-6 py-2 text-sm font-semibold ${
               item.confirmation === "confirmed"
                 ? "bg-[#16a34a] text-white"
-                : item.status === "pending" || item.status === "rejected" || hodReviewBlocksConfirm
+                : confirmBlockedByPending
                   ? "cursor-not-allowed bg-slate-400 text-white"
                   : "bg-[#2f4d9c] text-white hover:bg-[#29458c]"
             }`}
@@ -519,11 +514,8 @@ export default function Academic() {
   const [confirmationFilter, setConfirmationFilter] = useState<"" | "confirmed" | "unconfirmed">("");
   const [profileOpen, setProfileOpen] = useState(false);
   const [avatarSrc, setAvatarSrc] = useState<string | null>(null);
-  const [notifications] = useState<AcademicNotification[]>([]);
-  const [notificationPage, setNotificationPage] = useState(1);
-  const [activeNotificationId, setActiveNotificationId] = useState<string | null>(null);
-  const [notificationDetailOpen, setNotificationDetailOpen] = useState(false);
-  const [hasNewMessage] = useState(false);
+  const [academicSemesterReports, setAcademicSemesterReports] = useState<AcademicSemesterReport[]>([]);
+  const [reportInboxPage, setReportInboxPage] = useState(1);
   const [messagePanelOpen, setMessagePanelOpen] = useState(false);
   const currentYear = useMemo(() => new Date().getFullYear(), []);
   const currentSemester = useMemo<"S1" | "S2">(() => {
@@ -567,17 +559,17 @@ export default function Academic() {
   const [exportYearToInput, setExportYearToInput] = useState("");
   const [exportSemesterInput, setExportSemesterInput] = useState<"All" | "S1" | "S2">("All");
   const [exportMessage, setExportMessage] = useState("");
-  const notificationPageSize = 10;
-  const notificationTotalPages = Math.max(1, Math.ceil(notifications.length / notificationPageSize));
-  const pagedNotifications = useMemo(() => {
-    const start = (notificationPage - 1) * notificationPageSize;
-    return notifications.slice(start, start + notificationPageSize);
-  }, [notifications, notificationPage]);
-  const activeNotification = useMemo(
-    () => notifications.find((n) => n.id === activeNotificationId) ?? null,
-    [notifications, activeNotificationId]
+  const reportsPerPage = 10;
+  const hasNewMessage = useMemo(
+    () => academicSemesterReports.some((item) => item.unread),
+    [academicSemesterReports]
   );
-const selectedYear = Number(searchYearInput) || currentYear;
+  const reportTotalPages = Math.max(1, Math.ceil(academicSemesterReports.length / reportsPerPage));
+  const pagedAcademicReports = useMemo(() => {
+    const start = (reportInboxPage - 1) * reportsPerPage;
+    return academicSemesterReports.slice(start, start + reportsPerPage);
+  }, [academicSemesterReports, reportInboxPage]);
+  const selectedYear = Number(searchYearInput) || currentYear;
   const yearOptions = useMemo(
     () => Array.from({ length: 11 }, (_, i) => String(selectedYear - 5 + i)),
     [selectedYear]
@@ -604,6 +596,22 @@ const selectedYear = Number(searchYearInput) || currentYear;
       if (!options?.silent) setLoadingItems(false);
     }
   }, [user.department]);
+
+  const loadAcademicSemesterReports = useCallback(async () => {
+    try {
+      const response = await apiJson<{ items: AcademicSemesterReport[] }>("/api/academic/reports/semester/");
+      setAcademicSemesterReports(response.items ?? []);
+    } catch (error) {
+      if (!isAbortError(error)) {
+        setAcademicSemesterReports([]);
+      }
+    }
+  }, []);
+
+  async function handleDownloadAcademicSemesterReport(report: AcademicSemesterReport) {
+    if (!report.downloadUrl) return;
+    await downloadApiFile(report.downloadUrl, `academic_semester_report_${report.year}_${report.semester}.xlsx`);
+  }
 
   async function loadAcademicVisualization(yearFrom: string, yearTo: string, semester: "All" | "S1" | "S2") {
     setVisualizationLoading(true);
@@ -655,27 +663,42 @@ const selectedYear = Number(searchYearInput) || currentYear;
       semester: "All",
     });
     void loadAcademicWorkloads();
+    void loadAcademicSemesterReports();
     void loadAcademicVisualization(defaultFrom, defaultTo, "All");
-  }, [currentYear, loadAcademicWorkloads]);
+  }, [currentYear, loadAcademicSemesterReports, loadAcademicWorkloads]);
 
   useEffect(() => {
-    const refreshLatestWorkloads = () => {
+    const refreshLatestAcademicData = () => {
       if (document.visibilityState === "visible") {
         void loadAcademicWorkloads({ silent: true, filters: searchFilters });
+        void loadAcademicSemesterReports();
       }
     };
 
-    window.addEventListener("focus", refreshLatestWorkloads);
-    document.addEventListener("visibilitychange", refreshLatestWorkloads);
-    const intervalId = window.setInterval(refreshLatestWorkloads, 10000);
+    window.addEventListener("focus", refreshLatestAcademicData);
+    document.addEventListener("visibilitychange", refreshLatestAcademicData);
+    const intervalId = window.setInterval(refreshLatestAcademicData, 10000);
     return () => {
-      window.removeEventListener("focus", refreshLatestWorkloads);
-      document.removeEventListener("visibilitychange", refreshLatestWorkloads);
+      window.removeEventListener("focus", refreshLatestAcademicData);
+      document.removeEventListener("visibilitychange", refreshLatestAcademicData);
       window.clearInterval(intervalId);
     };
-  }, [loadAcademicWorkloads, searchFilters]);
+  }, [loadAcademicSemesterReports, loadAcademicWorkloads, searchFilters]);
+
+  useEffect(() => {
+    if (!messagePanelOpen) return;
+    setAcademicSemesterReports((prev) => prev.map((item) => ({ ...item, unread: false })));
+  }, [messagePanelOpen]);
+
+  useEffect(() => {
+    const total = Math.max(1, Math.ceil(academicSemesterReports.length / reportsPerPage));
+    setReportInboxPage((prev) => Math.min(Math.max(1, prev), total));
+  }, [academicSemesterReports.length]);
 
   const filteredItems = items;
+  const submitRequestBlocked = items.some(
+    (x) => selectedIds.has(x.backendId) && (x.confirmation === "confirmed" || x.status === "pending")
+  );
   const totalPages = Math.max(1, Math.ceil(filteredItems.length / pageSize));
   const pageItems = useMemo(() => {
     const start = (page - 1) * pageSize;
@@ -809,15 +832,8 @@ const selectedYear = Number(searchYearInput) || currentYear;
   }
 
   function openMessagePanel() {
-    setNotificationPage(1);
-    setActiveNotificationId(null);
-    setNotificationDetailOpen(false);
+    setReportInboxPage(1);
     setMessagePanelOpen(true);
-  }
-
-  function handleOpenNotification(item: AcademicNotification) {
-    setActiveNotificationId(item.id);
-    setNotificationDetailOpen(true);
   }
 
   function handleSearch() {
@@ -886,7 +902,7 @@ const selectedYear = Number(searchYearInput) || currentYear;
               onClick={(e) => e.stopPropagation()}
             >
               <div className="-mx-6 -mt-6 mb-4 flex items-center justify-between rounded-t-2xl bg-[#2f4d9c] px-6 py-4 text-white">
-                <div className="text-3xl font-semibold">Workload Email Notifications</div>
+                <div className="text-3xl font-semibold">Semester Reports</div>
                 <button
                   type="button"
                   aria-label="Close"
@@ -896,106 +912,53 @@ const selectedYear = Number(searchYearInput) || currentYear;
                   ✕
                 </button>
               </div>
-              <div className="space-y-3">
-                {notifications.length === 0 ? (
-                  <div className="rounded-md border border-[#2f4d9c]/40 bg-[#eef3ff] px-4 py-5 text-sm text-slate-700">
-                    No notifications yet.
-                  </div>
-                ) : (
-                  <>
-                    <div className="max-h-80 overflow-y-auto rounded-md border border-[#2f4d9c]/40 bg-white">
-                      {pagedNotifications.map((item) => (
+              {academicSemesterReports.length === 0 ? (
+                <div className="rounded-md border border-[#2f4d9c]/40 bg-[#eef3ff] px-4 py-5 text-sm text-slate-700">
+                  No semester report generated yet.
+                </div>
+              ) : (
+                <>
+                  <div className="max-h-80 overflow-y-auto rounded-md border border-[#2f4d9c]/40 bg-white">
+                    {pagedAcademicReports.map((report) => (
+                      <div
+                        key={report.id}
+                        className="flex items-center justify-between gap-3 border-b border-[#2f4d9c]/10 px-4 py-3"
+                      >
+                        <div className="text-sm font-semibold text-slate-800">{report.title}</div>
                         <button
-                          key={item.id}
                           type="button"
-                          onClick={() => handleOpenNotification(item)}
-                          className={`flex w-full items-center justify-between gap-4 border-b border-[#2f4d9c]/10 px-4 py-3 text-left hover:bg-[#f3f7ff] ${
-                            activeNotificationId === item.id ? "bg-[#e8efff]" : ""
-                          }`}
+                          onClick={() => void handleDownloadAcademicSemesterReport(report)}
+                          className="inline-flex items-center gap-2 rounded border border-[#2f4d9c]/40 bg-[#eef3ff] px-3 py-1 text-xs font-semibold text-[#2f4d9c] hover:bg-[#e0e9ff]"
                         >
-                          <span className="min-w-0 flex-1 truncate text-sm font-semibold text-slate-800">{item.subject}</span>
-                          {!item.readAt ? (
-                            <span className="shrink-0 rounded bg-red-100 px-2 py-0.5 text-[10px] font-bold uppercase tracking-wide text-red-700">
-                              New
-                            </span>
-                          ) : null}
-                          <span className="shrink-0 text-xs text-slate-500">{item.sentAt ? formatLocalDateTime(new Date(item.sentAt)) : "N/A"}</span>
+                          ⬇ Download
                         </button>
-                      ))}
-                    </div>
-                    <div className="flex items-center justify-between px-1 text-sm">
-                      <button
-                        type="button"
-                        onClick={() => setNotificationPage((p) => Math.max(1, p - 1))}
-                        disabled={notificationPage <= 1}
-                        className="rounded border border-[#2f4d9c]/35 bg-[#eef3ff] px-3 py-1 font-semibold text-[#2f4d9c] disabled:cursor-not-allowed disabled:opacity-50"
-                      >
-                        Previous
-                      </button>
-                      <span className="text-slate-600">
-                        Page {notificationPage} / {notificationTotalPages}
-                      </span>
-                      <button
-                        type="button"
-                        onClick={() => setNotificationPage((p) => Math.min(notificationTotalPages, p + 1))}
-                        disabled={notificationPage >= notificationTotalPages}
-                        className="rounded border border-[#2f4d9c]/35 bg-[#eef3ff] px-3 py-1 font-semibold text-[#2f4d9c] disabled:cursor-not-allowed disabled:opacity-50"
-                      >
-                        Next
-                      </button>
-                    </div>
-                  </>
-                )}
-              </div>
-            </div>
-            {notificationDetailOpen && activeNotification && (
-              <div
-                className="fixed inset-0 z-[75] flex items-center justify-center bg-black/25 p-4"
-                onClick={(e) => e.stopPropagation()}
-              >
-                <div
-                  className="w-full max-w-2xl overflow-hidden rounded-xl border-2 border-[#2f4d9c] bg-white shadow-2xl"
-                  onClick={(e) => e.stopPropagation()}
-                >
-                  <div className="flex items-center justify-between bg-[#2f4d9c] px-5 py-3 text-white">
-                    <div className="text-xl font-semibold">Email Detail</div>
+                      </div>
+                    ))}
+                  </div>
+                  <div className="mt-3 flex items-center justify-between px-1 text-sm">
                     <button
                       type="button"
-                      aria-label="Close detail"
-                      className="rounded p-1 text-white/90 hover:bg-white/20"
-                      onClick={() => setNotificationDetailOpen(false)}
+                      onClick={() => setReportInboxPage((p) => Math.max(1, p - 1))}
+                      disabled={reportInboxPage <= 1}
+                      className="rounded border border-[#2f4d9c]/35 bg-[#eef3ff] px-3 py-1 font-semibold text-[#2f4d9c] disabled:cursor-not-allowed disabled:opacity-50"
                     >
-                      ✕
+                      Previous
+                    </button>
+                    <span className="text-slate-600">
+                      Page {reportInboxPage} / {reportTotalPages}
+                    </span>
+                    <button
+                      type="button"
+                      onClick={() => setReportInboxPage((p) => Math.min(reportTotalPages, p + 1))}
+                      disabled={reportInboxPage >= reportTotalPages}
+                      className="rounded border border-[#2f4d9c]/35 bg-[#eef3ff] px-3 py-1 font-semibold text-[#2f4d9c] disabled:cursor-not-allowed disabled:opacity-50"
+                    >
+                      Next
                     </button>
                   </div>
-                  <div className="space-y-3 bg-slate-50 px-4 py-4">
-                    <div className="overflow-hidden rounded-lg border border-slate-200 bg-white shadow-sm">
-                      <div className="border-b border-slate-200 bg-slate-100 px-3 py-1.5 text-[11px] font-semibold uppercase tracking-wide text-slate-600">
-                        Subject
-                      </div>
-                      <div className="px-3 py-2 text-sm font-semibold text-slate-900">{activeNotification.subject}</div>
-                    </div>
-                    <div className="overflow-hidden rounded-lg border border-slate-200 bg-white shadow-sm">
-                      <div className="border-b border-slate-200 bg-slate-100 px-3 py-1.5 text-[11px] font-semibold uppercase tracking-wide text-slate-600">
-                        Sender
-                      </div>
-                      <div className="px-3 py-2 text-sm text-slate-700">
-                        {activeNotification.fromName || "School Operations"}
-                        {activeNotification.fromEmail ? ` (${activeNotification.fromEmail})` : ""}
-                      </div>
-                    </div>
-                    <div className="overflow-hidden rounded-lg border border-slate-200 bg-white shadow-sm">
-                      <div className="border-b border-slate-200 bg-slate-100 px-3 py-1.5 text-[11px] font-semibold uppercase tracking-wide text-slate-600">
-                        Message
-                      </div>
-                      <div className="max-h-72 overflow-y-auto whitespace-pre-line px-3 py-2 text-sm leading-relaxed text-slate-700">
-                        {activeNotification.body}
-                      </div>
-                    </div>
-                  </div>
-                </div>
-              </div>
-            )}
+                </>
+              )}
+            </div>
           </div>
         )}
 
@@ -1225,7 +1188,8 @@ const selectedYear = Number(searchYearInput) || currentYear;
             <button
               type="button"
               onClick={openRequestModal}
-              className="flex items-center gap-2 rounded bg-[#2f4d9c] px-10 py-2 text-sm font-bold text-white shadow"
+              disabled={submitRequestBlocked}
+              className={`flex items-center gap-2 rounded px-10 py-2 text-sm font-bold text-white shadow ${submitRequestBlocked ? "cursor-not-allowed bg-slate-400" : "bg-[#2f4d9c]"}`}
             >
               <span className="text-base">✓</span>
               Submit Request

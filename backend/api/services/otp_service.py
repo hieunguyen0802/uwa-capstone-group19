@@ -1,4 +1,5 @@
 import hashlib
+import logging
 import secrets
 from datetime import timedelta
 
@@ -8,8 +9,14 @@ from django.utils import timezone
 
 from api.models import OTPToken, Staff
 
+logger = logging.getLogger(__name__)
+
 OTP_EXPIRY_MINUTES = 5
 _SALT_BYTES = 16
+
+# Generic message shown to the caller for all verify failures.
+# Never change this to something role/state-specific — it would leak information.
+_VERIFY_ERROR = "Invalid email or verification code."
 
 
 def _hash_code(code: str, salt: str) -> str:
@@ -26,19 +33,33 @@ def request_otp(email: str) -> dict:
     """
     Generate a 6-digit OTP, store its hash, and send it to the given email.
 
-    Returns {"sent": True} on success.
-    Raises ValueError if no active User with that email exists.
+    Returns {"sent": True} in ALL cases — whether the email is known or not —
+    to prevent email enumeration attacks.  The real rejection reason is logged
+    internally so developers can debug without exposing it to callers.
     """
     email = email.strip().lower()
 
+    # ── Guard 1: Django User must exist and be active ──────────────────────
     try:
         user = User.objects.get(email__iexact=email, is_active=True)
     except User.DoesNotExist:
-        # Return success-looking response to avoid email enumeration.
-        # The caller cannot distinguish "no account" from "email sent".
+        logger.info("OTP request rejected [EMAIL_NOT_FOUND]: %s", email)
         return {"sent": True}
 
-    code = str(secrets.randbelow(900000) + 100000)  # 6-digit, never starts with 0 issue avoided
+    # ── Guard 2: Staff record must exist (user has been imported) ──────────
+    try:
+        staff = Staff.objects.get(user=user)
+    except Staff.DoesNotExist:
+        logger.info("OTP request rejected [STAFF_NOT_IMPORTED]: %s", email)
+        return {"sent": True}
+
+    # ── Guard 3: Staff profile must be active ─────────────────────────────
+    if not staff.is_active:
+        logger.info("OTP request rejected [STAFF_INACTIVE]: %s", email)
+        return {"sent": True}
+
+    # All guards passed — generate and send the OTP.
+    code = str(secrets.randbelow(900000) + 100000)
     salt = _new_salt()
     code_hash = _hash_code(code, salt)
     expires_at = timezone.now() + timedelta(minutes=OTP_EXPIRY_MINUTES)
@@ -48,11 +69,12 @@ def request_otp(email: str) -> dict:
     send_mail(
         subject="Your UWA Workload System login code",
         message=f"Your one-time login code is: {code}\n\nThis code expires in {OTP_EXPIRY_MINUTES} minutes.",
-        from_email=None,  # uses DEFAULT_FROM_EMAIL from settings
+        from_email=None,
         recipient_list=[email],
         fail_silently=False,
     )
 
+    logger.info("OTP sent successfully to %s (role=%s)", email, staff.role)
     return {"sent": True}
 
 
@@ -61,7 +83,8 @@ def verify_otp(email: str, code: str) -> dict:
     Verify a 6-digit OTP and return JWT tokens + role on success.
 
     Returns {"access": ..., "refresh": ..., "role": ...} on success.
-    Raises ValueError with a user-facing message on failure.
+    Raises ValueError(_VERIFY_ERROR) on ANY failure — never revealing the
+    specific reason to the caller.  Internal reason is logged for debugging.
     """
     from rest_framework_simplejwt.tokens import RefreshToken
 
@@ -69,8 +92,7 @@ def verify_otp(email: str, code: str) -> dict:
     code = code.strip()
     now = timezone.now()
 
-    # Fetch all unexpired, unused tokens for this email (typically 0-2 rows).
-    # We cannot filter by hash directly because each token has a unique salt.
+    # ── Step 1: find a valid, unused OTP token ────────────────────────────
     candidates = (
         OTPToken.objects
         .filter(email=email, expires_at__gt=now, used_at__isnull=True)
@@ -84,21 +106,28 @@ def verify_otp(email: str, code: str) -> dict:
             break
 
     if token is None:
-        raise ValueError("Invalid or expired code.")
+        logger.info("OTP verify failed [INVALID_OR_EXPIRED_TOKEN]: %s", email)
+        raise ValueError(_VERIFY_ERROR)
 
+    # ── Step 2: user must still be active ────────────────────────────────
     try:
         user = User.objects.get(email__iexact=email, is_active=True)
     except User.DoesNotExist:
-        raise ValueError("Account not found.")
+        logger.warning("OTP verify failed [USER_INACTIVE_OR_MISSING] after valid token: %s", email)
+        raise ValueError(_VERIFY_ERROR)
 
+    # ── Step 3: staff record must exist and be active ─────────────────────
     try:
         staff = Staff.objects.get(user=user)
-        role = staff.role
-        staff_id = str(staff.staff_id)
     except Staff.DoesNotExist:
-        role = 'ACADEMIC'
-        staff_id = None
+        logger.warning("OTP verify failed [STAFF_NOT_IMPORTED] after valid token: %s", email)
+        raise ValueError(_VERIFY_ERROR)
 
+    if not staff.is_active:
+        logger.warning("OTP verify failed [STAFF_INACTIVE] after valid token: %s", email)
+        raise ValueError(_VERIFY_ERROR)
+
+    # ── Step 4: issue JWT tokens ──────────────────────────────────────────
     refresh = RefreshToken.for_user(user)
 
     # Mark as used only after JWT generation succeeds, so a backend error
@@ -106,10 +135,12 @@ def verify_otp(email: str, code: str) -> dict:
     token.used_at = now
     token.save(update_fields=['used_at'])
 
+    logger.info("OTP verify succeeded for %s (role=%s)", email, staff.role)
+
     return {
         "access": str(refresh.access_token),
         "refresh": str(refresh),
-        "role": role,
-        "staff_id": staff_id,
+        "role": staff.role,
+        "staff_id": str(staff.staff_id),
         "email": user.email,
     }

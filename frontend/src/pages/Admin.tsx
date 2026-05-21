@@ -48,7 +48,6 @@ import {
   TEACHING_UNIT_COL,
 } from "../workload/workloadSpreadsheetRules";
 import TemplateImportExportActions from "../components/common/TemplateImportExportActions";
-import ThemedNoticeModal, { SUPERSEDED_RECORD_MESSAGE } from "../components/common/ThemedNoticeModal";
 import WorkHoursBadge from "../components/common/WorkHoursBadge";
 import WorkloadDetailModal, {
   type WorkloadDetailField,
@@ -101,6 +100,10 @@ type MockRequest = {
   teachingTargetHours?: number;
   /** When true (from API), row is read-only and detail is blocked — superseded by a newer version. */
   cancelled?: boolean;
+  /** True when the latest distribution attempt for this pending row failed on the backend. */
+  distributionFailed?: boolean;
+  /** True when this current row was created by overwriting an earlier workflow record for the same period. */
+  overwritesExistingWorkflow?: boolean;
   /** Imported from workload template: list shows status as "-" and confirmation as Unconfirmed by default. */
   importedFromTemplate?: boolean;
   /** Target contract band from Excel column I. */
@@ -187,8 +190,6 @@ type WorkloadDetailSnapshot = {
   showActualTeachingRatioBandWarning: boolean;
   actualRatioHoverText: string;
   totalHoursDisplay: string;
-  adminModalHoursAbnormal: boolean;
-  totalHoursTooltipText: string;
   employmentType: string;
 };
 
@@ -236,9 +237,6 @@ const WORKLOAD_SEARCH_DEPARTMENT_OPTIONS = [
   "Mathematics & Statistics",
   "Computer Science & Software Engineering",
 ] as const;
-const BAND_THRESHOLDS_TOOLTIP =
-  "Band thresholds: (Calculated T:R <= 0.20 is Research Focused); (Calculated T:R > 0.20 and <= 0.79 is Balanced Teaching & Research); (Calculated T:R > 0.79 and <= 1.00 is Teaching Focused)";
-
 type OpsSemesterReportItem = {
   id: string;
   year: number;
@@ -401,6 +399,33 @@ function expectedRangeForBand(band?: string | null): string {
   if (n === "Balanced Teaching & Research") return "> 20.0% and <= 79.0%";
   if (n === "Teaching Focused") return "> 79.0% and <= 100.0%";
   return "unknown";
+}
+
+function hasContractBandMismatch(targetBand?: string | null, calculatedBand?: string | null): boolean {
+  return Boolean(
+    targetBand &&
+      calculatedBand &&
+      normalizeBandLabel(targetBand) !== normalizeBandLabel(calculatedBand)
+  );
+}
+
+function formatRatioPercentFromUnitRatio(ratio?: number | null): string {
+  return typeof ratio === "number" && Number.isFinite(ratio)
+    ? `${formatOneDecimal(ratio * 100)}%`
+    : "N/A";
+}
+
+function contractBandMismatchImportMessage(params: {
+  staffId: string;
+  targetBand?: string | null;
+  calculatedBand?: string | null;
+  calculatedTeachingRatio?: number | null;
+}): string {
+  const targetBand = params.targetBand ?? "Unknown";
+  const calculatedBand = params.calculatedBand ?? "Unknown";
+  const expected = expectedRangeForBand(targetBand);
+  const actual = formatRatioPercentFromUnitRatio(params.calculatedTeachingRatio);
+  return `Staff ${params.staffId}: calculated T:R is ${actual}, which maps to "${calculatedBand}", but contract band is "${targetBand}" (expected ${expected}). Please correct the workload components or contract band and re-import.`;
 }
 
 function isPlaceholderNotesText(text: string) {
@@ -715,32 +740,12 @@ function buildWorkloadDetailSnapshot(
   const actualTeachingRatioOutOfRange = actualTeachingRatioPct < 0 || actualTeachingRatioPct > 100;
 
   const detailAnomaly = anomalyByStaffId[item.studentId.trim()];
-  let anomalyHoverText = "";
-  if (detailAnomaly?.targetBand && detailAnomaly.calculatedBand) {
-    const expected = expectedRangeForBand(detailAnomaly.targetBand);
-    const actual =
-      detailAnomaly.calculatedTeachingRatio != null && Number.isFinite(detailAnomaly.calculatedTeachingRatio)
-        ? `${formatOneDecimal(detailAnomaly.calculatedTeachingRatio * 100)}%`
-        : actualTeachingRatioDisplay;
-    if (normalizeBandLabel(detailAnomaly.targetBand) !== normalizeBandLabel(detailAnomaly.calculatedBand)) {
-      anomalyHoverText = `Calculated T:R is ${actual}, expected range for contract band "${detailAnomaly.targetBand}" is (${expected}). Calculated band is "${detailAnomaly.calculatedBand}", which does not match the contract band. After workload is distributed, Academic cannot self-confirm and must submit to HoD for modification review.`;
-    }
-  }
-  const showActualTeachingRatioBandWarning = Boolean(anomalyHoverText);
+  const showActualTeachingRatioBandWarning = false;
   const actualRatioHoverText = actualTeachingRatioOutOfRange
     ? `Error: Calculated T:R is ${actualTeachingRatioDisplay}. Valid range is 0.0% to 100.0%. Please correct the imported workload components and re-import.`
-    : anomalyHoverText
-      ? `Warning: ${anomalyHoverText}\n${BAND_THRESHOLDS_TOOLTIP}`
-      : "";
+    : "";
 
   const expectedRange = expectedHoursRangeForFte(detailAnomaly?.fte ?? null);
-  const adminModalHoursAbnormal =
-    detailsComputedTotalHours <= expectedRange.min || detailsComputedTotalHours > expectedRange.max;
-  const totalHoursTooltipText = adminModalHoursAbnormal
-    ? `Error: ${formatOneDecimal(expectedRange.min)} < expected working time <= ${formatOneDecimal(
-        expectedRange.max
-      )} working hours each semester.`
-    : "";
   const minDays = Math.ceil(expectedRange.min / 8);
   const maxDays = Math.ceil(expectedRange.max / 8);
   const totalHoursDisplay = `${formatOneDecimal(detailsComputedTotalHours)} (>${minDays} & <=${maxDays} working days)`;
@@ -752,45 +757,13 @@ function buildWorkloadDetailSnapshot(
     showActualTeachingRatioBandWarning,
     actualRatioHoverText,
     totalHoursDisplay,
-    adminModalHoursAbnormal,
-    totalHoursTooltipText,
     employmentType: employmentTypeLabelFromFte(detailAnomaly?.fte ?? null),
   };
 }
 
-function importHoursFailStatus(
-  totalHours: number,
-  fte: number | null
-): "pending" | "rejected" {
-  const { min, max } = expectedHoursRangeForFte(fte);
-  if (typeof totalHours !== "number" || !Number.isFinite(totalHours)) return "pending";
-  return totalHours <= min || totalHours > max ? "rejected" : "pending";
-}
-
-function fteForStaffFromParsed(parsed: WorkloadImportParseResult, staffId: string): number | null {
-  for (const sh of parsed.sheets) {
-    const am = sh.anomalyMetricsByStaffId[staffId];
-    if (am?.fte != null && typeof am.fte === "number" && Number.isFinite(am.fte)) return am.fte;
-  }
-  return null;
-}
-
-/** Imported-row “Blocked” parity with workload modal: total hours vs FTE-scaled semester band. */
-function isImportedRowHoursOutOfBand(
-  row: Pick<MockRequest, "hours" | "studentId" | "importedFromTemplate">,
-  anomalyByStaffId: Record<string, { fte: number | null } | undefined>
-): boolean {
-  if (!row.importedFromTemplate) return false;
-  const sid = row.studentId.trim();
-  const { min, max } = expectedHoursRangeForFte(anomalyByStaffId[sid]?.fte ?? null);
-  const h = row.hours;
-  return typeof h === "number" && Number.isFinite(h) && (h <= min || h > max);
-}
-
-/** Mirrors School Ops «Failed» filter: rejected, hours band, teaching/HDR/service/role import conflicts. */
+/** Mirrors School Ops «Failed» filter: rejected or teaching/HDR/service/role import conflicts. */
 function rowMatchesWorkloadFailedTab(
   it: MockRequest,
-  anomalyByStaffId: Record<string, { fte: number | null } | undefined>,
   roleImportByStaffId: Record<string, { hasAssignedRoleHourConflict?: boolean } | undefined>,
   teachingLinesByStaffId: Record<string, { duplicateUnitConflict?: boolean }[] | undefined>,
   hdrImportByStaffId: Record<string, { hasHdrFieldConflict?: boolean } | undefined>,
@@ -800,7 +773,6 @@ function rowMatchesWorkloadFailedTab(
   if (it.status === "rejected") return true;
   const sid = it.studentId.trim();
   if (it.importedFromTemplate && (it.status === "initial" || it.status === "pending")) {
-    if (isImportedRowHoursOutOfBand(it, anomalyByStaffId)) return true;
     if (roleImportByStaffId[sid]?.hasAssignedRoleHourConflict) return true;
     if ((teachingLinesByStaffId[sid] ?? []).some((line) => line.duplicateUnitConflict)) return true;
     if (hdrImportByStaffId[sid]?.hasHdrFieldConflict) return true;
@@ -998,7 +970,7 @@ export default function SchoolofOperations() {
             rate: number; status: string; confirmation?: "confirmed" | "unconfirmed"; confirmationTime?: string; hours: number; supervisorNote?: string;
             operatedBy?: string; operatedByStaffId?: string; assignedBy?: string; assignedByStaffId?: string;
             targetTeachingRatio?: number | null; targetBand?: string | null;
-            cancelled?: boolean; importedFromTemplate?: boolean; workloadNewStaff?: boolean;
+            cancelled?: boolean; distributionFailed?: boolean; overwritesExistingWorkflow?: boolean; importedFromTemplate?: boolean; workloadNewStaff?: boolean;
             hodReview?: string; staffRole?: string; createdAt?: string; distributedTime?: string; fte?: number;
           }>;
           currentPeriod?: {
@@ -1042,6 +1014,8 @@ export default function SchoolofOperations() {
         targetTeachingRatio: row.targetTeachingRatio ?? undefined,
         targetBand: row.targetBand ?? undefined,
         cancelled: Boolean(row.cancelled),
+        distributionFailed: Boolean(row.distributionFailed),
+        overwritesExistingWorkflow: Boolean(row.overwritesExistingWorkflow),
         importedFromTemplate: Boolean(row.importedFromTemplate),
         workloadNewStaff: Boolean(row.workloadNewStaff),
         hodReview: row.hodReview === "yes" ? "yes" : "no",
@@ -1069,8 +1043,8 @@ export default function SchoolofOperations() {
           label: nextEffectivePeriod.label,
         });
       }
-      // Pre-populate fte so isImportedRowHoursOutOfBand works correctly for part-time staff
-      // without requiring the detail modal to be opened first.
+      // Pre-populate FTE so the detail modal can display the working-days suffix
+      // without requiring a separate detail fetch first.
       setWorkloadAnomalyImportByStaffId((prev) => {
         const next = { ...prev };
         for (const row of resp.data.items) {
@@ -1152,6 +1126,7 @@ export default function SchoolofOperations() {
       total: number;
       success: number;
       failed: number;
+      canEnterPendingList: boolean;
       failedRows?: number[];
       errorRecords?: ImportErrorRecord[];
     };
@@ -1172,6 +1147,8 @@ export default function SchoolofOperations() {
   });
   const [invalidRecordsOpen, setInvalidRecordsOpen] = useState(false);
   const [invalidRecordsPage, setInvalidRecordsPage] = useState(1);
+  const [pendingWorkloadImportParseResult, setPendingWorkloadImportParseResult] =
+    useState<WorkloadImportParseResult | null>(null);
   const INVALID_RECORDS_PAGE_SIZE = 10;
 
   useEffect(() => {
@@ -1205,7 +1182,6 @@ export default function SchoolofOperations() {
   }, [popup.open]);
 
   const [detailsOpen, setDetailsOpen] = useState(false);
-  const [supersededNoticeOpen, setSupersededNoticeOpen] = useState(false);
   const [detailsItem, setDetailsItem] = useState<MockRequest | null>(null);
   const [detailsBreakdown, setDetailsBreakdown] = useState<BreakdownData | null>(null);
   const [noteModalOpen, setNoteModalOpen] = useState(false);
@@ -1214,9 +1190,18 @@ export default function SchoolofOperations() {
   const [noteDecision, setNoteDecision] = useState<"approve" | "reject">("approve");
   const [noteTargetId, setNoteTargetId] = useState<number | null>(null);
   const [distributeModalOpen, setDistributeModalOpen] = useState(false);
+  const [distributeOverwriteConfirmOpen, setDistributeOverwriteConfirmOpen] = useState(false);
   const [distributeYearInput, setDistributeYearInput] = useState(String(currentYear));
   const [distributeSemesterInput, setDistributeSemesterInput] = useState<"S1" | "S2">(currentSemester);
   const [distributeError, setDistributeError] = useState("");
+  const [distributionProgress, setDistributionProgress] = useState({
+    active: false,
+    progressId: "",
+    total: 0,
+    processed: 0,
+    success: 0,
+    failed: 0,
+  });
   const [changeHistoryOpen, setChangeHistoryOpen] = useState(false);
   const [changeHistoryPage, setChangeHistoryPage] = useState(1);
   const [changeHistoryRows, setChangeHistoryRows] = useState<ChangeHistoryEntry[]>([]);
@@ -1614,17 +1599,6 @@ export default function SchoolofOperations() {
     return expectedHoursRangeForFte(fte);
   }, [detailsAnomaly, detailsItem, workloadAnomalyImportByStaffId]);
 
-  const adminModalHoursAbnormal = useMemo(() => {
-    if (detailsAnomaly?.validationFlags?.hoursOutOfRange != null) {
-      return detailsAnomaly.validationFlags.hoursOutOfRange;
-    }
-    if (!adminModalBreakdown) return false;
-    return (
-      detailsComputedTotalHours <= detailsExpectedHoursRange.min ||
-      detailsComputedTotalHours > detailsExpectedHoursRange.max
-    );
-  }, [detailsAnomaly, adminModalBreakdown, detailsComputedTotalHours, detailsExpectedHoursRange]);
-
   const actualTeachingRatioPercent = useMemo(() => {
     if (detailsAnomaly?.calculatedTeachingRatio != null) {
       return detailsAnomaly.calculatedTeachingRatio * 100;
@@ -1642,38 +1616,15 @@ export default function SchoolofOperations() {
     (Number.isFinite(actualTeachingRatioPercent) &&
       (actualTeachingRatioPercent < 0 || actualTeachingRatioPercent > 100));
 
-  const anomalyHoverText = useMemo(() => {
-    if (!detailsAnomaly || !detailsAnomaly.targetBand || !detailsAnomaly.calculatedBand) return "";
-    const expected = expectedRangeForBand(detailsAnomaly.targetBand);
-    const actual = detailsAnomaly.calculatedTeachingRatio != null
-      ? `${formatOneDecimal(detailsAnomaly.calculatedTeachingRatio * 100)}%`
-      : "N/A";
-    if (normalizeBandLabel(detailsAnomaly.targetBand) === normalizeBandLabel(detailsAnomaly.calculatedBand)) {
-      return "";
-    }
-    return `Calculated T:R is ${actual}, expected range for contract band "${detailsAnomaly.targetBand}" is (${expected}). Calculated band is "${detailsAnomaly.calculatedBand}", which does not match the contract band. After workload is distributed, Academic cannot self-confirm and must submit to HoD for modification review.`;
-  }, [detailsAnomaly]);
-
-  /** T:R out-of-range should be an Error; otherwise keep existing band mismatch warning. */
+  /** T:R out-of-range stays a detail error; contract band mismatch is blocked during import. */
   const actualRatioHoverText = useMemo(() => {
     if (actualTeachingRatioOutOfRange) {
       return `Error: Calculated T:R is ${actualTeachingRatioDisplay}. Valid range is 0.0% to 100.0%. Please correct the imported workload components and re-import.`;
     }
-    if (!anomalyHoverText) return "";
-    return `Warning: ${anomalyHoverText}\n${BAND_THRESHOLDS_TOOLTIP}`;
-  }, [actualTeachingRatioOutOfRange, actualTeachingRatioDisplay, anomalyHoverText]);
+    return "";
+  }, [actualTeachingRatioOutOfRange, actualTeachingRatioDisplay]);
 
-  const showActualTeachingRatioBandWarning =
-    detailsAnomaly?.validationFlags?.bandMismatch ?? Boolean(anomalyHoverText);
-
-  const totalHoursTooltipText = useMemo(() => {
-    if (!adminModalHoursAbnormal) return "";
-    return `Error: ${formatOneDecimal(
-      detailsExpectedHoursRange.min
-    )} < expected working time <= ${formatOneDecimal(
-      detailsExpectedHoursRange.max
-    )} working hours each semester.`;
-  }, [adminModalHoursAbnormal, detailsExpectedHoursRange]);
+  const showActualTeachingRatioBandWarning = false;
 
   const totalHoursWorkingDaysSuffix = useMemo(() => {
     const dayMin = detailsExpectedHoursRange.min / 8;
@@ -1691,14 +1642,16 @@ export default function SchoolofOperations() {
   const itemsForFilter = useMemo(() => {
     const byStatus = pending.filter((it) => {
       // "all" = Pending Distribution: INITIAL items not yet distributed
-      if (statusFilter === "all") return !it.cancelled && it.status === "initial" && !it.distributedTime;
+      if (statusFilter === "all") {
+        return !it.cancelled && !it.distributionFailed && it.status === "initial" && !it.distributedTime;
+      }
       if (statusFilter === "superseded") return Boolean(it.cancelled);
       if (statusFilter === "failed")
         return !it.distributedTime && (
+          Boolean(it.distributionFailed) ||
           Boolean(it.backendId && distributionFailedWorkloadIds.has(it.backendId)) ||
           rowMatchesWorkloadFailedTab(
             it,
-            workloadAnomalyImportByStaffId,
             workloadAssignedRoleImportByStaffId,
             workloadTeachingImportLinesByStaffId,
             workloadHdrImportByStaffId,
@@ -1733,8 +1686,19 @@ export default function SchoolofOperations() {
   const allPendingFilteredSelected =
     pendingFilteredIds.length > 0 && pendingFilteredIds.every((id) => selectedIds.has(id));
   const somePendingFilteredSelected = pendingFilteredIds.some((id) => selectedIds.has(id));
+  const selectedPendingRowsForDistribution = useMemo(
+    () =>
+      pending.filter(
+        (it) => selectedIds.has(it.id) && !it.cancelled && !it.distributionFailed && it.status === "initial" && !it.distributedTime
+      ),
+    [pending, selectedIds]
+  );
+  const selectedDistributionIncludesOverwrite = useMemo(
+    () => selectedPendingRowsForDistribution.some((it) => Boolean(it.overwritesExistingWorkflow)),
+    [selectedPendingRowsForDistribution]
+  );
   const hasSelectedPendingForDistribution = useMemo(
-    () => pending.some((it) => selectedIds.has(it.id) && !it.cancelled && it.status === "initial" && !it.distributedTime),
+    () => pending.some((it) => selectedIds.has(it.id) && !it.cancelled && !it.distributionFailed && it.status === "initial" && !it.distributedTime),
     [pending, selectedIds]
   );
 
@@ -1749,7 +1713,7 @@ export default function SchoolofOperations() {
   }, [statusFilter, somePendingFilteredSelected, allPendingFilteredSelected]);
 
   const workloadPendingFilterCount = useMemo(
-    () => pending.filter((it) => !it.cancelled && it.status === "initial" && !it.distributedTime).length,
+    () => pending.filter((it) => !it.cancelled && !it.distributionFailed && it.status === "initial" && !it.distributedTime).length,
     [pending]
   );
 
@@ -1758,15 +1722,15 @@ export default function SchoolofOperations() {
     [pending]
   );
 
-  /** Same predicate as Status Filter «Failed» (rejected, hours band, duplicate teaching unit, or role hour conflict). */
+  /** Same predicate as Status Filter «Failed» (rejected, duplicate teaching unit, or import conflicts). */
   const workloadFailedFilterCount = useMemo(
     () =>
       pending.filter((it) =>
         !it.distributedTime && (
+          Boolean(it.distributionFailed) ||
           Boolean(it.backendId && distributionFailedWorkloadIds.has(it.backendId)) ||
           rowMatchesWorkloadFailedTab(
               it,
-              workloadAnomalyImportByStaffId,
               workloadAssignedRoleImportByStaffId,
               workloadTeachingImportLinesByStaffId,
               workloadHdrImportByStaffId,
@@ -1777,7 +1741,6 @@ export default function SchoolofOperations() {
     [
       pending,
       distributionFailedWorkloadIds,
-      workloadAnomalyImportByStaffId,
       workloadAssignedRoleImportByStaffId,
       workloadTeachingImportLinesByStaffId,
       workloadHdrImportByStaffId,
@@ -1800,11 +1763,6 @@ export default function SchoolofOperations() {
       Name: it.name,
       "Staff Number": it.studentId,
       Status: displayStatusForOpsRow(it),
-      "Hours out of band (import)": it.importedFromTemplate
-        ? isImportedRowHoursOutOfBand(it, workloadAnomalyImportByStaffId)
-          ? "Yes"
-          : "No"
-        : "—",
       "Role hours conflict (import)": it.importedFromTemplate
         ? workloadAssignedRoleImportByStaffId[it.studentId.trim()]?.hasAssignedRoleHourConflict
           ? "Yes"
@@ -2271,18 +2229,54 @@ export default function SchoolofOperations() {
 
   function closeDistributeModal() {
     setDistributeModalOpen(false);
+    setDistributeOverwriteConfirmOpen(false);
     setDistributeError("");
+    setDistributionProgress({ active: false, progressId: "", total: 0, processed: 0, success: 0, failed: 0 });
   }
 
-  function handleConfirmDistributeWorkload() {
+  useEffect(() => {
+    if (!distributionProgress.active || !distributionProgress.progressId) return;
+    const timer = window.setInterval(() => {
+      void apiJson<{
+        success: boolean;
+        data?: {
+          progressId: string;
+          totalCount: number;
+          processedCount: number;
+          successCount: number;
+          failedCount: number;
+          status: string;
+        };
+      }>(`/api/school-operations/workloads/distribute-progress/${distributionProgress.progressId}`)
+        .then((resp) => {
+          if (!resp.success || !resp.data) return;
+          const progressData = resp.data;
+          setDistributionProgress((prev) => (
+            prev.active && prev.progressId === distributionProgress.progressId
+              ? {
+                  ...prev,
+                  total: progressData.totalCount ?? prev.total,
+                  processed: progressData.processedCount ?? prev.processed,
+                  success: progressData.successCount ?? prev.success,
+                  failed: progressData.failedCount ?? prev.failed,
+                }
+              : prev
+          ));
+        })
+        .catch(() => {
+          // Ignore transient polling errors during distribution.
+        });
+    }, 1000);
+    return () => window.clearInterval(timer);
+  }, [distributionProgress.active, distributionProgress.progressId]);
+
+  function submitDistributeWorkload() {
     const parsedYear = Number(distributeYearInput);
     if (!Number.isFinite(parsedYear) || parsedYear < 2000 || parsedYear > 2100) {
       setDistributeError("Please enter a valid year.");
       return;
     }
-    const selectedPendingRows = pending.filter(
-      (it) => selectedIds.has(it.id) && !it.cancelled && it.status === "initial" && !it.distributedTime
-    );
+    const selectedPendingRows = selectedPendingRowsForDistribution;
     if (!selectedPendingRows.length) {
       setDistributeError("Please select at least one pending workload.");
       return;
@@ -2295,8 +2289,21 @@ export default function SchoolofOperations() {
       return;
     }
 
+    const progressId =
+      typeof crypto !== "undefined" && typeof crypto.randomUUID === "function"
+        ? crypto.randomUUID()
+        : `dist-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+
     setSubmitting(true);
     setDistributeError("");
+    setDistributionProgress({
+      active: true,
+      progressId,
+      total: selectedPendingRows.length,
+      processed: 0,
+      success: 0,
+      failed: 0,
+    });
 
     void apiJson<{
       success: boolean;
@@ -2315,6 +2322,7 @@ export default function SchoolofOperations() {
         workloadIds: backendIds,
         academicYear: parsedYear,
         semester: distributeSemesterInput,
+        progressId,
       }),
     })
       .then((resp) => {
@@ -2347,6 +2355,7 @@ export default function SchoolofOperations() {
         setDistributionFailedWorkloadIds(failedIds);
         setSelectedIds(new Set());
         setStatusFilter(bad > 0 ? "failed" : "distributed");
+        setDistributeOverwriteConfirmOpen(false);
         setDistributeModalOpen(false);
         const failDetails = (resp.data?.failed ?? [])
           .map((f) => `• ${f.name || f.staffId}: ${f.error}`)
@@ -2365,7 +2374,16 @@ export default function SchoolofOperations() {
       })
       .finally(() => {
         setSubmitting(false);
+        setDistributionProgress({ active: false, progressId: "", total: 0, processed: 0, success: 0, failed: 0 });
       });
+  }
+
+  function handleConfirmDistributeWorkload() {
+    if (selectedDistributionIncludesOverwrite) {
+      setDistributeOverwriteConfirmOpen(true);
+      return;
+    }
+    submitDistributeWorkload();
   }
 
   async function handleAdminSearch() {
@@ -2626,6 +2644,9 @@ export default function SchoolofOperations() {
     const file = event.target.files?.[0];
     event.target.value = "";
     if (!file) return;
+    setPendingWorkloadImportParseResult(null);
+    setInvalidRecordsOpen(false);
+    setInvalidRecordsPage(1);
     const isXlsx =
       file.name.toLowerCase().endsWith(".xlsx") ||
       file.type === "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet";
@@ -2641,87 +2662,7 @@ export default function SchoolofOperations() {
     try {
       const buf = await file.arrayBuffer();
       const parsed = parseWorkloadWorkbookArrayBuffer({ fileName: file.name, buf });
-      await postWorkloadSpreadsheetImport(parsed);
-      setWorkloadTeachingImportLinesByStaffId((prev) => {
-        const next = { ...prev };
-        for (const sh of parsed.sheets) {
-          for (const [rawStaffId, lines] of Object.entries(sh.teachingLinesByStaffId)) {
-            const key = rawStaffId.startsWith("__row:") ? rawStaffId : rawStaffId.trim();
-            const merged = [...(next[key] ?? []), ...lines];
-            next[key] = applyDuplicateTeachingUnitFlagsToLines(merged);
-          }
-        }
-        return next;
-      });
-      setWorkloadHdrImportByStaffId((prev) => {
-        const next = { ...prev };
-        for (const sh of parsed.sheets) {
-          for (const [rawId, hdr] of Object.entries(sh.hdrMetricsByStaffId)) {
-            const key = rawId.startsWith("__row:") ? rawId : rawId.trim();
-            if (key in next) continue;
-            if (
-              hdr.ftStudents != null ||
-              hdr.ptStudents != null ||
-              hdr.ftHours != null ||
-              hdr.ptHours != null ||
-              hdr.totalHrs != null ||
-              hdr.derivedHrs != null ||
-              hdr.hdrPoints != null ||
-              hdr.hasHdrFieldConflict
-            ) {
-              next[key] = hdr;
-            }
-          }
-        }
-        return next;
-      });
-      setWorkloadServiceImportByStaffId((prev) => {
-        const next = { ...prev };
-        for (const sh of parsed.sheets) {
-          for (const [rawId, svc] of Object.entries(sh.serviceMetricsByStaffId)) {
-            const key = rawId.startsWith("__row:") ? rawId : rawId.trim();
-            if (key in next) continue;
-            if (svc.servicePoints != null || svc.hasServicePointsConflict) next[key] = svc;
-          }
-        }
-        return next;
-      });
-      setWorkloadAssignedRoleImportByStaffId((prev) => {
-        const next = { ...prev };
-        for (const sh of parsed.sheets) {
-          for (const [rawId, roleMetrics] of Object.entries(sh.roleMetricsByStaffId)) {
-            const key = rawId.startsWith("__row:") ? rawId : rawId.trim();
-            if (key in next) continue;
-            if (
-              roleMetrics.roles.length > 0 ||
-              roleMetrics.totalPoints != null ||
-              roleMetrics.totalHours != null ||
-              roleMetrics.hasAssignedRoleHourConflict
-            ) {
-              next[key] = roleMetrics;
-            }
-          }
-        }
-        return next;
-      });
-      setWorkloadAnomalyImportByStaffId((prev) => {
-        const next = { ...prev };
-        for (const sh of parsed.sheets) {
-          for (const [rawId, anomaly] of Object.entries(sh.anomalyMetricsByStaffId)) {
-            const key = rawId.startsWith("__row:") ? rawId : rawId.trim();
-            if (!key || key.startsWith("__row:")) continue;
-            next[key] = {
-              targetBand: anomaly.targetBand ?? null,
-              calculatedBand: anomaly.calculatedBand ?? null,
-              calculatedTeachingRatio: anomaly.calculatedTeachingRatio ?? null,
-              researchResidualPoints: anomaly.researchResidualPoints ?? null,
-              totalHoursFromPoints: anomaly.totalHoursFromPoints ?? null,
-              fte: anomaly.fte ?? null,
-            };
-          }
-        }
-        return next;
-      });
+      const previewResponse = await postWorkloadSpreadsheetImport(parsed, { previewOnly: true });
       const importRowsByStaff = new Map<
         string,
         {
@@ -2730,6 +2671,8 @@ export default function SchoolofOperations() {
           targetTeachingRatio?: number;
           totalHours: number;
           targetBand?: string;
+          calculatedBand?: string | null;
+          calculatedTeachingRatio?: number | null;
           notesFromTemplate: string;
           workloadNewStaff?: boolean;
           hodReview?: "yes" | "no";
@@ -2774,7 +2717,11 @@ export default function SchoolofOperations() {
           const ratioRaw = row.cellsByColumn[TARGET_TEACHING_PCT_COL];
           const parsedRatio = Number.parseFloat(String(ratioRaw ?? "").trim());
           const targetTeachingRatio = Number.isFinite(parsedRatio) ? parsedRatio : undefined;
-          const targetBand = normalizeBandLabel(String(row.cellsByColumn[TARGET_BAND_COL] ?? "").trim()) ?? undefined;
+          const anomalyMetrics = sheet.anomalyMetricsByStaffId[staffId];
+          const targetBand =
+            anomalyMetrics?.targetBand ??
+            normalizeBandLabel(String(row.cellsByColumn[TARGET_BAND_COL] ?? "").trim()) ??
+            undefined;
           const notesFromTemplate = String(row.cellsByColumn[NOTES_COL] ?? "").trim();
           const workloadNewStaff = parseWorkloadTemplateNewStaff(row.cellsByColumn[NEW_STAFF_COL]);
           const hodReview = parseWorkloadTemplateHodReview(row.cellsByColumn[HOD_REVIEW_COL]);
@@ -2784,6 +2731,8 @@ export default function SchoolofOperations() {
             unit: String(row.cellsByColumn[TEACHING_UNIT_COL] ?? "").trim(),
             targetTeachingRatio,
             targetBand,
+            calculatedBand: anomalyMetrics?.calculatedBand ?? null,
+            calculatedTeachingRatio: anomalyMetrics?.calculatedTeachingRatio ?? null,
             totalHours,
             notesFromTemplate,
             workloadNewStaff,
@@ -2796,13 +2745,11 @@ export default function SchoolofOperations() {
       const importStatusByStaffId = new Map<string, "pending" | "rejected">();
       const failedRowSet = new Set<number>();
       const employeeByStaffId = new Map(assignablePeople.map((person) => [person.staffId.trim(), person]));
-      const ineligibleStaffIds = new Set<string>();
       const errorRecords: ImportErrorRecord[] = [];
       importRowsByStaff.forEach((imported, staffId) => {
         const matchedEmployee = employeeByStaffId.get(staffId);
         const employeeEligible = Boolean(matchedEmployee && matchedEmployee.isActive);
         if (!employeeEligible) {
-          ineligibleStaffIds.add(staffId);
           importStatusByStaffId.set(staffId, "rejected");
           imported.rowIndices.forEach((idx) => {
             failedRowSet.add(idx);
@@ -2818,7 +2765,6 @@ export default function SchoolofOperations() {
           });
           return;
         }
-        const fteVal = fteForStaffFromParsed(parsed, staffId);
         const roleHourConflict = parsed.sheets.some(
           (sh) => sh.roleMetricsByStaffId[staffId]?.hasAssignedRoleHourConflict === true
         );
@@ -2832,9 +2778,9 @@ export default function SchoolofOperations() {
         const servicePointsConflict = parsed.sheets.some(
           (sh) => sh.serviceMetricsByStaffId[staffId]?.hasServicePointsConflict === true
         );
-        const hoursRejected = importHoursFailStatus(imported.totalHours, fteVal) === "rejected";
+        const bandMismatch = hasContractBandMismatch(imported.targetBand, imported.calculatedBand);
         const importStatus =
-          teachingDupUnit || teachingScoreConflict || roleHourConflict || hoursRejected || hdrFieldConflict || servicePointsConflict
+          teachingDupUnit || teachingScoreConflict || roleHourConflict || hdrFieldConflict || servicePointsConflict || bandMismatch
             ? "rejected"
             : "pending";
         importStatusByStaffId.set(staffId, importStatus);
@@ -2868,13 +2814,18 @@ export default function SchoolofOperations() {
               message: `Staff ${staffId} has conflicting assigned role hours.`,
             });
           }
-          if (hoursRejected) {
+          if (bandMismatch) {
             errorRecords.push({
               row: firstRow,
-              column: "G",
-              field: "Total Hours",
-              errorType: "Hours Out of Range",
-              message: `Staff ${staffId} total hours (${imported.totalHours}) exceed FTE-based limit.`,
+              column: TARGET_BAND_COL,
+              field: "Contract Band",
+              errorType: "Contract Band Mismatch",
+              message: contractBandMismatchImportMessage({
+                staffId,
+                targetBand: imported.targetBand,
+                calculatedBand: imported.calculatedBand,
+                calculatedTeachingRatio: imported.calculatedTeachingRatio,
+              }),
             });
           }
           if (hdrFieldConflict) {
@@ -2897,6 +2848,24 @@ export default function SchoolofOperations() {
           }
         }
       });
+      for (const backendError of previewResponse.errors ?? []) {
+        const staffId = String(backendError.staffId ?? "").trim();
+        if (!staffId) continue;
+        const imported = importRowsByStaff.get(staffId);
+        importStatusByStaffId.set(staffId, "rejected");
+        const firstRow = imported?.rowIndices[0] ?? 0;
+        if (imported) {
+          imported.rowIndices.forEach((idx) => failedRowSet.add(idx));
+        }
+        errorRecords.push({
+          row: firstRow,
+          column: String((backendError as { column?: string }).column ?? "C"),
+          field: String((backendError as { field?: string }).field ?? "Staff Number"),
+          errorType: String((backendError as { errorType?: string }).errorType ?? "Backend Validation"),
+          message: backendError.message || `Staff ${staffId} failed backend validation.`,
+        });
+      }
+      const mergedErrorRecords = mergeImportErrorRecords(errorRecords);
       const importedTotal = importRowsByStaff.size;
       const importedFailed = Array.from(importStatusByStaffId.values()).filter((s) => s === "rejected").length;
       const importedSuccess = Math.max(0, importedTotal - importedFailed);
@@ -2908,22 +2877,22 @@ export default function SchoolofOperations() {
       setPage(1);
       setDetailsOpen(false);
       setDetailsItem(null);
+      setPendingWorkloadImportParseResult(parsed);
       setInvalidRecordsOpen(false);
       setInvalidRecordsPage(1);
-      // Refresh list from backend so DB period selection and rows stay backend-authoritative.
-      void fetchWorkloadList(workloadQuery);
       setPopup({
         open: true,
         title: "Import Completed Summary",
         message:
-          "For failed rows, please check whether the employee is not in the system or is inactive.",
+          "Only a 100% valid workbook can enter the pending list. Review any invalid rows before continuing.",
         status: "approved",
         importSummary: {
           total: importedTotal,
           success: importedSuccess,
           failed: importedFailed,
+          canEnterPendingList: importedFailed === 0,
           failedRows,
-          errorRecords,
+          errorRecords: mergedErrorRecords,
         },
       });
     } catch (e) {
@@ -2956,6 +2925,175 @@ export default function SchoolofOperations() {
     if (!raw) return false;
     if (raw === "false" || raw === "no" || raw === "n" || raw === "0") return false;
     return raw === "true" || raw === "yes" || raw === "y" || raw === "1";
+  }
+
+  function mergeImportErrorRecords(records: ImportErrorRecord[]): ImportErrorRecord[] {
+    const merged = new Map<string, ImportErrorRecord>();
+    for (const record of records) {
+      const key = `${record.row}|${record.column}|${record.field}`;
+      if (!merged.has(key)) {
+        merged.set(key, record);
+      }
+    }
+    return Array.from(merged.values()).sort((a, b) => {
+      if (a.row !== b.row) return a.row - b.row;
+      return a.column.localeCompare(b.column);
+    });
+  }
+
+  function applyImportedWorkbookCache(parsed: WorkloadImportParseResult) {
+    setWorkloadTeachingImportLinesByStaffId((prev) => {
+      const next = { ...prev };
+      for (const sh of parsed.sheets) {
+        for (const [rawStaffId, lines] of Object.entries(sh.teachingLinesByStaffId)) {
+          const key = rawStaffId.startsWith("__row:") ? rawStaffId : rawStaffId.trim();
+          const merged = [...(next[key] ?? []), ...lines];
+          next[key] = applyDuplicateTeachingUnitFlagsToLines(merged);
+        }
+      }
+      return next;
+    });
+    setWorkloadHdrImportByStaffId((prev) => {
+      const next = { ...prev };
+      for (const sh of parsed.sheets) {
+        for (const [rawId, hdr] of Object.entries(sh.hdrMetricsByStaffId)) {
+          const key = rawId.startsWith("__row:") ? rawId : rawId.trim();
+          if (key in next) continue;
+          if (
+            hdr.ftStudents != null ||
+            hdr.ptStudents != null ||
+            hdr.ftHours != null ||
+            hdr.ptHours != null ||
+            hdr.totalHrs != null ||
+            hdr.derivedHrs != null ||
+            hdr.hdrPoints != null ||
+            hdr.hasHdrFieldConflict
+          ) {
+            next[key] = hdr;
+          }
+        }
+      }
+      return next;
+    });
+    setWorkloadServiceImportByStaffId((prev) => {
+      const next = { ...prev };
+      for (const sh of parsed.sheets) {
+        for (const [rawId, svc] of Object.entries(sh.serviceMetricsByStaffId)) {
+          const key = rawId.startsWith("__row:") ? rawId : rawId.trim();
+          if (key in next) continue;
+          if (svc.servicePoints != null || svc.hasServicePointsConflict) next[key] = svc;
+        }
+      }
+      return next;
+    });
+    setWorkloadAssignedRoleImportByStaffId((prev) => {
+      const next = { ...prev };
+      for (const sh of parsed.sheets) {
+        for (const [rawId, roleMetrics] of Object.entries(sh.roleMetricsByStaffId)) {
+          const key = rawId.startsWith("__row:") ? rawId : rawId.trim();
+          if (key in next) continue;
+          if (
+            roleMetrics.roles.length > 0 ||
+            roleMetrics.totalPoints != null ||
+            roleMetrics.totalHours != null ||
+            roleMetrics.hasAssignedRoleHourConflict
+          ) {
+            next[key] = roleMetrics;
+          }
+        }
+      }
+      return next;
+    });
+    setWorkloadAnomalyImportByStaffId((prev) => {
+      const next = { ...prev };
+      for (const sh of parsed.sheets) {
+        for (const [rawId, anomaly] of Object.entries(sh.anomalyMetricsByStaffId)) {
+          const key = rawId.startsWith("__row:") ? rawId : rawId.trim();
+          if (!key || key.startsWith("__row:")) continue;
+          next[key] = {
+            targetBand: anomaly.targetBand ?? null,
+            calculatedBand: anomaly.calculatedBand ?? null,
+            calculatedTeachingRatio: anomaly.calculatedTeachingRatio ?? null,
+            researchResidualPoints: anomaly.researchResidualPoints ?? null,
+            totalHoursFromPoints: anomaly.totalHoursFromPoints ?? null,
+            fte: anomaly.fte ?? null,
+          };
+        }
+      }
+      return next;
+    });
+  }
+
+  function closeImportSummaryPopup() {
+    setPendingWorkloadImportParseResult(null);
+    setInvalidRecordsOpen(false);
+    setInvalidRecordsPage(1);
+    setPopupDragOffset({ x: 0, y: 0 });
+    setPopup((prev) => ({
+      ...prev,
+      open: false,
+      importSummary: undefined,
+    }));
+  }
+
+  async function handleEnterPendingList() {
+    if (!pendingWorkloadImportParseResult || !popup.importSummary?.canEnterPendingList) {
+      return;
+    }
+
+    setSubmitting(true);
+    try {
+      const response = await postWorkloadSpreadsheetImport(pendingWorkloadImportParseResult);
+      const failedCount = response.failed ?? 0;
+      const firstError = response.errors?.[0]?.message;
+      if (!response.ok || failedCount > 0) {
+        setPendingWorkloadImportParseResult(null);
+        setInvalidRecordsOpen(false);
+        setPopup({
+          open: true,
+          title: "Import Failed",
+          message: firstError
+            ? `The workbook changed or the backend rejected this import: ${firstError}`
+            : "The workbook could not be entered into the pending list. Please review the Excel and try again.",
+          status: "rejected",
+          importSummary: undefined,
+        });
+        return;
+      }
+
+      applyImportedWorkbookCache(pendingWorkloadImportParseResult);
+      setStatusFilter("all");
+      setDistributionFailedWorkloadIds(new Set());
+      setSelectedIds(new Set());
+      setPage(1);
+      setDetailsOpen(false);
+      setDetailsItem(null);
+      setInvalidRecordsOpen(false);
+      setInvalidRecordsPage(1);
+      setPendingWorkloadImportParseResult(null);
+      setPopupDragOffset({ x: 0, y: 0 });
+      setPopup((prev) => ({
+        ...prev,
+        open: false,
+        importSummary: undefined,
+      }));
+      void fetchWorkloadList(workloadQuery);
+    } catch (error) {
+      setPendingWorkloadImportParseResult(null);
+      setInvalidRecordsOpen(false);
+      setPopup({
+        open: true,
+        title: "Import Failed",
+        message:
+          error instanceof Error
+            ? error.message
+            : "The workbook could not be entered into the pending list. Please try again.",
+        status: "rejected",
+        importSummary: undefined,
+      });
+    } finally {
+      setSubmitting(false);
+    }
   }
 
   async function handleImportTemplate(event: ChangeEvent<HTMLInputElement>) {
@@ -3115,10 +3253,6 @@ export default function SchoolofOperations() {
   }
 
   function openDetails(item: MockRequest) {
-    if (item.cancelled) {
-      setSupersededNoticeOpen(true);
-      return;
-    }
     const matchedEmployee = assignablePeople.find((person) => person.staffId.trim() === item.studentId.trim());
     const resolvedDepartment = matchedEmployee?.currentDepartment?.trim() || item.department?.trim() || "";
     const resolvedTitle = matchedEmployee?.title?.trim() || item.title?.trim() || "";
@@ -3183,6 +3317,117 @@ export default function SchoolofOperations() {
     setNoteDraft("");
     setNoteError("");
     setNoteTargetId(null);
+  }
+
+  function openChangeHistoryForItem(item: MockRequest | null) {
+    if (!item?.backendId) return;
+    setChangeHistoryPage(1);
+    setChangeHistoryRows([]);
+    setChangeHistoryOpen(true);
+    setChangeHistoryLoading(true);
+    void apiJson<{ success: boolean; data: ChangeHistoryEntry[] }>(
+      `/api/school-operations/workloads/${item.backendId}/history`
+    )
+      .then((resp) => {
+        if (resp.success) setChangeHistoryRows(resp.data ?? []);
+      })
+      .finally(() => setChangeHistoryLoading(false));
+  }
+
+  function handleRedistributeSingleWorkload(item: MockRequest) {
+    if (!item.backendId) return;
+    setSubmitting(true);
+    void apiJson<{
+      success: boolean;
+      message?: string;
+      data?: {
+        id: string;
+        status: "initial";
+        confirmation: "unconfirmed";
+        distributedTime: string;
+        operatedBy: string;
+        operatedByStaffId: string;
+        assignedBy: string;
+        assignedByStaffId: string;
+        requestReason?: string;
+        supervisorNote?: string;
+      };
+    }>(`/api/school-operations/workloads/${item.backendId}/redistribute`, {
+      method: "POST",
+    })
+      .then((resp) => {
+        if (!resp.success) {
+          setPopup({
+            open: true,
+            title: "Re-distribute failed",
+            message: resp.message ?? "Unable to re-distribute this workload.",
+            status: "rejected",
+          });
+          return;
+        }
+        const nextDistributedTime = resp.data?.distributedTime ?? item.distributedTime ?? "";
+        const nextOperatedBy = resp.data?.operatedBy ?? item.operatedBy ?? "—";
+        const nextOperatedByStaffId = resp.data?.operatedByStaffId ?? item.operatedByStaffId ?? "";
+        const nextAssignedBy = resp.data?.assignedBy ?? item.assignedBy ?? "";
+        const nextAssignedByStaffId = resp.data?.assignedByStaffId ?? item.assignedByStaffId ?? "";
+        const nextBackendId = resp.data?.id ?? item.backendId ?? "";
+        setPending((prev) =>
+          prev.map((row) =>
+            row.backendId === item.backendId
+              ? {
+                  ...row,
+                  backendId: nextBackendId,
+                  status: "initial",
+                  confirmation: "unconfirmed",
+                  confirmationTime: undefined,
+                  requestReason: resp.data?.requestReason ?? "",
+                  supervisorNote: resp.data?.supervisorNote ?? "",
+                  distributedTime: nextDistributedTime,
+                  operatedBy: nextOperatedBy,
+                  operatedByStaffId: nextOperatedByStaffId,
+                  assignedBy: nextAssignedBy,
+                  assignedByStaffId: nextAssignedByStaffId,
+                }
+              : row
+          )
+        );
+        setDetailsItem((prev) =>
+          prev && prev.backendId === item.backendId
+            ? {
+                ...prev,
+                backendId: nextBackendId,
+                status: "initial",
+                confirmation: "unconfirmed",
+                confirmationTime: undefined,
+                requestReason: resp.data?.requestReason ?? "",
+                supervisorNote: resp.data?.supervisorNote ?? "",
+                distributedTime: nextDistributedTime,
+                operatedBy: nextOperatedBy,
+                operatedByStaffId: nextOperatedByStaffId,
+                assignedBy: nextAssignedBy,
+                assignedByStaffId: nextAssignedByStaffId,
+              }
+            : prev
+        );
+        void fetchWorkloadList(workloadQuery, false);
+        setPopup({
+          open: true,
+          title: "Workload re-distributed",
+          message: `This workload has been re-distributed, reset to Initial / Unconfirmed, and the email notification was sent again to ${displayNameWithoutComma(item.name)}.`,
+          status: "approved",
+        });
+      })
+      .catch(() => {
+        setPopup({
+          open: true,
+          title: "Re-distribute failed",
+          message: "Network error. Please check your connection and try again.",
+          status: "rejected",
+        });
+      })
+      .finally(() => {
+        setSubmitting(false);
+      });
   }
 
   function updateBreakdownRow(tab: BreakdownCategory, idx: number, field: "name" | "hours", value: string) {
@@ -3293,7 +3538,7 @@ export default function SchoolofOperations() {
               onClick={(e) => e.stopPropagation()}
             >
               <div className="-mx-6 -mt-6 mb-4 flex items-center justify-between rounded-t-2xl bg-[#2f4d9c] px-6 py-4 text-white">
-                <div className="text-2xl font-semibold">Semester Distribution Reports</div>
+                <div className="text-2xl font-semibold">Semester Reports</div>
                 <button
                   type="button"
                   aria-label="Close report inbox"
@@ -3373,7 +3618,13 @@ export default function SchoolofOperations() {
               {popup.open && (
                 <div
                   className="fixed inset-0 z-[60] flex items-center justify-center bg-black/40 p-4"
-                  onClick={() => setPopup((p) => ({ ...p, open: false }))}
+                  onClick={() => {
+                    if (popup.importSummary) {
+                      closeImportSummaryPopup();
+                      return;
+                    }
+                    setPopup((p) => ({ ...p, open: false }));
+                  }}
                 >
                   <div
                     className="w-full max-w-lg overflow-hidden rounded-lg bg-white shadow-lg"
@@ -3389,7 +3640,13 @@ export default function SchoolofOperations() {
                         type="button"
                         aria-label="Close"
                         className="inline-flex h-9 w-9 items-center justify-center rounded-md bg-white/10 text-white hover:bg-white/20"
-                        onClick={() => setPopup((p) => ({ ...p, open: false }))}
+                        onClick={() => {
+                          if (popup.importSummary) {
+                            closeImportSummaryPopup();
+                            return;
+                          }
+                          setPopup((p) => ({ ...p, open: false }));
+                        }}
                       >
                         <span className="text-xl leading-none">×</span>
                       </button>
@@ -3435,6 +3692,25 @@ export default function SchoolofOperations() {
                               View Invalid Records ({popup.importSummary.failed})
                             </button>
                           )}
+                          <div className="flex flex-col gap-3 pt-1 sm:flex-row">
+                            <button
+                              type="button"
+                              onClick={closeImportSummaryPopup}
+                              className="flex-1 rounded-md border border-slate-300 px-4 py-2 text-sm font-semibold text-slate-700 hover:bg-slate-50"
+                            >
+                              Review Excel Again
+                            </button>
+                            <button
+                              type="button"
+                              onClick={() => {
+                                void handleEnterPendingList();
+                              }}
+                              disabled={!popup.importSummary.canEnterPendingList || submitting}
+                              className="flex-1 rounded-md bg-[#2f4d9c] px-4 py-2 text-sm font-semibold text-white hover:brightness-95 disabled:cursor-not-allowed disabled:bg-slate-300 disabled:text-slate-500"
+                            >
+                              {submitting ? "Entering Pending List..." : "Enter Pending List"}
+                            </button>
+                          </div>
                         </div>
                       ) : (
                         <div className="text-base text-slate-800">{popup.message}</div>
@@ -3841,7 +4117,7 @@ export default function SchoolofOperations() {
                               key={item.id}
                               className={`text-sm ${
                                 rowCancelled
-                                  ? "cursor-not-allowed bg-slate-100 text-slate-400 opacity-80"
+                                  ? "cursor-pointer bg-white text-slate-400 hover:bg-slate-50"
                                   : `cursor-pointer hover:bg-slate-50 ${
                                       isSelected ? "border-l-4 border-[#2f4d9c] bg-[#e9f2ff]" : ""
                                     }`
@@ -3865,50 +4141,76 @@ export default function SchoolofOperations() {
                                     type="checkbox"
                                     checked={false}
                                     disabled
-                                    className="h-4 w-4 accent-[#2f4d9c] opacity-40"
+                                    className={`h-4 w-4 accent-[#2f4d9c] ${rowCancelled ? "opacity-30" : "opacity-40"}`}
                                   />
                                 )}
                               </td>
-                              <td className="px-2 py-3 text-center text-sm tabular-nums font-sans text-slate-600">
+                              <td className={`px-2 py-3 text-center text-sm tabular-nums font-sans ${rowCancelled ? "text-slate-400" : "text-slate-600"}`}>
                                 {rowIndex}
                               </td>
-                              <td className="px-3 py-3 font-medium text-slate-700">
+                              <td className={`px-3 py-3 font-medium ${rowCancelled ? "text-slate-400" : "text-slate-700"}`}>
                                 <div>{displayNameWithoutComma(item.name)}</div>
-                                <div className="text-xs text-slate-400">{item.studentId}</div>
+                                <div className={`text-xs ${rowCancelled ? "text-slate-400" : "text-slate-400"}`}>{item.studentId}</div>
                               </td>
                               <td className="px-3 py-3 text-center">
                                 {opsDisplayStatus === "-" ? (
-                                  <span className="text-sm font-semibold text-slate-500">-</span>
+                                  <span className={`text-sm font-semibold ${rowCancelled ? "text-slate-400" : "text-slate-500"}`}>-</span>
+                                ) : rowCancelled ? (
+                                  <span className="text-sm font-semibold text-slate-400">{opsDisplayStatus}</span>
                                 ) : (
                                   <StatusPill status={opsDisplayStatus} variant="supervisor" />
                                 )}
                               </td>
                               <td className="px-3 py-3 text-center">
-                                <WorkHoursBadge hours={roundToOneDecimal(item.hours)} />
+                                {rowCancelled ? (
+                                  <span className="inline-flex min-w-[74px] items-center justify-center rounded-xl border border-slate-300 bg-white px-3 py-1 text-base font-semibold text-slate-400">
+                                    {roundToOneDecimal(item.hours)}
+                                  </span>
+                                ) : (
+                                  <WorkHoursBadge hours={roundToOneDecimal(item.hours)} />
+                                )}
                               </td>
                               <td className="px-3 py-3">
                                 {item.confirmation === "confirmed" ? (
-                                  <span className="inline-flex items-center gap-2 text-xs font-semibold text-[#15803d]">
-                                    <span className="inline-flex h-4 w-4 items-center justify-center rounded-full border border-[#15803d] bg-[#15803d] text-[10px] text-white">
-                                      ✓
+                                  rowCancelled ? (
+                                    <span className="inline-flex items-center gap-2 text-xs font-semibold text-slate-400">
+                                      <span className="inline-flex h-4 w-4 items-center justify-center rounded-full border border-slate-400 bg-white text-[10px] text-slate-400">
+                                        ✓
+                                      </span>
+                                      Confirmed
                                     </span>
-                                    Confirmed
-                                  </span>
+                                  ) : (
+                                    <span className="inline-flex items-center gap-2 text-xs font-semibold text-[#15803d]">
+                                      <span className="inline-flex h-4 w-4 items-center justify-center rounded-full border border-[#15803d] bg-[#15803d] text-[10px] text-white">
+                                        ✓
+                                      </span>
+                                      Confirmed
+                                    </span>
+                                  )
                                 ) : (
-                                  <span className="inline-flex items-center gap-2 text-xs font-semibold text-[#c2410c]">
-                                    <span className="inline-flex h-4 w-4 items-center justify-center rounded-full border border-[#c2410c] bg-white text-[10px] text-[#c2410c]">
-                                      ○
+                                  rowCancelled ? (
+                                    <span className="inline-flex items-center gap-2 text-xs font-semibold text-slate-400">
+                                      <span className="inline-flex h-4 w-4 items-center justify-center rounded-full border border-slate-400 bg-white text-[10px] text-slate-400">
+                                        ○
+                                      </span>
+                                      Unconfirmed
                                     </span>
-                                    Unconfirmed
-                                  </span>
+                                  ) : (
+                                    <span className="inline-flex items-center gap-2 text-xs font-semibold text-[#c2410c]">
+                                      <span className="inline-flex h-4 w-4 items-center justify-center rounded-full border border-[#c2410c] bg-white text-[10px] text-[#c2410c]">
+                                        ○
+                                      </span>
+                                      Unconfirmed
+                                    </span>
+                                  )
                                 )}
                               </td>
                               {statusFilter === "all" && (
-                                <td className="px-3 py-3 text-sm text-slate-700">
+                                <td className={`px-3 py-3 text-sm ${rowCancelled ? "text-slate-400" : "text-slate-700"}`}>
                                   {hasAssignee(item) ? (
                                     <div className="space-y-1">
-                                      <div className="text-slate-700">{item.assignedBy}</div>
-                                      <div className="text-xs text-slate-400">{item.assignedByStaffId}</div>
+                                      <div className={rowCancelled ? "text-slate-400" : "text-slate-700"}>{item.assignedBy}</div>
+                                      <div className={`text-xs ${rowCancelled ? "text-slate-400" : "text-slate-400"}`}>{item.assignedByStaffId}</div>
                                     </div>
                                   ) : (
                                     "—"
@@ -3916,18 +4218,18 @@ export default function SchoolofOperations() {
                                 </td>
                               )}
                               {statusFilter !== "all" && (
-                                <td className="px-3 py-3 text-right tabular-nums font-sans font-semibold text-slate-800">
+                                <td className={`px-3 py-3 text-right tabular-nums font-sans font-semibold ${rowCancelled ? "text-slate-400" : "text-slate-800"}`}>
                                   {statusFilter === "distributed"
                                     ? (item.distributedTime ? formatLocalDateTime(item.distributedTime) : itemDisplayTime(item))
                                     : itemDisplayTime(item)}
                                 </td>
                               )}
                               {statusFilter !== "all" && (
-                                <td className="px-3 py-3 text-sm text-slate-700">
+                                <td className={`px-3 py-3 text-sm ${rowCancelled ? "text-slate-400" : "text-slate-700"}`}>
                                   {hasOperator(item) ? (
                                     <div className="space-y-1">
-                                      <div className="text-slate-700">{item.operatedBy}</div>
-                                      <div className="text-xs text-slate-400">{item.operatedByStaffId}</div>
+                                      <div className={rowCancelled ? "text-slate-400" : "text-slate-700"}>{item.operatedBy}</div>
+                                      <div className={`text-xs ${rowCancelled ? "text-slate-400" : "text-slate-400"}`}>{item.operatedByStaffId}</div>
                                     </div>
                                   ) : (
                                     "—"
@@ -3951,7 +4253,7 @@ export default function SchoolofOperations() {
                 <div className="mt-3 flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
                   {statusFilter === "failed" ? (
                     <p className="max-w-xl text-sm font-bold leading-relaxed text-[#dc2626]">
-                      Export failed records for academics to review and fix, then import again.
+                      Distribution may fail for various reasons, including external network issues. Please use single-item re-distribution or re-import the Excel file and distribute the affected tasks again.
                     </p>
                   ) : (
                     <span className="hidden sm:block" aria-hidden />
@@ -4045,10 +4347,7 @@ export default function SchoolofOperations() {
                     label: "Total work hours",
                     value: totalHoursDisplay,
                     className: "tabular-nums font-sans",
-                    inputClassName: adminModalHoursAbnormal
-                      ? "border-red-500 ring-1 ring-red-300 bg-red-50/40 text-red-900 text-xs sm:text-sm"
-                      : "text-xs sm:text-sm",
-                    tooltipText: totalHoursTooltipText,
+                    inputClassName: "text-xs sm:text-sm",
                   },
                   {
                     label: "Employment type",
@@ -4109,30 +4408,34 @@ export default function SchoolofOperations() {
                     defaultExpanded: false,
                   }] : []),
                 ];
-                const historyAction =
-                  statusFilter === "distributed" ? (
+                const showDetailActionBar =
+                  statusFilter === "distributed" || statusFilter === "superseded" || statusFilter === "failed";
+                const detailFooter = showDetailActionBar ? (
+                  <div className="flex items-center justify-between gap-3 pt-1">
                     <button
                       type="button"
-                      onClick={() => {
-                        setChangeHistoryPage(1);
-                        setChangeHistoryRows([]);
-                        setChangeHistoryOpen(true);
-                        if (detailsItem?.backendId) {
-                          setChangeHistoryLoading(true);
-                          void apiJson<{ success: boolean; data: ChangeHistoryEntry[] }>(
-                            `/api/school-operations/workloads/${detailsItem.backendId}/history`
-                          )
-                            .then((resp) => {
-                              if (resp.success) setChangeHistoryRows(resp.data ?? []);
-                            })
-                            .finally(() => setChangeHistoryLoading(false));
-                        }
-                      }}
-                      className="rounded border border-[#2f4d9c] px-4 py-2 text-sm font-semibold text-[#2f4d9c] hover:bg-[#eef2ff]"
+                      onClick={() => openChangeHistoryForItem(detailsItem)}
+                      disabled={!detailsItem?.backendId}
+                      className="rounded border border-[#2f4d9c] px-4 py-2 text-sm font-semibold text-[#2f4d9c] hover:bg-[#eef2ff] disabled:cursor-not-allowed disabled:opacity-50"
                     >
                       Change history
                     </button>
-                  ) : null;
+                    {(statusFilter === "distributed" || statusFilter === "failed") && !detailsItem.cancelled ? (
+                      <button
+                        type="button"
+                        onClick={() => handleRedistributeSingleWorkload(detailsItem)}
+                        disabled={submitting || !detailsItem.backendId}
+                        className="rounded bg-[#2f4d9c] px-4 py-2 text-sm font-semibold text-white hover:bg-[#264183] disabled:cursor-not-allowed disabled:bg-slate-400"
+                      >
+                        {submitting ? "Re-distributing…" : "Re-distribute"}
+                      </button>
+                    ) : (
+                      <span />
+                    )}
+                  </div>
+                ) : (
+                  <div className="h-2" />
+                );
 
                 return (
                   <WorkloadDetailModal
@@ -4143,8 +4446,7 @@ export default function SchoolofOperations() {
                     rowKeyPrefix={detailsItem.id}
                     onClose={closeDetails}
                     notesSections={notesSections}
-                    historyAction={historyAction}
-                    footer={<div className="h-2" />}
+                    footer={detailFooter}
                   />
                 );
               })()}
@@ -4280,9 +4582,27 @@ export default function SchoolofOperations() {
                           <option value="S2">S2 (1 July - 31 December)</option>
                         </select>
                       </div>
-                      <div className="text-xs font-semibold text-[#dc2626]">
-                        DDL is the final day for academics to confirm their workload.
+                      <div className="rounded border border-[#fca5a5] bg-[#fff5f5] px-4 py-3 text-sm font-semibold leading-relaxed text-[#dc2626]">
+                        S1 reports are generated automatically on 1 July of the same academic year. S2 reports
+                        are generated automatically on 1 January of the following year. The workflow is refreshed
+                        automatically on a semester-by-semester cycle, and records from previous semesters are
+                        archived to history.
                       </div>
+                      {submitting && !distributeOverwriteConfirmOpen && (
+                        <div className="rounded border border-[#bfdbfe] bg-[#f8fbff] px-4 py-3 text-sm font-semibold text-[#2f4d9c]">
+                          Distributing... (
+                          {distributionProgress.total > 0
+                            ? Math.min(
+                                100,
+                                Math.round((distributionProgress.processed / distributionProgress.total) * 100)
+                              )
+                            : 0}
+                          %) Processing {Math.max(1, distributionProgress.total)} workload
+                          {distributionProgress.total === 1 ? "" : "s"}. Please keep this window open until
+                          distribution is complete. Completed {distributionProgress.processed} of{" "}
+                          {Math.max(1, distributionProgress.total)}.
+                        </div>
+                      )}
                       {distributeError && <div className="text-sm font-semibold text-[#dc2626]">{distributeError}</div>}
                       <div className="flex items-center justify-end gap-3 pt-1">
                         <button
@@ -4299,6 +4619,64 @@ export default function SchoolofOperations() {
                           className="rounded bg-[#2f4d9c] px-4 py-2 text-sm font-semibold text-white hover:bg-[#264183] disabled:cursor-not-allowed disabled:bg-slate-400"
                         >
                           {submitting ? "Distributing…" : "Confirm"}
+                        </button>
+                      </div>
+                    </div>
+                  </div>
+                </div>
+              )}
+
+              {distributeOverwriteConfirmOpen && (
+                <div className="fixed inset-0 z-[83] flex items-center justify-center bg-black/50 p-4">
+                  <div className="w-full max-w-lg rounded-md bg-white shadow-xl">
+                    <div className="flex items-center justify-between rounded-t-md bg-[#2f4d9c] px-5 py-3 text-white">
+                      <div className="text-base font-bold">Overwrite Workflow Warning</div>
+                      <button
+                        type="button"
+                        className="inline-flex h-8 w-8 items-center justify-center rounded bg-white/10 text-lg hover:bg-white/20"
+                        onClick={() => setDistributeOverwriteConfirmOpen(false)}
+                      >
+                        ×
+                      </button>
+                    </div>
+                    <div className="space-y-4 p-5">
+                      <div className="rounded border border-amber-300 bg-amber-50 px-4 py-3 text-sm leading-7 text-amber-950">
+                        Re-distributing these workloads will overwrite the current Academic and HoD workflow state for
+                        the selected staff within the active semester cycle. Existing approval progress,
+                        confirmations, and workflow actions for the replaced records will be archived to View History,
+                        and the newly imported workloads will restart from Initial status with Unconfirmed
+                        confirmation.
+                      </div>
+                      {submitting && (
+                        <div className="rounded border border-[#bfdbfe] bg-[#f8fbff] px-4 py-3 text-sm font-semibold text-[#2f4d9c]">
+                          Distributing... (
+                          {distributionProgress.total > 0
+                            ? Math.min(
+                                100,
+                                Math.round((distributionProgress.processed / distributionProgress.total) * 100)
+                              )
+                            : 0}
+                          %) Processing {Math.max(1, distributionProgress.total)} workload
+                          {distributionProgress.total === 1 ? "" : "s"}. Please keep this window open until
+                          distribution is complete. Completed {distributionProgress.processed} of{" "}
+                          {Math.max(1, distributionProgress.total)}.
+                        </div>
+                      )}
+                      <div className="flex items-center justify-end gap-3">
+                        <button
+                          type="button"
+                          onClick={() => setDistributeOverwriteConfirmOpen(false)}
+                          className="rounded bg-slate-200 px-4 py-2 text-sm font-semibold text-slate-700 hover:bg-slate-300"
+                        >
+                          Cancel
+                        </button>
+                        <button
+                          type="button"
+                          onClick={submitDistributeWorkload}
+                          disabled={submitting}
+                          className="rounded bg-[#2f4d9c] px-4 py-2 text-sm font-semibold text-white hover:bg-[#264183] disabled:cursor-not-allowed disabled:bg-slate-400"
+                        >
+                          {submitting ? "Distributing…" : "Continue"}
                         </button>
                       </div>
                     </div>
@@ -5026,12 +5404,6 @@ export default function SchoolofOperations() {
           )}
         </div>
       </div>
-
-      <ThemedNoticeModal
-        open={supersededNoticeOpen}
-        onClose={() => setSupersededNoticeOpen(false)}
-        message={SUPERSEDED_RECORD_MESSAGE}
-      />
     </div>
   );
 }

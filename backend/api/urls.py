@@ -52,6 +52,8 @@ from api.view.hos_v3_views import (
     hos_workload_request_decision,
 )
 from api.view.academic_views import (
+    academic_semester_report_download,
+    academic_semester_reports,
     academic_workloads,
     academic_workload_detail,
     academic_confirm_workload,
@@ -69,6 +71,8 @@ from api.view.ops_admin_views import (
     admin_batch_decision,
     admin_single_decision,
     admin_distribute_workloads,
+    admin_distribution_progress,
+    admin_redistribute_single_workload,
     admin_workload_import_template,
     admin_workload_import_template_download,
     admin_workload_import,
@@ -168,6 +172,10 @@ urlpatterns = [
 
 
     # Academic APIs (v3 contract)
+    path('academic/reports/semester', academic_semester_reports),
+    path('academic/reports/semester/', academic_semester_reports),
+    path('academic/reports/semester/<str:report_id>/download', academic_semester_report_download),
+    path('academic/reports/semester/<str:report_id>/download/', academic_semester_report_download),
 
     # Head of School APIs (9.2–9.12)
     path('headofschool/workload-requests/', supervisor_workload_requests),
@@ -203,6 +211,7 @@ urlpatterns = [
     path('admin/workload-requests/<str:id>/', admin_workload_request_detail),
     path('admin/workload-requests/<str:id>/decision/', admin_single_decision),
     path('admin/workloads/distribute/', admin_distribute_workloads),
+    path('admin/workloads/distribute-progress/<str:progress_id>/', admin_distribution_progress),
     path('admin/workloads/import-template/', admin_workload_import_template),
     path('admin/workloads/import-template/download/', admin_workload_import_template_download),
     path('admin/workloads/import/', admin_workload_import),
@@ -222,6 +231,8 @@ urlpatterns = [
     # Literal paths before parameterised catch-alls to avoid shadowing (same lesson as /admin/staff/).
     path('school-operations/workloads/import', admin_workload_import),
     path('school-operations/workloads/distribute', admin_distribute_workloads),
+    path('school-operations/workloads/distribute-progress/<str:progress_id>', admin_distribution_progress),
+    path('school-operations/workloads/<str:id>/redistribute', admin_redistribute_single_workload),
     path('school-operations/workloads/export', admin_workload_export),
     path('school-operations/workloads/<str:id>/history', admin_workload_history),
     path('school-operations/workloads/<str:id>', admin_workload_request_detail),

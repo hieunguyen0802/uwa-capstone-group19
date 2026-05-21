@@ -14,6 +14,21 @@ import os
 from datetime import timedelta
 from pathlib import Path
 
+
+def _env_flag(name: str, default: bool = False) -> bool:
+    value = os.environ.get(name)
+    if value is None:
+        return default
+    return value.strip().lower() in {'1', 'true', 'yes', 'on'}
+
+
+def _env_int(name: str, default: int) -> int:
+    try:
+        return int(os.environ.get(name, default))
+    except (TypeError, ValueError):
+        return default
+
+
 # Build paths inside the project like this: BASE_DIR / 'subdir'.
 BASE_DIR = Path(__file__).resolve().parent.parent
 
@@ -29,7 +44,7 @@ SECRET_KEY = os.environ.get(
 )
 
 # SECURITY WARNING: don't run with debug turned on in production!
-DEBUG = os.environ.get('DJANGO_DEBUG', 'false').lower() == 'true'
+DEBUG = _env_flag('DJANGO_DEBUG', False)
 
 _allowed_hosts = os.environ.get('DJANGO_ALLOWED_HOSTS')
 if _allowed_hosts:
@@ -103,7 +118,7 @@ DATABASES = {
 EMAIL_BACKEND = os.environ.get('EMAIL_BACKEND', 'django.core.mail.backends.console.EmailBackend')
 EMAIL_HOST = os.environ.get('EMAIL_HOST', 'smtp.gmail.com')
 EMAIL_PORT = int(os.environ.get('EMAIL_PORT', '587'))
-EMAIL_USE_TLS = os.environ.get('EMAIL_USE_TLS', 'true').lower() == 'true'
+EMAIL_USE_TLS = _env_flag('EMAIL_USE_TLS', True)
 EMAIL_HOST_USER = os.environ.get('EMAIL_HOST_USER', '')
 EMAIL_HOST_PASSWORD = os.environ.get('EMAIL_HOST_PASSWORD', '')
 DEFAULT_FROM_EMAIL = os.environ.get('DEFAULT_FROM_EMAIL', EMAIL_HOST_USER)
@@ -177,6 +192,20 @@ else:
         'http://127.0.0.1:3000',
     ]
 
+SECURE_SSL_ENABLED = _env_flag('DJANGO_SECURE_SSL', False)
+SECURE_SSL_REDIRECT = SECURE_SSL_ENABLED
+SESSION_COOKIE_SECURE = SECURE_SSL_ENABLED
+CSRF_COOKIE_SECURE = SECURE_SSL_ENABLED
+SECURE_HSTS_SECONDS = _env_int('DJANGO_SECURE_HSTS_SECONDS', 31536000 if SECURE_SSL_ENABLED else 0)
+SECURE_HSTS_INCLUDE_SUBDOMAINS = SECURE_SSL_ENABLED
+SECURE_HSTS_PRELOAD = SECURE_SSL_ENABLED
+SECURE_PROXY_SSL_HEADER = ('HTTP_X_FORWARDED_PROTO', 'https') if SECURE_SSL_ENABLED else None
+SESSION_COOKIE_HTTPONLY = True
+CSRF_COOKIE_HTTPONLY = False
+SESSION_COOKIE_SAMESITE = 'Lax'
+CSRF_COOKIE_SAMESITE = 'Lax'
+X_FRAME_OPTIONS = 'DENY'
+
 # AUTH_USER_MODEL = 'yourapp.User'
 
 # DRF: use JWT authentication, but allow public access by default
@@ -186,8 +215,12 @@ REST_FRAMEWORK = {
         'rest_framework_simplejwt.authentication.JWTAuthentication',
     ),
     'DEFAULT_THROTTLE_RATES': {
-        # Login endpoint: 5 attempts per minute per IP (brute-force protection)
+        # Password login: 5 attempts/min per IP
         'login': '5/minute',
+        # OTP request: 5 sends/min per IP (prevents spam)
+        'otp_request': '5/minute',
+        # OTP verify: 10 attempts/min per IP (brute-force on 6-digit codes)
+        'otp_verify': '10/minute',
     },
 }
 

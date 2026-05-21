@@ -8,11 +8,11 @@ import { useAuth } from "../auth/AuthContext";
 
 function classifyVerifyError(err: unknown): string {
   const axiosErr = err as AxiosError<{ error?: string }>;
-  const serverMsg = axiosErr?.response?.data?.error;
-  if (serverMsg) return serverMsg;
   // Network / timeout — don't blame the code itself
   if (!axiosErr?.response) return "Network error. Please check your connection and try again.";
-  return "Invalid or expired code.";
+  // All other failures (wrong code, expired, inactive account, etc.) use the
+  // same generic message — never expose the specific server reason to the UI.
+  return "Invalid email or verification code.";
 }
 
 const MAX_IDENTIFIER_LENGTH = 254;
@@ -53,7 +53,7 @@ export default function Login() {
     setLoginError("");
     try {
       await requestOtp(email);
-      setSuccessMessage(`Verification code sent to ${email}`);
+      setSuccessMessage("If the email is registered in the system, a verification code will be sent.");
       setSendCooldown(60);
     } catch (err) {
       setLoginError(extractErrorMessage(err, "Failed to send verification code."));

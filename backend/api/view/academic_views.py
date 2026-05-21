@@ -25,6 +25,12 @@ from api.services.workload_service import (
     _reporting_period_label,
     semester_sort_key,
 )
+from api.view.hod_views import (
+    _parse_period_report_id,
+    _report_period_id,
+    _semester_report_rows,
+    _workbook_response,
+)
 from api.view.supervisor_views import _get_request_reason
 from api.view.ops_admin_views import _serialize_workload_detail as _serialize_ops_workload_detail
 
@@ -276,6 +282,54 @@ def academic_workloads(request):
 
 @api_view(['GET'])
 @permission_classes([IsAuthenticated, IsAcademicOrHoD])
+def academic_semester_reports(request):
+    qs = _own_reports_qs(request.staff).prefetch_related('items')
+
+    period_rows = {}
+    for (year, semester, _department), updated_at in _semester_report_rows(qs).items():
+        key = (year, semester)
+        current = period_rows.get(key)
+        if current is None or updated_at > current:
+            period_rows[key] = updated_at
+
+    items = []
+    for (year, semester), updated_at in sorted(period_rows.items()):
+        report_id = _report_period_id('academic-report', year, semester)
+        items.append({
+            'id': report_id,
+            'year': year,
+            'semester': semester,
+            'title': f'{year} {semester} semester report generated',
+            'createdAt': updated_at.isoformat() if updated_at else None,
+            'downloadUrl': f'/api/academic/reports/semester/{report_id}/download',
+            'unread': True,
+        })
+    return Response({'items': items})
+
+
+@api_view(['GET'])
+@permission_classes([IsAuthenticated, IsAcademicOrHoD])
+def academic_semester_report_download(request, report_id):
+    year, semester = _parse_period_report_id(report_id, 'academic-report')
+    if year is None or semester is None:
+        return Response(
+            {'success': False, 'message': 'Invalid report id'},
+            status=status.HTTP_400_BAD_REQUEST,
+        )
+
+    reports = list(
+        _own_reports_qs(request.staff)
+        .filter(academic_year=year, semester=semester)
+        .select_related('staff__user', 'snapshot_department')
+        .prefetch_related('items')
+        .order_by('staff__staff_number')
+    )
+    filename = f'Academic_{year}_{semester}_{request.staff.staff_number}.xlsx'.replace(' ', '_')
+    return _workbook_response('Academic Semester Report', filename, reports)
+
+
+@api_view(['GET'])
+@permission_classes([IsAuthenticated, IsAcademicOrHoD])
 def academic_workload_detail(request, id):
     """GET /api/academic/workloads/{id}/"""
     qs = _own_reports_qs(request.staff).prefetch_related('items')
@@ -435,22 +489,19 @@ def academic_submit_workload_requests(request):
             status=status.HTTP_409_CONFLICT,
         )
 
-    # HoD submitting their own workload to HoS skips the self-confirm requirement.
-    # Academic must confirm before submit — unless HoD review is required,
-    # in which case the confirmation button is disabled on the frontend and
-    # the academic submits directly to HoD without self-confirming.
+    # Block submission for reports that are already self-confirmed — the academic
+    # cannot re-submit after confirming. HoD self-submissions (to HoS) are exempt.
     is_hod_self_submit = staff_has_role(request.staff, 'HOD')
-    unconfirmed = [
+    already_confirmed = [
         str(r.report_id) for r in reports
         if not is_hod_self_submit
-        and r.confirmation_status != 'CONFIRMED'
-        and str(r.hod_review or '').strip().lower() != 'yes'
+        and r.confirmation_status == 'CONFIRMED'
     ]
-    if unconfirmed:
+    if already_confirmed:
         return Response(
             {
-                'detail': 'One or more reports must be confirmed before submit',
-                'workloadIds': unconfirmed,
+                'detail': 'One or more reports are already confirmed and cannot be re-submitted',
+                'workloadIds': already_confirmed,
             },
             status=status.HTTP_409_CONFLICT,
         )
