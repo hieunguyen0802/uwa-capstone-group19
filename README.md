@@ -36,13 +36,14 @@ Coordinator.
 - **Imports** the PMC Workload Model spreadsheet and maps it into structured
   workload records by academic year, semester, staff member, department, and
   role.
-- **Distributes** each workload record from School Operations to the relevant
-  Academic dashboard, replacing the manual screenshot-and-email step.
+- **Distributes** workload records from School Operations to the relevant
+  Academic or HoD personal workload dashboard, replacing the manual
+  screenshot-and-email step.
 - **Detects anomalies** automatically against the imported
-  Teaching-to-Research target band before the academic confirms the record.
-- **Routes review requests** from Academic staff to the correct approver.
-  Department-level requests go to the HoD, while HoD self-submissions are routed
-  to HoS.
+  Teaching-to-Research target band before the staff member confirms the record.
+- **Routes review requests** to the correct approver. Normal Academic requests
+  go to the assigned HoD, while HoD personal workload submissions are routed to
+  HoS so HoDs do not approve their own workload.
 - **Logs state changes** in audit history so import, distribution,
   confirmation, approval, rejection, re-import, staff updates, and permission
   changes remain traceable.
@@ -74,10 +75,10 @@ Groups and enforced by DRF permission classes in `backend/api/permissions.py`.
 
 | Role | What they can do |
 | --- | --- |
-| **Academic** | View own workload, confirm distributed workloads, submit review requests with a reason, view personal analytics, and export own data. |
-| **Head of Department (HoD)** | Choose between department review and personal workload, view requests in assigned department only, approve or reject department requests, and view department analytics. |
-| **School Operations** | Import workload spreadsheets, distribute workloads, manage staff records, inspect failed distributions, view school-wide workload data, export reports, and contact staff. |
-| **Head of School (HoS)** | Review HoD self-submissions, view school-wide workload information, manage HoD/Admin role assignments, and export school-level data. |
+| **Academic** | View only their own workload, confirm distributed workloads, submit review requests with a reason, view personal analytics, and export own data. |
+| **Head of Department (HoD)** | Choose after login between department review and personal workload. In department review, a HoD can view, adjust if required, approve, or reject requests only for the assigned department. In personal workload, the HoD uses the same submission workflow as Academic users, and any self-submitted request goes to HoS. |
+| **School Operations** | Import workload spreadsheets, distribute workloads to Academic and HoD users, manage staff records, inspect failed distributions, view school-wide workload data, export reports, and contact staff. |
+| **Head of School (HoS)** | Review HoD self-submissions and school-level requests, adjust workload items if required, view school-wide workload information, manage HoD/Admin role assignments, and export school-level data. |
 
 Frontend route map:
 
@@ -89,6 +90,14 @@ Frontend route map:
 | `/department-head` | HoD department review dashboard. |
 | `/school-operations` | School Operations dashboard. |
 | `/school-head` | HoS dashboard. |
+
+HoD users have two separate workflow surfaces:
+
+- `/department-head` is for approving Academic requests inside the HoD's assigned
+  department. This is not used for the HoD's own workload.
+- `/workload-platform` is the shared workload submission platform for Academic
+  and HoD personal workloads. Academic requests go to HoD; HoD personal requests
+  go to HoS.
 
 ---
 
@@ -207,8 +216,9 @@ to protect the client-confirmed MVP:
 
 ```text
 School Operations imports workload
--> School Operations distributes workload
--> Academic confirms or submits a review request
+-> School Operations distributes workload to Academic and HoD users
+-> Academic or HoD views personal workload
+-> Academic confirms or submits a review request; HoD confirms or submits a personal request
 -> HoD or HoS reviews the request
 -> audit history, analytics, and export remain consistent
 ```
@@ -314,9 +324,9 @@ of truth for route registration is `backend/api/urls.py`.
 | --- | --- | --- |
 | GET | `/api/school-operations/workloads` | List workload records. |
 | POST | `/api/school-operations/workloads/import` | Import workload spreadsheet. |
-| POST | `/api/school-operations/workloads/distribute` | Distribute selected workloads. |
+| POST | `/api/school-operations/workloads/distribute` | Distribute selected workloads to Academic and HoD users. |
 | GET | `/api/school-operations/workloads/distribute-progress/<progress_id>` | Check distribution progress. |
-| POST | `/api/school-operations/workloads/<id>/redistribute` | Retry distribution for one workload. |
+| POST | `/api/school-operations/workloads/<id>/redistribute` | Retry distribution for one Academic or HoD workload. |
 | GET | `/api/school-operations/staff` | Staff directory. |
 | POST | `/api/school-operations/staff/import` | Import staff data. |
 | GET | `/api/school-operations/visualization` | School Operations analytics. |
@@ -341,7 +351,7 @@ of truth for route registration is `backend/api/urls.py`.
 
 | Method | Endpoint | Purpose |
 | --- | --- | --- |
-| GET | `/api/reports/<id>/history/` | Unified audit timeline for one report. |
+| GET | `/api/reports/<id>/history/` | Unified audit and change-history timeline for one report. |
 | GET | `/api/messages/` | Page messages and content metadata. |
 
 ---
