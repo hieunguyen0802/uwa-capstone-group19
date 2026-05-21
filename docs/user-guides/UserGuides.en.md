@@ -12,9 +12,9 @@
 
 The Workload Verification System supports school-level workload import, distribution, confirmation, review, analytics, and export across academic years and semesters. It is designed for four main user groups:
 
-- **Academic Staff** view their own workload, confirm it when it is correct, or submit a review request when they have concerns.
-- **Heads of Department (HoDs)** review workload requests submitted by Academic Staff within their assigned department.
-- **School Operations (Ops)** import workload spreadsheets, distribute workloads, maintain Academic staff information, review analytics, and export data.
+- **Academic Staff** use the workload submission platform to view their own workload, confirm it when it is correct, or submit a review request to their HoD when they have concerns.
+- **Heads of Department (HoDs)** choose between the workload approval platform and the workload submission platform after login. The approval platform is used to review Academic Staff requests within the HoD's assigned school or department; the submission platform is the same personal workload platform used by Academic Staff, but HoD personal requests are reviewed by HoS.
+- **School Operations (Ops)** import workload spreadsheets, distribute workloads to Academic and HoD users, maintain Academic staff information, review analytics, and export data.
 - **Head of School (HoS)** reviews HoD self-submitted workload requests, manages HoD/Ops permissions, reviews school-level analytics, and exports school-level data.
 
 The system uses backend role-based access control. Users only see the pages and actions allowed by their current role and permissions.
@@ -43,7 +43,7 @@ Important notes:
 | Current Role | Default Route |
 | --- | --- |
 | Academic | `/workload-platform` |
-| HoD | `/role`, then choose department review or personal workload |
+| HoD | `/role`, then choose workload approval or workload submission |
 | School Operations | `/school-operations` |
 | HoS | `/school-head` |
 
@@ -52,9 +52,9 @@ Important notes:
 | Page | Route | Purpose |
 | --- | --- | --- |
 | Login | `/login` | Email verification-code login |
-| Role Selection | `/role` | HoD chooses department review or personal workload |
-| Academic Dashboard | `/workload-platform` | Academic workload view, confirmation, and submission |
-| HoD Dashboard | `/department-head` | HoD department-level workload review |
+| Role Selection | `/role` | HoD chooses **Workload Approval Platform** or **Workload Submission Platform** |
+| Workload Submission Platform | `/workload-platform` | Personal workload view, confirmation, and submission for Academic and HoD users |
+| Workload Approval Platform | `/department-head` | HoD department-level workload review |
 | School Operations Dashboard | `/school-operations` | Ops workload import, distribution, staff management, analytics, and export |
 | HoS Dashboard | `/school-head` | HoS approval, permission assignment, analytics, and export |
 
@@ -62,7 +62,7 @@ Important notes:
 
 ### 3.1 Academic
 
-Academic users can only access their own workload records. They can:
+Academic users access the workload submission platform at `/workload-platform`. They can only access their own workload records. They can:
 
 - View their personal workload list and details.
 - Filter records by Status, Confirmation, Year, and Semester.
@@ -73,12 +73,12 @@ Academic users can only access their own workload records. They can:
 
 ### 3.2 HoD
 
-A HoD may also have an Academic workload. After login, the HoD enters `/role` and chooses one of two tasks:
+A HoD may also have a personal workload record. After login, the HoD enters `/role` and chooses one of two platforms:
 
-- **Review Department Workloads** opens `/department-head` for department-level review.
-- **Review My Workload** opens `/workload-platform` for the HoD's own personal workload.
+- **Workload Approval Platform** opens `/department-head` for department-level Academic request review.
+- **Workload Submission Platform** opens `/workload-platform` for the HoD's own personal workload. This is the same submission platform used by Academic users.
 
-The HoD department scope is assigned by HoS or system administration. A HoD cannot view or approve records outside their assigned department.
+The HoD department scope is assigned by HoS or system administration. A HoD cannot view or approve records outside their assigned department, and a HoD cannot approve their own personal workload request. Academic personal requests report to HoD; HoD personal requests report to HoS.
 
 ### 3.3 School Operations
 
@@ -86,7 +86,7 @@ School Operations handles school-wide data operations. Ops can:
 
 - Import workload Excel files.
 - View pending, distributed, failed, and superseded workload records.
-- Distribute workloads to Academic users.
+- Distribute workloads to Academic and HoD users.
 - Redistribute a single workload record when required.
 - Maintain Academic staff profile information.
 - View school-level and department-level analytics.
@@ -136,9 +136,9 @@ Clicking the avatar opens the profile modal. Some pages support avatar upload.
 | Pending | A request has been submitted and is waiting for HoD or HoS review |
 | Approved | The request has been approved |
 | Rejected | The request has been rejected and should be handled according to the note |
-| Confirmed | The Academic has confirmed their own workload |
-| Unconfirmed | The Academic has not confirmed their workload yet |
-| Distributed | Ops has distributed the workload to the Academic user |
+| Confirmed | The Academic or HoD has confirmed their own personal workload |
+| Unconfirmed | The Academic or HoD has not confirmed their personal workload yet |
+| Distributed | Ops has distributed the workload to the Academic or HoD user |
 | Failed | Import or distribution produced failed records |
 | Superseded | An older version has been replaced by a newer re-imported version |
 | Active | The permission or record is currently valid |
@@ -172,17 +172,31 @@ The workload breakdown normally includes:
 
 `Research (residual)` is calculated by the system from the remaining workload balance. It is not maintained as a separate Excel workload category.
 
-## 5. Academic Guide
+### 4.5 Semester History Reports and Workload Refresh Rules
+
+This rule applies to all roles and is handled by semester.
+
+- S1 runs from 1 January to 30 June each year. On 1 July, the system automatically generates the S1 history report.
+- S2 runs from 1 July to 31 December each year. On 1 January of the following year, the system automatically generates the S2 history report.
+- Automatically generated history reports are placed in the mailbox or message entry at the top-left of the page. Users can view the reports allowed by their role and permission scope.
+- When one semester ends and the next semester starts, the current workload list is refreshed and the active workflow view for the previous semester is cleared. Workloads that are refreshed, overwritten, or moved to an older-version state are still counted in history and preserved in history reports and audit records.
+
+## 5. Workload Submission Platform Guide
+
+The workload submission platform at `/workload-platform` is shared by Academic
+and HoD users for personal workload confirmation and submission. The approval
+target is different: Academic requests report to the assigned HoD, while HoD
+personal requests report to HoS.
 
 ### 5.1 View Personal Workload
 
 1. Log in and enter `/workload-platform`.
-2. Open **Workload Approval**.
+2. Open the personal workload list.
 3. Use **Status**, **Confirmation**, **Year**, and **Semester** filters.
 4. Click **Search**.
 5. Click a target record to view details.
 
-Academic users only see their own records. Other staff records are not exposed in the Academic list.
+Users on the workload submission platform only see their own personal workload records. Other staff records are not exposed in this list.
 
 ### 5.2 Confirm Workload
 
@@ -201,7 +215,7 @@ If the system detects an anomaly, such as a department conflict or teaching-rati
 
 When the workload is incorrect or needs review:
 
-1. Select the target record in **Workload Approval**.
+1. Select the target record in the personal workload list.
 2. Click **Submit Request**.
 3. Enter the reason in **Application reason**.
 4. Click **Submit**.
@@ -209,7 +223,7 @@ When the workload is incorrect or needs review:
 Rules:
 
 - A normal Academic request goes to the HoD approval queue.
-- If the user is also a HoD, their personal workload request goes to the HoS approval queue.
+- If the user is a HoD using the same workload submission platform for their own personal workload, the request goes to the HoS approval queue.
 - A request cannot be submitted again while the same record is already under review.
 
 ### 5.4 View Personal Analytics
@@ -236,24 +250,25 @@ If the year fields are blank, the system exports the available data range where 
 
 ## 6. HoD Guide
 
-### 6.1 Choose HoD Work or Personal Workload
+### 6.1 Choose Workload Approval or Workload Submission
 
 After login, a HoD enters `/role`.
 
-- To review department staff requests, choose **Review Department Workloads**.
-- To handle personal workload, choose **Review My Workload**.
+- To review Academic requests within the HoD's assigned school or department, choose **Workload Approval Platform**.
+- To submit or handle the HoD's own personal workload, choose **Workload Submission Platform**. This is the same personal workload platform used by Academic users, but HoD submissions report to HoS.
 
-A HoD should not approve their own workload in the HoD review page. Their personal workload should be submitted through the Academic-style personal workflow and reviewed by HoS.
+A HoD should not approve their own workload in the HoD approval platform. Their personal workload should be submitted through the workload submission platform and reviewed by HoS.
 
-### 6.2 Review Department Workload Requests
+### 6.2 Review Academic Workload Requests
 
 1. Enter `/department-head`.
-2. Open **Workload Approval**.
+2. Open the workload approval list.
 3. Filter by Name, Staff ID, Year, Semester, and Status Filter.
 4. Click a record to view details.
 5. Check the workload breakdown, School Operations notes, and Application Reason.
-6. Approve or reject pending records.
-7. Enter a review note and submit the decision.
+6. Edit specific workload items if an adjustment is required.
+7. Approve or reject pending records.
+8. Enter a review note and submit the decision.
 
 HoDs only see records within their own department scope. Cross-department access is blocked by the backend.
 
@@ -347,7 +362,7 @@ The system checks:
 
 1. In **Workload Management**, filter pending records.
 2. Select the records that need distribution.
-3. Click **Distribute Workload**.
+3. Click **Distribute Workload** to send the selected records to the relevant Academic or HoD users.
 4. Confirm Academic Year and Semester.
 5. Confirm distribution.
 
@@ -360,14 +375,26 @@ During distribution, the page displays progress. After completion:
 
 ### 7.5 Redistribute a Single Record
 
-If one record needs to be sent again to an Academic:
+If one record needs to be sent again to an Academic or HoD:
 
 1. Open the workload detail.
 2. Use the redistribute action.
 3. The system calls the single-record redistribution endpoint.
 4. The distributed time is updated after success.
 
-### 7.6 Employee Management
+### 7.6 View History and Change History
+
+School Operations can use **View history** in **Workload Management** to view historical workloads. Historical records include workloads that were re-imported, redistributed, overwritten, or moved to an older-version state.
+
+School Operations can also view the modification history for each workload:
+
+1. In the **Distributed** workload list, click a target record to open the detail view.
+2. Click **Change History** in the detail view.
+3. Review the workload's modification records, overwrite records, status changes, operator, and timestamp.
+
+These history records are not lost when the workload list is refreshed for a new semester. They remain part of the semester history report and audit trail.
+
+### 7.7 Employee Management
 
 This tab maintains Academic staff profile information.
 
@@ -387,7 +414,7 @@ Staff profile rules:
 - Academic department should be Physics, Mathematics & Statistics, or Computer Science & Software Engineering.
 - When a staff member is inactive, historical workload records are still preserved.
 
-### 7.7 School Operations Visualization
+### 7.8 School Operations Visualization
 
 1. Open **Visualization**.
 2. Select the Year range.
@@ -404,7 +431,7 @@ The page shows:
 - Department workload comparison.
 - The latest 6-semester trend.
 
-### 7.8 School Operations Export
+### 7.9 School Operations Export
 
 1. Open **Export Excel**.
 2. Set Year, Semester, and Department.
@@ -412,7 +439,7 @@ The page shows:
 
 If the year fields are blank, the system exports using the available data range. The output can be used for reporting, audit, or offline checking.
 
-### 7.9 Semester Reports and Audit Data
+### 7.10 Semester Reports and Audit Data
 
 The top message entry is used for semester reports. Ops can also export current or historical workload data. The backend records audit events for imports, distribution, re-imports, staff profile updates, approvals, and permission changes.
 
@@ -427,8 +454,9 @@ HoS reviews school-level requests and HoD self-submitted workload requests.
 3. Filter by Name, Staff ID, Department, Year, Semester, and Status Filter.
 4. Click a record to view details.
 5. Check the workload breakdown and application reason.
-6. Approve or reject pending records.
-7. Enter a review note and submit the decision.
+6. Edit specific workload items if an adjustment is required.
+7. Approve or reject pending records.
+8. Enter a review note and submit the decision.
 
 Normal Academic requests are usually reviewed by HoD. HoD self-submissions enter the HoS queue.
 
@@ -507,8 +535,8 @@ HoS **Export Excel** exports school-level workload data filtered by:
 Ops imports workload
 -> Ops places records into Pending Distribution
 -> Ops distributes workload to Academic
--> Academic views details
--> Academic confirms workload or submits a request
+-> Academic opens the Workload Submission Platform
+-> Academic views details and confirms workload or submits a request
 -> HoD reviews the pending request
 -> Approved or Rejected
 ```
@@ -517,12 +545,15 @@ Ops imports workload
 
 ```text
 Ops imports and distributes the HoD's own workload
--> HoD chooses Review My Workload from /role
--> HoD views and confirms it through the personal workload page
--> HoD submits a personal request
+-> HoD chooses Workload Submission Platform from /role
+-> HoD views details and confirms workload or submits a personal request
 -> HoS reviews it
 -> Approved or Rejected
 ```
+
+Academic and HoD users use the same workload submission platform for personal
+workload actions. The difference is the reporting path: Academic requests go to
+HoD, while HoD personal requests go to HoS.
 
 ### 9.3 Re-Import Flow
 
@@ -575,7 +606,7 @@ Confirm whether HoS has assigned the required permission in Permission Assignmen
 
 ### 11.2 Can a HoD approve their own workload?
 
-No. A HoD's own workload should be submitted from `/role` through **Review My Workload** and then reviewed by HoS.
+No. A HoD's own workload should be submitted from `/role` through **Workload Submission Platform** and then reviewed by HoS.
 
 ### 11.3 Why are some imported records invalid?
 
@@ -600,13 +631,13 @@ Before the formal demo, check the following:
 1. Log in with a HoS account and confirm `/school-head` is accessible.
 2. Assign a HoD in Permission Assignment.
 3. Log in with the HoD account and confirm `/role` is accessible.
-4. Enter both **Review Department Workloads** and **Review My Workload**.
+4. Enter both **Workload Approval Platform** and **Workload Submission Platform**.
 5. Assign an Admin/Ops user from HoS.
 6. Log in with the Ops account and confirm `/school-operations` is accessible.
 7. Ops downloads the workload template.
 8. Ops imports a workload Excel file and checks the valid/invalid summary.
 9. Ops enters valid records into the pending list.
-10. Ops distributes workloads.
+10. Ops distributes workloads to Academic users and HoD users when applicable.
 11. Academic views and confirms workload.
 12. Academic submits a request.
 13. HoD reviews a normal Academic request.
@@ -624,7 +655,7 @@ The system records key operations, including:
 - Workload import.
 - Workload re-import.
 - Workload distribution.
-- Academic confirmation.
+- Personal workload confirmation by Academic or HoD users.
 - Academic or HoD request submission.
 - HoD or HoS approval decisions.
 - Staff profile updates.
@@ -653,14 +684,14 @@ Users should:
 
 | Term | Description |
 | --- | --- |
-| Academic | Academic staff member who views and confirms personal workload |
-| HoD | Head of Department, responsible for department-level review |
+| Academic | Academic staff member who uses the workload submission platform to view, confirm, or submit personal workload requests to HoD |
+| HoD | Head of Department, responsible for department-level approval and also able to use the same workload submission platform for personal workload requests to HoS |
 | Ops | School Operations, responsible for import, distribution, staff data, and export |
 | Admin | Historical UI/backend name used for Ops in parts of the system |
 | HoS | Head of School, responsible for school-level review and permission assignment |
 | Workload Report | One staff member's workload record for a semester |
 | Workload Breakdown | Teaching, HDR, Service, Assigned Roles, and Research (residual) details |
-| Confirmation | Academic confirmation of personal workload |
+| Confirmation | Academic or HoD confirmation of personal workload |
 | Approval | HoD or HoS decision on a submitted request |
 | Re-import | Importing a corrected Excel workload file again |
 | Superseded | An old record version replaced by a newer version |
