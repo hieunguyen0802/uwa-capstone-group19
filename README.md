@@ -59,7 +59,7 @@ Coordinator.
 | Layer | Technology |
 | --- | --- |
 | Backend | Python 3.11, Django 5.2, Django REST Framework 3.15 |
-| Auth | JWT via djangorestframework-simplejwt, password login, email OTP |
+| Auth | Email OTP login with JWT tokens via djangorestframework-simplejwt |
 | Database | PostgreSQL 15 |
 | Frontend | React 19, TypeScript, React Router 6, Recharts, Node 18 |
 | Excel | openpyxl, SheetJS, ExcelJS |
@@ -83,7 +83,7 @@ Frontend route map:
 
 | Route | Purpose |
 | --- | --- |
-| `/login` | Password or OTP login. |
+| `/login` | Email OTP login. |
 | `/role` | HoD role-choice page. |
 | `/workload-platform` | Academic personal workload dashboard. |
 | `/department-head` | HoD department review dashboard. |
@@ -139,8 +139,8 @@ Open `http://localhost:3000` and log in with one of the seed accounts below.
 
 ## Seed accounts
 
-`seed_smoke` creates four canonical users, all with the same password
-`SmokePass123!`, all in the CSSE department.
+`seed_smoke` creates four canonical users in the CSSE department. Use each
+account's email address to request an OTP during local testing.
 
 | Username | Role | Email |
 | --- | --- | --- |
@@ -149,16 +149,14 @@ Open `http://localhost:3000` and log in with one of the seed accounts below.
 | `ops1` | School Operations | `daniela@uwa.test` |
 | `hos1` | Head of School | `harold@uwa.test` |
 
-Re-running `seed_smoke` is idempotent. It resets the passwords back to
-`SmokePass123!` but does not duplicate data.
+Re-running `seed_smoke` is idempotent and does not duplicate data.
 
-Two login flows are available:
+The supported user-facing login flow is OTP login:
 
-- **Password login:** `POST /api/login/` with email or staff ID plus password.
-  It is rate-limited to 5 attempts per minute per IP.
-- **OTP login:** `POST /api/login/request-otp/` followed by
-  `POST /api/login/verify-otp/`. In local development, OTP messages are printed
-  in `docker compose logs backend` unless SMTP is configured in `.env`.
+- Request a code with `POST /api/login/request-otp/`.
+- Verify the code with `POST /api/login/verify-otp/`.
+- In local development, OTP messages are printed in `docker compose logs backend`
+  unless SMTP is configured in `.env`.
 
 ---
 
@@ -258,8 +256,7 @@ Security guardrails are included in the backend suite. They verify that:
 - Unauthenticated protected requests return `401`.
 - Wrong-role protected requests return `403`.
 - Inactive staff tokens cannot access protected endpoints.
-- Password login, OTP request, OTP verification, and import endpoints are
-  rate-limited.
+- OTP request, OTP verification, and import endpoints are rate-limited.
 - Oversized staff/workload imports and malformed payloads are rejected before
   persistence.
 - Production-facing cookie and frame settings are explicit.
@@ -276,15 +273,13 @@ All protected endpoints require:
 Authorization: Bearer <access_token>
 ```
 
-The access token is returned by `POST /api/login/` or
-`POST /api/login/verify-otp/`. The full source of truth for route registration
-is `backend/api/urls.py`.
+The access token is returned by `POST /api/login/verify-otp/`. The full source
+of truth for route registration is `backend/api/urls.py`.
 
 ### Authentication and profile
 
 | Method | Endpoint | Auth | Purpose |
 | --- | --- | --- | --- |
-| POST | `/api/login/` | Public | Password login using email or staff ID. |
 | POST | `/api/login/request-otp/` | Public | Request a 6-digit OTP. |
 | POST | `/api/login/verify-otp/` | Public | Verify OTP and return JWT tokens. |
 | GET | `/api/auth/me/` | JWT | Current user profile and permissions. |
