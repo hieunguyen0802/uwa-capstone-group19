@@ -39,6 +39,7 @@ postman/
 *.md
 !docs/
 !docs/*.md
+!docs/**/*.md
 *.pdf
 *.xlsx
 *.xlsm
