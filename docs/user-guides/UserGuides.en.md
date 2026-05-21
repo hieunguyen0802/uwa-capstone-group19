@@ -318,7 +318,10 @@ The template includes Excel validations such as:
 
 - Staff Name cannot be blank.
 - Staff Number must be exactly 8 digits.
-- When HoD Review is Yes, Notes must be filled in.
+
+The backend importer remains the authoritative source for accepted workload
+columns and import rules:
+[`backend/api/services/importer_service.py`](../../backend/api/services/importer_service.py).
 
 ### 7.3 Import Workload
 
@@ -334,12 +337,11 @@ The system checks:
 
 - Whether Staff ID exists and the staff member is active.
 - Duplicate teaching unit entries.
-- Whether Teaching WL Pts equals the teaching component columns O, Q, S, U, and W.
+- Whether the total teaching workload points match the sum of the teaching component workload-point fields.
 - Conflicting Assigned Roles with the same role name but different hours.
 - HDR field conflicts.
 - Service points conflicts.
 - Whether Target Band matches the calculated teaching/research ratio.
-- Whether Notes is filled in when HoD Review is Yes.
 
 ### 7.4 Distribute Workload
 
@@ -555,24 +557,15 @@ Academic departments include:
 
 ### 10.3 Key Workload Template Columns
 
-| Column | Meaning |
-| --- | --- |
-| B | Staff Name |
-| C | Staff Number |
-| D | New Staff |
-| E | Notes |
-| F | HoD Review |
-| G | FTE |
-| I | Target Band |
-| J | Target Teaching % |
-| K | Teaching Unit |
-| X | Total Teaching WL Pts |
-| Y-AA | HDR student/proportion fields |
-| AC-AD | HDR hours/points |
-| AE | Service points |
-| AF onwards | Assigned Roles points |
+Do not delete, rename, or merge key columns in the workload template. The
+authoritative column layout is maintained in
+[`backend/api/services/importer_service.py`](../../backend/api/services/importer_service.py),
+because the backend importer is the source of truth for which fields are read,
+ignored, recalculated, or validated.
 
-Do not delete, rename, or merge key columns. Before import, check Staff ID, year, semester, department, HoD Review, and Notes.
+Before import, check that the workbook has the required staff identifiers,
+academic year, semester, department, role, FTE, target band, teaching workload,
+HDR, service, and assigned-role information.
 
 ## 11. Frequently Asked Questions
 
@@ -580,27 +573,23 @@ Do not delete, rename, or merge key columns. Before import, check Staff ID, year
 
 Confirm whether HoS has assigned the required permission in Permission Assignment. If the permission was just assigned, log out and log in again.
 
-### 11.2 Why is the Academic route not `/academic`?
-
-The current frontend route for Academic Dashboard is `/workload-platform`. Older documents or API notes may still mention `/academic` as a historical name.
-
-### 11.3 Can a HoD approve their own workload?
+### 11.2 Can a HoD approve their own workload?
 
 No. A HoD's own workload should be submitted from `/role` through **Review My Workload** and then reviewed by HoS.
 
-### 11.4 Why are some imported records invalid?
+### 11.3 Why are some imported records invalid?
 
-Common causes include missing Staff ID, inactive staff, duplicate teaching units, teaching point totals that do not match component columns, Assigned Roles/HDR/Service conflicts, HoD Review set to Yes with empty Notes, and Target Band mismatches.
+Common causes include missing Staff ID, inactive staff, duplicate teaching units, teaching point totals that do not match component fields, Assigned Roles/HDR/Service conflicts, and Target Band mismatches.
 
-### 11.5 What should I do after Rejected?
+### 11.4 What should I do after Rejected?
 
 Read the review note. If the data is wrong, Ops should correct the Excel file and re-import. If the explanation is insufficient, update the reason and resubmit. The exact action depends on the review note.
 
-### 11.6 Can I still operate on Superseded records?
+### 11.5 Can I still operate on Superseded records?
 
 Superseded records are old versions. They are usually only for history and audit review, not for further approval or confirmation. Use the current valid version instead.
 
-### 11.7 Why does the exported Excel have no data?
+### 11.6 Why does the exported Excel have no data?
 
 Check whether the filters are too narrow, such as Year, Semester, Department, or Status. Clear some filters and export again if needed.
 
